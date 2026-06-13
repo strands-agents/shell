@@ -15,7 +15,7 @@ use crate::vfs::{self, LASH_GID, LASH_UID, ROOT_GID, ROOT_UID, Vfs};
 /// re-armed on every MCP `tools/call`). It carries caps from two different
 /// subsystems — process-level (`max_depth`, `max_output`, `max_fds`,
 /// `max_bg_jobs`, `max_pipeline`, `max_input`, `timeout`) and VFS-level
-/// (`max_file_size`, `max_inodes`) — and [`ShellBuilder::config_file`]
+/// (`max_file_size`, `max_inodes`) — and [`crate::shell::ShellBuilder::config_file`]
 /// routes each field to where it belongs. Keeping them together here matches
 /// how users think about "limits" without conflating the two runtime concepts.
 ///

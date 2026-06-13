@@ -24,7 +24,7 @@ test('builder setter returns the builder so calls can chain', () => {
   assert.ok(same, 'timeout() returned undefined — chaining is broken')
 })
 
-test('the exact pattern from docs/js-bindings.md works', async () => {
+test('the documented builder pattern works', async () => {
   const shell = await native.Shell.builder().timeout(20.0).build()
   const out = await shell.run('pwd')
   assert.equal(out.status, 0)

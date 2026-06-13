@@ -62,14 +62,17 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - name: Create virtualenv
+        run: python -m venv .venv
+
       - name: Install build deps
-        run: pip install maturin pytest
+        run: .venv/bin/pip install maturin pytest
 
       - name: Build and install wheel
-        run: maturin develop --release
+        run: .venv/bin/maturin develop --release
 
       - name: pytest
-        run: pytest tests/python -v
+        run: .venv/bin/pytest tests/python -v
 
   audit:
     name: Security audit
@@ -101,7 +104,11 @@ jobs:
           node-version: "20"
 
       - name: npm audit (production)
-        run: npm audit --omit=dev
+        # package-lock.json is gitignored, so generate an ephemeral lockfile
+        # for the audit (npm audit requires one).
+        run: |
+          npm install --package-lock-only
+          npm audit --omit=dev
 
   node:
     name: Node.js (${{ matrix.os }}, Node ${{ matrix.node }})
@@ -128,7 +135,8 @@ jobs:
           node-version: ${{ matrix.node }}
 
       - name: npm install
-        run: npm ci || npm install
+        # package-lock.json is gitignored, so `npm ci` can't run; use install.
+        run: npm install
 
       - name: napi build
         run: npm run build:debug
