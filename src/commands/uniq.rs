@@ -86,10 +86,13 @@ async fn cmd_uniq(os: &dyn Kernel, args: &[String]) -> CommandResult {
             }
             s = remaining;
         }
-        let s = if skip_chars > 0 && skip_chars < s.len() {
-            &s[skip_chars..]
-        } else if skip_chars > 0 {
-            ""
+        // `-s N` skips the first N *characters*; index by char boundary so a
+        // multibyte char (e.g. a leading `é`) can't panic a byte slice.
+        let s = if skip_chars > 0 {
+            match s.char_indices().nth(skip_chars) {
+                Some((byte_idx, _)) => &s[byte_idx..],
+                None => "",
+            }
         } else {
             s
         };

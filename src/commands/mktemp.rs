@@ -56,13 +56,15 @@ async fn cmd_mktemp(os: &dyn Kernel, args: &[String]) -> CommandResult {
         )
     };
 
-    let x_count = tmpl_name
-        .chars()
-        .rev()
-        .take_while(|&c| c == 'X')
-        .count()
-        .max(6);
-    let prefix = &tmpl_name[..tmpl_name.len() - x_count];
+    // Count trailing 'X's to replace with random chars. If the template has
+    // none, append a 6-X suffix (GNU behavior); never clamp the count past the
+    // template length, which would underflow the slice below (e.g. `mktemp X`).
+    let trailing_x = tmpl_name.chars().rev().take_while(|&c| c == 'X').count();
+    let (prefix, x_count) = if trailing_x == 0 {
+        (tmpl_name, 6)
+    } else {
+        (&tmpl_name[..tmpl_name.len() - trailing_x], trailing_x)
+    };
     let name = format!("{}{}", prefix, random_suffix(os, x_count).await);
     let path = format!("{}/{}", base_dir, name);
 

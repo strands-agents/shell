@@ -1294,6 +1294,11 @@ expect!(arith_hex, "echo $((0xFF))", "255");
 expect!(arith_octal, "echo $((010))", "8");
 expect!(arith_ternary_false, "echo $((0 ? 10 : 20))", "20");
 
+// Short-circuit operators and the empty expression match bash.
+expect!(arith_logand_shortcircuit, "echo $((0 && 5))", "0");
+expect!(arith_logor_shortcircuit, "echo $((5 || 0))", "1");
+expect!(arith_empty_is_zero, "echo $(())", "0");
+
 // ── Arithmetic: nested and complex ──────────────────────────────────
 
 expect!(arith_nested_arith, "echo $(( $((2+3)) * 2 ))", "10");
@@ -7555,5 +7560,43 @@ fn malformed_input_no_panic() {
             let out = shell.run(cmd).await;
             assert_ne!(out.status, 0, "{cmd} should return error");
         }
+    }));
+}
+
+// Regression: ordinary input used to panic the shell (UTF-8 byte slicing,
+// usize underflow, empty-arg indexing). These must run without aborting —
+// a panic here crashes the whole host process across the FFI boundary.
+#[test]
+fn ordinary_input_does_not_panic() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        // Each of these previously panicked; we only assert the shell survives
+        // and returns (the exact output/status is covered by other tests).
+        for cmd in [
+            "VAR=é; echo ${VAR%?}", // H1: multibyte suffix trim
+            "VAR=é; echo ${VAR#?}", // H1: multibyte prefix trim
+            "exit $UNSET",          // H2: empty-arg index
+            "mktemp X",             // H10: short-template underflow
+            "printf '%.1s' é",      // H11: multibyte precision slice
+        ] {
+            // The future completing at all proves no panic/abort occurred.
+            let _ = shell.run(cmd).await;
+        }
+    }));
+}
+
+// Regression: `uniq -s N` byte-sliced and panicked when N landed inside a
+// multibyte char. It must skip N characters and survive.
+#[test]
+fn uniq_skip_chars_multibyte_no_panic() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell.run("printf 'éx\\néy\\n' > /tmp/uniq_mb.txt").await;
+        let out = shell.run("uniq -s 1 /tmp/uniq_mb.txt").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        // Skipping the leading `é` leaves `x`/`y`, which differ → both kept.
+        assert_eq!(out.stdout, "éx\néy\n");
     }));
 }

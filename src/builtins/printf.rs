@@ -114,22 +114,27 @@ fn format_string(fmt: &str, params: &[String]) -> String {
                                         None => (s, None),
                                     };
                                     let width: usize = width_s.parse().unwrap_or(0);
+                                    // Precision truncates to N *characters*; take
+                                    // by char so a byte slice can't split a
+                                    // multibyte char (e.g. `printf '%.1s' é`).
+                                    let truncated;
                                     let p = match prec_s {
-                                        Some(p) => {
-                                            &param[..p
-                                                .parse::<usize>()
-                                                .unwrap_or(param.len())
-                                                .min(param.len())]
+                                        Some(prec) => {
+                                            let n = prec.parse::<usize>().unwrap_or(param.len());
+                                            truncated = param.chars().take(n).collect::<String>();
+                                            truncated.as_str()
                                         }
                                         None => param,
                                     };
+                                    // Pad by display char count, not byte length.
+                                    let p_chars = p.chars().count();
                                     if left {
                                         out.push_str(p);
-                                        for _ in p.len()..width {
+                                        for _ in p_chars..width {
                                             out.push(' ');
                                         }
                                     } else {
-                                        for _ in p.len()..width {
+                                        for _ in p_chars..width {
                                             out.push(' ');
                                         }
                                         out.push_str(p);

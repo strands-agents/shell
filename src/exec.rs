@@ -1334,9 +1334,11 @@ fn trim_pattern(s: &str, pat: &str, op: &str) -> String {
     let s_bytes = s.as_bytes();
     match op {
         "%" => {
-            // Remove shortest suffix matching pat
+            // Remove shortest suffix matching pat. `glob_match` works on bytes,
+            // so a match offset can land mid-codepoint; only slice on a char
+            // boundary to avoid panicking on multibyte input (e.g. `${VAR%?}`).
             for i in (0..=s_bytes.len()).rev() {
-                if glob_match(pat_bytes, &s_bytes[i..]) {
+                if s.is_char_boundary(i) && glob_match(pat_bytes, &s_bytes[i..]) {
                     return s[..i].to_string();
                 }
             }
@@ -1345,7 +1347,7 @@ fn trim_pattern(s: &str, pat: &str, op: &str) -> String {
         "%%" => {
             // Remove longest suffix matching pat
             for i in 0..=s_bytes.len() {
-                if glob_match(pat_bytes, &s_bytes[i..]) {
+                if s.is_char_boundary(i) && glob_match(pat_bytes, &s_bytes[i..]) {
                     return s[..i].to_string();
                 }
             }
@@ -1354,7 +1356,7 @@ fn trim_pattern(s: &str, pat: &str, op: &str) -> String {
         "#" => {
             // Remove shortest prefix matching pat
             for i in 0..=s_bytes.len() {
-                if glob_match(pat_bytes, &s_bytes[..i]) {
+                if s.is_char_boundary(i) && glob_match(pat_bytes, &s_bytes[..i]) {
                     return s[i..].to_string();
                 }
             }
@@ -1363,7 +1365,7 @@ fn trim_pattern(s: &str, pat: &str, op: &str) -> String {
         "##" => {
             // Remove longest prefix matching pat
             for i in (0..=s_bytes.len()).rev() {
-                if glob_match(pat_bytes, &s_bytes[..i]) {
+                if s.is_char_boundary(i) && glob_match(pat_bytes, &s_bytes[..i]) {
                     return s[i..].to_string();
                 }
             }
@@ -2234,7 +2236,9 @@ async fn execute_pipeline_checked(
                 "exit" => {
                     let n = if pipeline[0].args.len() > 1 {
                         let args = expand_words(os.clone(), proc, &pipeline[0].args[1..]).await;
-                        args[0].parse().unwrap_or(1)
+                        // The arg can expand to nothing (e.g. `exit $UNSET`),
+                        // so index defensively rather than `args[0]`.
+                        args.first().and_then(|s| s.parse().ok()).unwrap_or(1)
                     } else {
                         proc.last_exit
                     };
@@ -2243,7 +2247,7 @@ async fn execute_pipeline_checked(
                 "return" => {
                     let n = if pipeline[0].args.len() > 1 {
                         let args = expand_words(os.clone(), proc, &pipeline[0].args[1..]).await;
-                        args[0].parse().unwrap_or(1)
+                        args.first().and_then(|s| s.parse().ok()).unwrap_or(1)
                     } else {
                         proc.last_exit
                     };
@@ -2394,7 +2398,11 @@ async fn get_numeric_arg(
 ) -> i32 {
     if pipeline[0].args.len() > 1 {
         let args = expand_words(os, proc, &pipeline[0].args[1..]).await;
-        args[0].parse().unwrap_or(1).max(1)
+        // The count can expand to nothing (e.g. `break $UNSET`); default to 1.
+        args.first()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1)
+            .max(1)
     } else {
         1
     }
