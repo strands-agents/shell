@@ -1,0 +1,42 @@
+{
+  "name": "@strands-agents/shell",
+  "version": "0.1.0",
+  "description": "Strands Shell — a virtual shell sandbox for AI agents (Node.js bindings)",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/strands-agents/shell.git"
+  },
+  "homepage": "https://github.com/strands-agents/shell",
+  "bugs": "https://github.com/strands-agents/shell/issues",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "native.js",
+    "native.d.ts",
+    "*.node"
+  ],
+  "napi": {
+    "binaryName": "strands-shell",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "scripts": {
+    "host-triple": "node -p \"require('child_process').execSync('rustc -vV').toString().match(/host: (.+)/)[1]\"",
+    "build": "napi build --platform --release --features node --cargo-flags=--lib --js native.js --dts native.d.ts --target $(npm run --silent host-triple)",
+    "build:debug": "napi build --platform --features node --cargo-flags=--lib --js native.js --dts native.d.ts --target $(npm run --silent host-triple)",
+    "test": "node --test 'tests/js/*.mjs'"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4"
+  }
+}

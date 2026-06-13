@@ -1,0 +1,111 @@
+name: Bug Report
+description: Report a bug in Strands Shell
+title: "[BUG] "
+labels: ["triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report for Strands Shell!
+  - type: checkboxes
+    id: "checks"
+    attributes:
+      label: "Checks"
+      options:
+        - label: "I have updated to the latest minor and patch version of Strands Shell"
+          required: true
+        - label: "I have checked the documentation and this is not expected behavior"
+          required: true
+        - label: "I have searched [./issues](./issues?q=) and there are no duplicates of my issue"
+          required: true
+  - type: dropdown
+    id: binding
+    attributes:
+      label: Binding
+      description: Which Strands Shell binding are you using?
+      options:
+        - Python
+        - Node.js
+        - Rust
+        - WASM
+    validations:
+      required: true
+  - type: input
+    id: shell-version
+    attributes:
+      label: Strands Shell Version
+      description: Which version of Strands Shell are you using?
+      placeholder: e.g., 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: runtime-version
+    attributes:
+      label: Language Runtime Version
+      description: Which version of Python, Node.js, Rust, or your WASM runtime are you using?
+      placeholder: e.g., Python 3.12.4, Node.js 20.17.0, Rust 1.79.0, or wasmtime 23.0.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      description: Which operating system and architecture are you using?
+      placeholder: e.g., macOS 14.5 (arm64) or Ubuntu 22.04 (x86_64)
+    validations:
+      required: true
+  - type: dropdown
+    id: installation-method
+    attributes:
+      label: Installation Method
+      description: How did you install Strands Shell?
+      options:
+        - pip (strands-shell)
+        - npm (@strands-agents/shell)
+        - cargo (strands-shell)
+        - built from source
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Detailed steps to reproduce the behavior
+      placeholder: |
+        1. Code Snippet (Minimal reproducible example)
+        2. Install Strands Shell using...
+        3. Run the command...
+        4. See error...
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected Behavior
+      description: A clear description of what you expected to happen
+    validations:
+      required: true
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual Behavior
+      description: What actually happened
+    validations:
+      required: true
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Any other relevant information, logs, screenshots, etc.
+  - type: textarea
+    id: possible-solution
+    attributes:
+      label: Possible Solution
+      description: Optional - If you have suggestions on how to fix the bug
+  - type: input
+    id: related-issues
+    attributes:
+      label: Related Issues
+      description: Optional - Link to related issues if applicable

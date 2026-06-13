@@ -1,0 +1,44 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 100
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "ci(rust)"
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 100
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "ci(python)"
+    groups:
+      dev-dependencies:
+        patterns:
+          - "pytest"
+          - "maturin"
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 100
+    labels:
+      - "dependencies"
+      - "node"
+    commit-message:
+      prefix: "ci(node)"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 100
+    commit-message:
+      prefix: ci

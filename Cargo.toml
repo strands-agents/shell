@@ -1,0 +1,71 @@
+[package]
+name = "strands-shell"
+version = "0.1.0"
+edition = "2024"
+description = "A virtual shell sandbox for AI agents"
+license = "Apache-2.0"
+repository = "https://github.com/strands-agents/shell"
+homepage = "https://github.com/strands-agents/shell"
+
+[lib]
+name = "strands_shell"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "strands-shell"
+path = "src/main.rs"
+
+[[bin]]
+name = "strands-shell-wasm"
+path = "src/wasm_main.rs"
+required-features = ["wasm"]
+
+[features]
+python = ["pyo3"]
+node = ["napi", "napi-derive", "napi-build"]
+wasm = []
+
+# ----- Cross-platform dependencies (pure Rust, WASM-safe) -----
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+lexopt = "0.3"
+strands-shell-macros = { path = "strands-shell-macros", version = "0.1.0" }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+url = "2"
+jaq-core = "2"
+jaq-std = { version = "2", features = ["format", "log", "math", "regex", "time", "std"] }
+jaq-json = { version = "1", features = ["serde_json"] }
+
+# ----- Native-only dependencies -----
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = "0.3"
+napi = { version = "2", features = ["napi9", "tokio_rt"], optional = true }
+napi-derive = { version = "2", optional = true }
+pyo3 = { version = "0.29", features = ["extension-module"], optional = true }
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+rustyline = "17.0"
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "io-std", "fs", "time", "process"] }
+
+# ----- WASM dependencies -----
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util"] }
+wasi = "0.14"
+
+# ----- Cross-platform (native + WASM) -----
+[dependencies.mlua]
+version = "0.11.6"
+features = ["lua54", "async", "vendored"]
+
+[workspace]
+members = [".", "strands-shell-macros"]
+
+[dev-dependencies]
+axum = "0.8"
+
+[build-dependencies]
+napi-build = { version = "2", optional = true }

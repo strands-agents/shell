@@ -1,0 +1,288 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag to release (e.g. v0.1.0). Leave empty when triggered by push."
+        required: false
+
+permissions:
+  contents: write
+  id-token: write  # PyPI Trusted Publishing
+
+jobs:
+  # ── Guard: tag must match the version declared in package manifests ──────
+  verify-version:
+    name: Verify tag matches manifest versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Compare tag against Cargo.toml, pyproject.toml, package.json
+        run: |
+          set -euo pipefail
+          ref="${{ inputs.ref || github.ref_name }}"
+          # Strip refs/tags/ prefix if present, then leading "v".
+          tag="${ref#refs/tags/}"
+          tag="${tag#v}"
+
+          cargo_v=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          pyproject_v=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          package_v=$(node -p "require('./package.json').version")
+
+          echo "tag=$tag"
+          echo "Cargo.toml=$cargo_v"
+          echo "pyproject.toml=$pyproject_v"
+          echo "package.json=$package_v"
+
+          fail=0
+          for v in "$cargo_v" "$pyproject_v" "$package_v"; do
+            if [ "$v" != "$tag" ]; then
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::Tag $tag does not match all manifest versions. Bump versions and re-tag."
+            exit 1
+          fi
+
+  # ── Build native wheels for PyPI (one job per target) ────────────────────
+  python-wheels:
+    needs: verify-version
+    name: Python wheel (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: "2_28"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --strip
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          sccache: "true"
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel-${{ matrix.target }}
+          path: dist/*.whl
+
+  python-sdist:
+    needs: verify-version
+    name: Python sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-sdist
+          path: dist/*.tar.gz
+
+  python-publish:
+    name: Publish to PyPI
+    needs: [python-wheels, python-sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/strands-shell
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ── Build native node addons for npm (one job per target) ────────────────
+  node-builds:
+    needs: verify-version
+    name: Node addon (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compile deps (linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: npm install
+        run: npm install
+
+      - name: napi build
+        run: npx napi build --platform --release --features node --cargo-flags=--lib --target ${{ matrix.target }}
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-addon-${{ matrix.target }}
+          path: "*.node"
+
+  node-publish:
+    name: Publish to npm
+    needs: node-builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: npm install
+        run: npm install
+
+      - name: Download all native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: node-addon-*
+          merge-multiple: true
+
+      - name: Move artifacts into place
+        run: mv artifacts/*.node ./
+
+      - name: napi prepublish
+        run: npx napi prepublish -t npm --skip-gh-release
+
+      - name: npm publish
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ── Publish Rust crate to crates.io ──────────────────────────────────────
+  cargo-publish:
+    needs: verify-version
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish strands-shell-macros
+        run: cargo publish -p strands-shell-macros --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io to index macros crate
+        run: sleep 30
+
+      - name: Publish strands-shell
+        run: cargo publish -p strands-shell --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # ── Cross-platform pre-built CLI binaries on the GitHub Release ──────────
+  cli-binaries:
+    needs: verify-version
+    name: CLI binary (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compile deps (linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' > .cargo/config.toml
+
+      - name: cargo build --release
+        run: cargo build --release --bin strands-shell --target ${{ matrix.target }}
+
+      - name: Package binary
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf strands-shell-${{ matrix.target }}.tar.gz strands-shell
+          shasum -a 256 strands-shell-${{ matrix.target }}.tar.gz > strands-shell-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/${{ matrix.target }}/release/strands-shell-${{ matrix.target }}.tar.gz
+            target/${{ matrix.target }}/release/strands-shell-${{ matrix.target }}.tar.gz.sha256

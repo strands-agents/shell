@@ -1,0 +1,19 @@
+/target
+/build
+*~
+.venv*/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+node_modules/
+package-lock.json
+# Editor / AI-agent local config
+.kiro/
+.claude/
+CLAUDE.md
+*.node
+*.so
+# index.js / index.d.ts are now hand-authored wrappers (tracked source).
+# The napi-generated loader is emitted to native.js / native.d.ts (artifacts).
+/native.js
+/native.d.ts

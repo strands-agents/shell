@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "strands-shell"
+version = "0.1.0"
+description = "A virtual shell for AI agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[project.scripts]
+# Console-script launcher: makes `strands-shell` (including `strands-shell --mcp`,
+# the stdio MCP server) available on PATH after `pip install` / `uvx`. It calls
+# the `cli_main` function in the bundled `_native` extension module, so a single
+# wheel ships both the Python API and the CLI without duplicating the binary.
+strands-shell = "strands_shell._native:cli_main"
+
+[project.urls]
+Homepage = "https://github.com/strands-agents/shell"
+Repository = "https://github.com/strands-agents/shell"
+Issues = "https://github.com/strands-agents/shell/issues"
+
+[tool.maturin]
+features = ["python"]
+module-name = "strands_shell._native"
+python-source = "python"
