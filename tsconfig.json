@@ -1,0 +1,14 @@
+{
+  "comment": "Type-checks the public .d.ts surface against tests/ts/. Never emits; `npm run typecheck` runs `tsc --noEmit`.",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2020",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2020"],
+    "skipLibCheck": false,
+    "types": []
+  },
+  "include": ["index.d.ts", "native.d.ts", "tests/ts/**/*.ts"]
+}

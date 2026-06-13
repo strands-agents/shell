@@ -141,5 +141,8 @@ jobs:
       - name: napi build
         run: npm run build:debug
 
+      - name: tsc typecheck (public .d.ts surface)
+        run: npm run typecheck
+
       - name: npm test
         run: npm test

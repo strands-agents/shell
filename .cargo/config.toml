@@ -1,0 +1,4 @@
+# `cargo xtask <task>` runs the repo automation crate in ./xtask.
+# See `cargo xtask help` for available tasks.
+[alias]
+xtask = "run --package xtask --"

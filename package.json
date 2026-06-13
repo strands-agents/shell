@@ -34,9 +34,11 @@
     "host-triple": "node -p \"require('child_process').execSync('rustc -vV').toString().match(/host: (.+)/)[1]\"",
     "build": "napi build --platform --release --features node --cargo-flags=--lib --js native.js --dts native.d.ts --target $(npm run --silent host-triple)",
     "build:debug": "napi build --platform --features node --cargo-flags=--lib --js native.js --dts native.d.ts --target $(npm run --silent host-triple)",
-    "test": "node --test tests/js/*.mjs"
+    "test": "node --test tests/js/*.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.4"
+    "@napi-rs/cli": "^2.18.4",
+    "typescript": "^5.6.0"
   }
 }

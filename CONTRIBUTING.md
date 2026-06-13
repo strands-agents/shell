@@ -67,6 +67,22 @@ Strands Shell is a Rust core that compiles to several targets: a native binary, 
 - **Node.js** 18+ (only for the Node.js bindings).
 - **wasi-sdk** 32+ (only for the WASM target).
 
+### One command to check everything
+
+To run the full CI gate locally before opening a PR — formatting, clippy, the
+Rust test suite, docs, and (when their toolchains are set up) the Python and
+Node binding tests — use:
+
+```bash
+cargo xtask check              # everything; mirrors .github/workflows/ci.yml
+cargo xtask check --rust-only  # skip the Python/Node binding checks
+```
+
+A green `cargo xtask check` locally means a green PR. The Python/Node steps are
+skipped with a note if their setup isn't present, so the command works even if
+you only build the Rust core. The individual commands are below if you'd rather
+run them piecemeal.
+
 ### Rust (shell core)
 
 The crate is the source of truth for all bindings. From the repository root:
@@ -111,7 +127,12 @@ npm install            # install dependencies
 npm run build          # release build of the native addon
 npm run build:debug    # faster debug build for local development
 npm test               # run the Node.js test suite (tests/js/*.mjs)
+npm run typecheck      # tsc --noEmit over the public .d.ts (tests/ts/)
 ```
+
+The shipped TypeScript declarations (`index.d.ts`, `native.d.ts`) are
+hand-authored; `npm run typecheck` type-checks them against a usage test in
+`tests/ts/` so they can't silently drift from the JS implementation.
 
 ### WASM module
 

@@ -62,7 +62,7 @@ version = "0.11.6"
 features = ["lua54", "async", "vendored"]
 
 [workspace]
-members = [".", "strands-shell-macros"]
+members = [".", "strands-shell-macros", "xtask"]
 
 [dev-dependencies]
 axum = "0.8"
