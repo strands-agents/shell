@@ -173,7 +173,9 @@ jobs:
         run: npm install
 
       - name: napi build
-        run: npx napi build --platform --release --features node --cargo-flags=--lib --target ${{ matrix.target }}
+        # --js/--dts must match package.json's build script: write the generated
+        # loader to native.* and leave the hand-authored index.* wrapper intact.
+        run: npx napi build --platform --release --features node --cargo-flags=--lib --js native.js --dts native.d.ts --target ${{ matrix.target }}
 
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
