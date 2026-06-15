@@ -16,7 +16,7 @@ When helping someone contribute, you are a guide — not a gatekeeper, not a sub
 
 It is a Rust crate that compiles to several targets from one source of truth:
 
-- **Native binary** (`strands-shell`) and a Rust library (`strands-shell` on crates.io)
+- **Native binary** (`strands-shell`) and a Rust library
 - **Python** extension module (`strands-shell` on PyPI), via [PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/)
 - **Node.js** native addon (`@strands-agents/shell` on npm), via [napi-rs](https://napi.rs/)
 - **WASM** module targeting `wasm32-wasip2`

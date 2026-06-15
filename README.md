@@ -114,68 +114,38 @@ shell.remove_file("/workspace/note.txt")
 ## Security Model
 
 Strands Shell is a strong **in-process mediation layer**, not a hardened
-sandbox. The Kernel boundary is real, but the shell runs in the host's
-address space; for workloads that require VM- or container-level isolation,
-run Strands Shell inside one. Treat the controls below as defense-in-depth.
+sandbox. The Kernel boundary is real — file access, networking, and all other
+effects are mediated by it — but the shell runs in the host's address space.
+For workloads that require VM- or container-level isolation, run Strands Shell
+inside one.
 
-**What we protect against (escapes from Kernel mediation):**
-
-- File access beyond explicitly bound paths
-- Arbitrary system calls — Strands Shell never calls `fork`/`exec` or makes
-  direct syscalls; all operations are mediated by the `Kernel` implementation
-- Local privilege escalation through the shell environment
-- SSRF and metadata-service access — `curl` and `http_request` block
-  RFC1918, link-local, loopback, and IMDS/ECS-task-role addresses at DNS
-  resolution time
-
-A bypass of any of these controls is treated as a security issue. Please
-report responsibly (see [Security](#security)).
-
-**Best-effort:** resource limits (timeouts, output caps, fd limits, inode
-limits, pipeline depth) catch runaway agents but won't withstand a
-determined adversary. Use OS-level isolation for hard CPU/memory bounds.
-
-**Not protected:** speculative side channels (Spectre, etc.), and
-multi-tenancy within a single process. Use separate processes or VMs for
-strong tenant isolation.
+In short: it confines an agent to explicitly bound paths, blocks SSRF and
+metadata-service access, and never calls `fork`/`exec` or makes direct
+syscalls — but resource limits are best-effort and a single process is not a
+multi-tenancy boundary. See [SECURITY.md](SECURITY.md) for the full threat
+model, what counts as a security issue, and how to report one.
 
 ## MCP Server
 
 Strands Shell ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/)
-server, exposing the shell to any MCP-compatible AI client as tools (`shell`,
-`read_file`, `write_file`, `list_dir`) over JSON-RPC on stdio.
-
-Installing the Python package puts a `strands-shell` launcher on your PATH, so
-the server runs with no separate download. Point your MCP client at it:
+server, exposing the shell to any MCP client as tools (`shell`, `read_file`,
+`write_file`, `list_dir`) over stdio. The Python package puts a `strands-shell`
+launcher on your PATH; point your MCP client at it:
 
 ```json
 {
   "mcpServers": {
     "strands-shell": {
       "command": "uvx",
-      "args": ["strands-shell", "--config", "/path/to/sandbox.toml", "--mcp"]
+      "args": ["strands-shell", "--mcp", "--config", "/path/to/sandbox.toml"]
     }
   }
 }
 ```
 
-`uvx` fetches and runs Strands Shell on demand — nothing to install first. If
-you'd rather install it into the active environment, `pip install strands-shell`
-and use `"command": "strands-shell", "args": ["--config", "/path/to/sandbox.toml", "--mcp"]`
-instead. The `--config` TOML declares the bind mounts, credentials, and limits
-the agent runs under (see [Configuration](#configuration)); drop it to serve a
-bare in-memory sandbox.
-
-You can also run it directly to try it out:
-
-```sh
-uvx strands-shell --mcp                          # bare in-memory sandbox
-uvx strands-shell --config sandbox.toml --mcp    # with mounts/credentials
-```
-
-MCP **client** servers configured under `[[mcp]]` in your TOML are also
-auto-exposed as Lua modules — `require("my_tools")` returns a table of the
-server's tools.
+The `--config` TOML declares the bind mounts, credentials, and limits the agent
+runs under (see [Configuration](#configuration)); drop it for a bare in-memory
+sandbox.
 
 ## Python
 
