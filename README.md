@@ -10,31 +10,61 @@
   </h1>
 
   <h2>
-    A virtual shell for AI agents that runs entirely in-process.
+    Give your agent a shell without giving it the keys to your machine.
   </h2>
 
   <div align="center">
-    <a href="https://python.org"><img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python"/></a>
-    <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/Node-18%2B-green?logo=nodedotjs"/></a>
+    <a href="https://pypi.org/project/strands-shell/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python"/></a>
+    <a href="https://www.npmjs.com/package/@strands-agents/shell"><img alt="Node" src="https://img.shields.io/badge/Node-18%2B-green?logo=nodedotjs"/></a>
+    <a href="https://crates.io/crates/strands-shell"><img alt="crates.io" src="https://img.shields.io/crates/v/strands-shell"/></a>
     <a href="#license"><img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue"/></a>
     <a href="https://discord.gg/strands"><img alt="Strands Discord" src="https://img.shields.io/badge/Discord-Strands-5865F2?logo=discord&logoColor=white"/></a>
   </div>
 
   <p>
     <a href="https://strandsagents.com/">Documentation</a>
+    ◆ <a href="#mcp-server">MCP Server</a>
     ◆ <a href="#python">Python</a>
     ◆ <a href="#nodejs">Node.js</a>
+    ◆ <a href="#rust">Rust</a>
   </p>
 </div>
 
-Strands Shell is a virtual shell that runs entirely inside a single userspace
-process. It supports Bourne-compatible syntax and provides the commands an AI
-agent needs, but never calls fork/exec or makes direct system calls. Every
-operation flows through a `Kernel` mediation boundary, giving you fine-grained
-control over what the agent can see and do — down to individual files, network
-domains, or credentials — without containers, microVMs, or firewalls.
+---
+
+Agents run shell commands in tight loops: Install deps, run tests, grep for errors, iterate. Those loops need speed and isolation. 
+
+Strands Shell is a Bourne-compatible shell that runs in-process. `grep`, `sed`, `jq`, `curl`, `find`, 50+ commands and it does this without fork, exec, syscalls, or cold starts. You declare what the agent can reach (files, URLs, credentials) and everything else doesn't exist to the agent.
+
+| | Docker | Cloud sandbox | Strands Shell |
+|---|---|---|---|
+| **Cold start** | ~200ms | ~1s (network) | <1ms |
+| **Isolation** | Container namespace | MicroVM | In-process VFS |
+| **Network** | iptables / sidecar | Platform policy | URL allowlist + SSRF guard |
+| **Secrets** | Env vars (agent can read them) | Platform-specific | Injected per-request, agent never sees them |
+| **Setup** | Docker daemon | API key + network | `pip install strands-shell` |
+| **Platforms** | Linux | Cloud-only | macOS, Linux, WASM |
 
 ## Quick Start
+
+### MCP (works with any agent framework)
+
+Drop this into your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "shell": {
+      "command": "uvx",
+      "args": ["strands-shell", "--mcp"]
+    }
+  }
+}
+```
+
+That's it and your agent gets `shell`, `read_file`, `write_file`, `list_dir`. All mediated through the Kernel.
+
+### Python
 
 ```bash
 pip install strands-shell
@@ -43,48 +73,84 @@ pip install strands-shell
 ```python
 import strands_shell
 
-shell = strands_shell.Shell(binds=[strands_shell.Bind("/path/to/project", "/workspace", mode="copy")])
+shell = strands_shell.Shell(
+    binds=[strands_shell.Bind("/my/project", "/workspace", mode="copy")],
+    credentials=[strands_shell.Cred("https://api.example.com/", env_var="API_TOKEN")],
+    allowed_urls=["https://api.example.com/"],
+)
+
 out = shell.run("grep -rn TODO /workspace")
 print(out.stdout)
 ```
 
-State persists across `run()` calls (env vars, working directory, functions);
-the filesystem is shared. Native bindings exist for [Python](#python) and
-[Node.js](#nodejs).
+### Node.js
+
+```bash
+npm install @strands-agents/shell
+```
+
+```javascript
+import { Shell } from '@strands-agents/shell'
+
+const shell = await Shell.create({
+  binds: [{ source: '/my/project', destination: '/workspace', mode: 'copy' }],
+})
+const out = await shell.run('grep -rn TODO /workspace')
+console.log(out.stdout)
+```
+
+## How It Works
+
+```mermaid
+block-beta
+    columns 1
+    block:agent["Your agent code (Strands, LangGraph, Pydantic AI, etc)"]
+    end
+    space
+    block:shell["Strands Shell"]
+        block:kernel["Kernel (mediation boundary)"]
+            columns 4
+            A["VFS: isolated filesystem"]
+            B["Network: SSRF guard + allowlist"]
+            C["Credentials: injected per-URL"]
+            D["Limits: timeout, output, fds"]
+        end
+        E["Shell engine: parser, 25 builtins, 33 commands, Lua 5.4"]
+    end
+
+    agent -- "MCP / Python / Node.js" --> shell
+```
+
+It's a Rust crate that compiles to native (macOS/Linux), Python via PyO3, Node.js via napi-rs, and WASM (wasi-p2). State persists across `run()` calls (env vars, working directory, functions). The filesystem is shared.
 
 ## Configuration
 
 ```python
 shell = strands_shell.Shell(
-    # Filesystem — copy-mode is an isolated snapshot, direct passes through
     binds=[
         strands_shell.Bind("/host/project", "/workspace", mode="copy"),
         strands_shell.Bind("/tmp/output", "/output", mode="direct"),
     ],
-    # HTTP credentials, injected by URL prefix at request time
-    credentials=[strands_shell.Cred("https://api.example.com/", env_var="API_TOKEN")],
-    # Behavioral settings
-    timeout=30.0,                       # per-command wall-clock seconds
+    credentials=[
+        strands_shell.Cred("https://api.example.com/", env_var="API_TOKEN"),
+    ],
+    allowed_urls=["https://api.example.com/", "https://pypi.org/"],
+    timeout=30.0,
     env={"PROJECT": "demo"},
-    # Resource limits (namespaced)
     limits=strands_shell.Limits(
-        max_output=1 << 20,             # 1 MB stdout cap
-        max_file_size=10 << 20,         # 10 MB per file
+        max_output=1 << 20,
+        max_file_size=10 << 20,
     ),
 )
 ```
 
-| `Bind` argument                       | Behavior                                          |
-|---------------------------------------|---------------------------------------------------|
-| `mode="copy"`                         | Copy files into the VFS at build time (snapshot)  |
-| `mode="direct"`                       | Pass reads/writes through to the host filesystem  |
-| `readonly=True`                       | Reject writes through the mount (either mode)     |
+### TOML
 
-Or load it all from TOML with `config_file=`:
+You can load all of this from a config file instead:
 
 ```toml
 [[bind]]
-mode = "direct"
+mode = "copy"
 source = "/host/project"
 destination = "/workspace"
 
@@ -100,9 +166,45 @@ command = "/path/to/mcp-server"
 args = ["--stdio"]
 ```
 
-## Filesystem Operations
+## MCP Server
 
-Read and write files directly without spawning a shell:
+The built-in [MCP](https://modelcontextprotocol.io/) server exposes the shell over JSON-RPC on stdio, working with anything that speaks MCP.
+
+```sh
+uvx strands-shell --mcp                          # bare in-memory sandbox
+uvx strands-shell --config sandbox.toml --mcp    # with mounts + credentials
+```
+
+If you declare `[[mcp]]` servers in your TOML config, they show up as Lua modules inside the shell. Call `require("my_tools")` and you get a table of the server's tools.
+
+## Security Model
+
+The Kernel mediates everything; it runs in the same process as your code, not in a VM. If your threat model is "untrusted tenant running arbitrary code," put Strands Shell inside a container too. For "my agent shouldn't access things I haven't explicitly allowed," the Kernel handles it.
+
+**Default-deny. You allowlist what the agent can reach:**
+
+- Files: only bound paths exist, everything else is hidden.
+- Network: `curl` blocks private ranges (RFC1918, link-local, loopback, IMDS) by default while letting public URLs pass through. Use `allowed_urls` to permit specific internal hosts.
+- Secrets: the Kernel injects credentials per-URL at request time, ensuring the agent never holds them. The Kernel never re-injects on redirects, even back to the same host.
+- Syscalls: there are none; no `fork`, no `exec` because the shell is pure userspace.
+
+If you bypass any of these, report it. See [SECURITY.md](SECURITY.md).
+
+**Limits (best-effort):** timeouts, output caps, fd limits, inode limits. These catch runaway agents but won't stop someone actively trying to break out. OS-level isolation for that.
+
+**Multi-tenant:** a Shell instance is single-owner. If you're serving multiple agents, create one Shell per session. Construction is cheap (no containers, no VMs, just an in-memory VFS), so spinning up per-request is the intended pattern.
+
+## Commands
+
+25 builtins, 33 commands, and a Bourne-compatible shell with pipes, loops, functions, and subshells.
+
+The commands agents use constantly: `grep`, `find`, `cat`, `head`, `tail`, `jq` for reading and searching. `sed`, `sort`, `tr`, `cut` for transforming output. `cp`, `mv`, `rm`, `mkdir` for managing files. `curl` for HTTP (SSRF-guarded, credentials auto-injected). `lua` for scripting when shell gets awkward.
+
+[COMMANDS.md](COMMANDS.md) has the full inventory with implementation status, supported flags, and known gaps vs GNU coreutils.
+
+## File Operations API
+
+Read and write files without going through a shell command:
 
 ```python
 shell.write_file("/workspace/note.txt", b"hello")
@@ -111,105 +213,44 @@ entries = shell.list_files("/workspace")
 shell.remove_file("/workspace/note.txt")
 ```
 
-## Security Model
+## Rust
 
-Strands Shell is a strong **in-process mediation layer**, not a hardened
-sandbox. The Kernel boundary is real — file access, networking, and all other
-effects are mediated by it — but the shell runs in the host's address space.
-For workloads that require VM- or container-level isolation, run Strands Shell
-inside one.
+```rust
+use strands_shell::{Shell, Bind, BindMode};
 
-In short: it confines an agent to explicitly bound paths, blocks SSRF and
-metadata-service access, and never calls `fork`/`exec` or makes direct
-syscalls — but resource limits are best-effort and a single process is not a
-multi-tenancy boundary. See [SECURITY.md](SECURITY.md) for the full threat
-model, what counts as a security issue, and how to report one.
+let shell = Shell::builder()
+    .bind(Bind::new("/host/project", "/workspace", BindMode::Copy))
+    .timeout(30)
+    .build()
+    .unwrap();
 
-## MCP Server
-
-Strands Shell ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/)
-server, exposing the shell to any MCP client as tools (`shell`, `read_file`,
-`write_file`, `list_dir`) over stdio. The Python package puts a `strands-shell`
-launcher on your PATH; point your MCP client at it:
-
-```json
-{
-  "mcpServers": {
-    "strands-shell": {
-      "command": "uvx",
-      "args": ["strands-shell", "--mcp", "--config", "/path/to/sandbox.toml"]
-    }
-  }
-}
+let out = shell.run("grep -rn TODO /workspace").await;
+println!("{}", out.stdout);
 ```
 
-The `--config` TOML declares the bind mounts, credentials, and limits the agent
-runs under (see [Configuration](#configuration)); drop it for a bare in-memory
-sandbox.
+## WASM
 
-## Python
+Compiles to `wasm32-wasip2`. Run it in any WASI runtime:
 
 ```sh
-pip install strands-shell
+./scripts/build-wasm.sh --release
+echo 'echo hello' | wasmtime -W exceptions=y -S http strands-shell-wasm.wasm
 ```
 
-```python
-import strands_shell
+The WASM build is stripped down: stdin/stdout only, no bindings, no MCP server. `curl` works if the host grants outbound HTTP.
 
-shell = strands_shell.Shell(timeout=30.0)
-out = shell.run("echo hello | tr a-z A-Z")
-print(out.stdout)  # HELLO
-```
+## Contributing
 
-## Node.js
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and design questions are just as useful as PRs.
 
-```sh
-npm install @strands-agents/shell
-```
+## Community
 
-```javascript
-import { Shell } from '@strands-agents/shell'
-
-const shell = await Shell.create({ timeout: 30.0 })
-const out = await shell.run('echo hello | tr a-z A-Z')
-console.log(out.stdout)  // HELLO
-```
-
-All methods return Promises; bytes use `Uint8Array` (Node `Buffer` works
-unchanged).
-
-## Supported Commands
-
-Strands Shell reimplements a curated subset of POSIX/coreutils — the operations
-agents reach for most — plus an embedded Lua 5.4 interpreter and SSRF-guarded
-`curl`. It also supports the usual shell machinery: pipelines, redirections,
-here-documents, conditionals, loops, functions, variable/command/arithmetic
-expansion, globbing, and background jobs.
-
-See **[COMMANDS.md](COMMANDS.md)** for the full command list with per-command
-status — what's implemented, the notable missing flags, and known correctness
-divergences from GNU/BSD.
-
-## Documentation
-
-- [Strands Agents Documentation](https://strandsagents.com/) — the broader SDK Strands Shell plugs into, including the Strands Shell guides
-
-## Contributing ❤️
-
-Bug reports, design feedback, and PRs are welcome. See
-[CONTRIBUTING.md](CONTRIBUTING.md) to get started.
-
-## Stay in touch with the team
-
-Come meet the Strands team and other users on
-[**Discord**](https://discord.com/invite/strands).
+[Discord](https://discord.com/invite/strands) if you want to talk about it.
 
 ## License
 
-This project is licensed under the Apache License 2.0.
+Apache-2.0
 
 ## Security
 
-If you discover a security issue, please report it responsibly rather than
-opening a public issue. Bypasses of filesystem mediation, SSRF protection,
-or credential injection are treated as security issues.
+If you find a security issue, report it privately instead of opening a public issue. Bypasses of filesystem mediation, SSRF protection, or credential injection qualify. See [SECURITY.md](SECURITY.md).
