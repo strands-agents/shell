@@ -102,23 +102,20 @@ console.log(out.stdout)
 ## How It Works
 
 ```mermaid
-block-beta
-    columns 1
-    block:agent["Your agent code (Strands, LangGraph, Pydantic AI, etc)"]
-    end
-    space
-    block:shell["Strands Shell"]
-        block:kernel["Kernel (mediation boundary)"]
-            columns 4
-            A["VFS: isolated filesystem"]
-            B["Network: SSRF guard + allowlist"]
-            C["Credentials: injected per-URL"]
-            D["Limits: timeout, output, fds"]
-        end
-        E["Shell engine: parser, 25 builtins, 33 commands, Lua 5.4"]
-    end
+flowchart TB
+    agent["Your agent code\n(Strands, LangGraph, Pydantic AI, etc)"]
+    agent -->|"MCP / Python / Node.js"| shell
 
-    agent -- "MCP / Python / Node.js" --> shell
+    subgraph shell ["Strands Shell"]
+        direction TB
+        subgraph kernel ["Kernel (mediation boundary)"]
+            vfs["VFS: isolated filesystem"]
+            net["Network: SSRF guard + allowlist"]
+            creds["Credentials: injected per-URL"]
+            limits["Limits: timeout, output, fds"]
+        end
+        engine["Shell engine: parser, 25 builtins, 33 commands, Lua 5.4"]
+    end
 ```
 
 It's a Rust crate that compiles to native (macOS/Linux), Python via PyO3, Node.js via napi-rs, and WASM (wasi-p2). State persists across `run()` calls (env vars, working directory, functions). The filesystem is shared.
