@@ -14,8 +14,8 @@
   </h2>
 
   <div align="center">
-    <a href="https://python.org"><img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python"/></a>
-    <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/Node-18%2B-green?logo=nodedotjs"/></a>
+    <a href="https://pypi.org/project/strands-shell/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python"/></a>
+    <a href="https://www.npmjs.com/package/@strands-agents/shell"><img alt="Node" src="https://img.shields.io/badge/Node-18%2B-green?logo=nodedotjs"/></a>
     <a href="https://crates.io/crates/strands-shell"><img alt="crates.io" src="https://img.shields.io/crates/v/strands-shell"/></a>
     <a href="#license"><img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue"/></a>
     <a href="https://discord.gg/strands"><img alt="Strands Discord" src="https://img.shields.io/badge/Discord-Strands-5865F2?logo=discord&logoColor=white"/></a>
@@ -32,9 +32,9 @@
 
 ---
 
-Agents run shell commands in tight loops. Install deps, run tests, grep for errors, iterate. Those loops need speed and isolation. 
+Agents run shell commands in tight loops: Install deps, run tests, grep for errors, iterate. Those loops need speed and isolation. 
 
-Strands Shell is a Bourne-compatible shell that runs in-process. `grep`, `sed`, `jq`, `curl`, `find`, 50+ commands. It does this without fork, exec, syscalls, or cold starts. You declare what the agent can reach (files, URLs, credentials) and everything else doesn't exist to the agent.
+Strands Shell is a Bourne-compatible shell that runs in-process. `grep`, `sed`, `jq`, `curl`, `find`, 50+ commands and it does this without fork, exec, syscalls, or cold starts. You declare what the agent can reach (files, URLs, credentials) and everything else doesn't exist to the agent.
 
 | | Docker | Cloud sandbox | Strands Shell |
 |---|---|---|---|
@@ -62,7 +62,7 @@ Drop this into your MCP client config:
 }
 ```
 
-That's it. Your agent gets `shell`, `read_file`, `write_file`, `list_dir`. All mediated through the Kernel. `uvx` handles the install.
+That's it and your agent gets `shell`, `read_file`, `write_file`, `list_dir`. All mediated through the Kernel.
 
 ### Python
 
@@ -101,26 +101,24 @@ console.log(out.stdout)
 
 ## How It Works
 
-```
-┌────────────────────────────────────────────┐
-│             Your agent code                │
-│   (Strands, LangGraph, Pydantic AI, etc)   │
-└──────────────────┬─────────────────────────┘
-                   │ MCP / Python / Node.js
-┌──────────────────▼─────────────────────────┐
-│            Strands Shell                   │
-│                                            │
-│  ┌─────────────────────────────────────┐   │
-│  │  Kernel (mediation boundary)        │   │
-│  │  • VFS: isolated virtual filesystem │   │
-│  │  • Network: SSRF guard + allowlist  │   │
-│  │  • Credentials: injected per-URL    │   │
-│  │  • Limits: timeout, output, fds     │   │
-│  └─────────────────────────────────────┘   │
-│                                            │
-│  Shell engine: parser, builtins, commands  │
-│  25 builtins + 33 commands + Lua 5.4       │
-└────────────────────────────────────────────┘
+```mermaid
+block-beta
+    columns 1
+    block:agent["Your agent code (Strands, LangGraph, Pydantic AI, etc)"]
+    end
+    space
+    block:shell["Strands Shell"]
+        block:kernel["Kernel (mediation boundary)"]
+            columns 4
+            A["VFS: isolated filesystem"]
+            B["Network: SSRF guard + allowlist"]
+            C["Credentials: injected per-URL"]
+            D["Limits: timeout, output, fds"]
+        end
+        E["Shell engine: parser, 25 builtins, 33 commands, Lua 5.4"]
+    end
+
+    agent -- "MCP / Python / Node.js" --> shell
 ```
 
 It's a Rust crate that compiles to native (macOS/Linux), Python via PyO3, Node.js via napi-rs, and WASM (wasi-p2). State persists across `run()` calls (env vars, working directory, functions). The filesystem is shared.
@@ -146,12 +144,6 @@ shell = strands_shell.Shell(
 )
 ```
 
-| Bind mode | What happens |
-|-----------|----------|
-| `mode="copy"` | Snapshot host files into VFS at build time. Agent works on a copy. |
-| `mode="direct"` | Reads and writes pass through to the host filesystem. |
-| `readonly=True` | Writes rejected. Works with either mode. |
-
 ### TOML
 
 You can load all of this from a config file instead:
@@ -176,7 +168,7 @@ args = ["--stdio"]
 
 ## MCP Server
 
-The built-in [MCP](https://modelcontextprotocol.io/) server exposes the shell over JSON-RPC on stdio. Works with anything that speaks MCP.
+The built-in [MCP](https://modelcontextprotocol.io/) server exposes the shell over JSON-RPC on stdio, working with anything that speaks MCP.
 
 ```sh
 uvx strands-shell --mcp                          # bare in-memory sandbox
@@ -187,14 +179,14 @@ If you declare `[[mcp]]` servers in your TOML config, they show up as Lua module
 
 ## Security Model
 
-The Kernel mediates everything. It runs in the same process as your code, not in a VM. If your threat model is "untrusted tenant running arbitrary code," put Strands Shell inside a container too. For "my agent shouldn't access things I haven't explicitly allowed," the Kernel handles it.
+The Kernel mediates everything; it runs in the same process as your code, not in a VM. If your threat model is "untrusted tenant running arbitrary code," put Strands Shell inside a container too. For "my agent shouldn't access things I haven't explicitly allowed," the Kernel handles it.
 
 **Default-deny. You allowlist what the agent can reach:**
 
-- Files: only bound paths exist. Everything else is gone.
-- Network: `curl` blocks private ranges (RFC1918, link-local, loopback, IMDS) by default. Public URLs pass through. Use `allowed_urls` to permit specific internal hosts.
-- Secrets: the Kernel injects credentials per-URL at request time. The agent never holds them. The Kernel never re-injects on redirects, even back to the same host.
-- Syscalls: there are none. No `fork`, no `exec`. The shell is pure userspace.
+- Files: only bound paths exist, everything else is hidden.
+- Network: `curl` blocks private ranges (RFC1918, link-local, loopback, IMDS) by default while letting public URLs pass through. Use `allowed_urls` to permit specific internal hosts.
+- Secrets: the Kernel injects credentials per-URL at request time, ensuring the agent never holds them. The Kernel never re-injects on redirects, even back to the same host.
+- Syscalls: there are none; no `fork`, no `exec` because the shell is pure userspace.
 
 If you bypass any of these, report it. See [SECURITY.md](SECURITY.md).
 
