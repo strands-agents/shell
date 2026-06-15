@@ -196,32 +196,11 @@ If you bypass any of these, report it. See [SECURITY.md](SECURITY.md).
 
 ## Commands
 
-### File Operations
-`cat` `cp` `chmod` `head` `ln` `ls` `mkdir` `mktemp` `mv` `rm` `rmdir` `tail` `tee` `touch`
+25 builtins, 33 commands, and a Bourne-compatible shell with pipes, loops, functions, and subshells.
 
-### Text Processing
-`cut` `grep` `jq` `sed` `sort` `tr` `uniq` `wc`
+The commands agents use constantly: `grep`, `find`, `cat`, `head`, `tail`, `jq` for reading and searching. `sed`, `sort`, `tr`, `cut` for transforming output. `cp`, `mv`, `rm`, `mkdir` for managing files. `curl` for HTTP (SSRF-guarded, credentials auto-injected). `lua` for scripting when shell gets awkward.
 
-### Search
-`find` `xargs`
-
-### Networking
-`curl` with SSRF protection and automatic credential injection
-
-### Path Utilities
-`basename` `dirname` `readlink`
-
-### Other
-`date` `echo` `env` `false` `pwd` `sleep` `true`
-
-### Scripting
-`lua` (embedded Lua 5.4, interactive REPL with `lua -i`)
-
-### Shell Builtins
-`alias` `cd` `eval` `exec` `exit` `export` `getopts` `hash` `local` `printf` `read` `readonly` `return` `set` `shift` `source` `test` `trap` `type` `umask` `unalias` `unset` `wait`
-
-### Shell Features
-Pipelines, redirections, here-documents, conditionals (`if`/`elif`/`else`, `&&`, `||`), loops (`for`, `while`, `until`), case statements, subshells, functions, variable expansion (`${VAR:-default}`, `${VAR%pattern}`), command substitution, arithmetic, globs, quoting, background jobs, `set -eux`.
+[COMMANDS.md](COMMANDS.md) has the full inventory with implementation status, supported flags, and known gaps vs GNU coreutils.
 
 ## File Operations API
 
