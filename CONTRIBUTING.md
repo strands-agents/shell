@@ -145,7 +145,10 @@ The WASM target compiles to `wasm32-wasip2` and needs wasi-sdk 32 or newer:
 echo 'echo hello from wasm' | wasmtime -W exceptions=y -S http strands-shell-wasm.wasm
 ```
 
-See the [README](./README.md#webassembly-wasm) for details on which features are available under WASM.
+The WASM build is a reduced surface: it reads commands from stdin and writes to
+stdout/stderr, with no PyO3/Node bindings, no built-in MCP server, and no
+`--config` file. `curl` requires the WASI host to grant outbound HTTP (the
+`-S http` flag above). It is a build target, not a published release artifact.
 
 ### Code Formatting and Style Guidelines
 

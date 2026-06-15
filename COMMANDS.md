@@ -120,3 +120,18 @@ Arithmetic `$(( ))` (in the executor, not a builtin): precedence/bitwise/
 ternary/hex/octal work, but **malformed input returns a wrong answer with exit 0**
 (`$((2 3))` → `2`, `$((1/0))` → `0`), and post-increment `x++`/`x--` returns the
 value without updating the variable.
+
+## Shell language
+
+| Feature | Supported |
+|---|---|
+| Pipelines & lists | `\|`, `&&`, `\|\|`, `;` |
+| Redirections | `>`, `>>`, `<`, `2>`, `&>`, here-docs `<<` |
+| Conditionals | `if`/`elif`/`else`, `case` |
+| Loops | `for`, `while`, `until` |
+| Functions | definitions, `local` variables, `return` |
+| Grouping | command groups `{ }`, subshells `( )` |
+| Expansion | variables (`${VAR:-default}`, `${VAR%pat}`, `${#VAR}`), command subst (`` `cmd` ``, `$(cmd)`), arithmetic `$(( ))`, globs |
+| Quoting | single, double |
+| Jobs | background `&` |
+| Scripts | `. script.sh` / `source` |

@@ -90,7 +90,7 @@ npm test               # run the Node.js test suite (tests/js/*.mjs)
 ./scripts/build-wasm.sh --release        # needs wasi-sdk >= 32
 ```
 
-See the [README](./README.md#webassembly-wasm) for which features are available under WASM (no PyO3, no MCP server, no `--config`).
+See [CONTRIBUTING.md](./CONTRIBUTING.md#wasm-module) for which features are available under WASM (no PyO3, no MCP server, no `--config`). WASM is a build target, not a published release artifact.
 
 ### CI merge gate
 
@@ -170,5 +170,6 @@ PR titles must follow [Conventional Commits](https://www.conventionalcommits.org
 
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — human contributor guidelines, full development environment setup
 - [SECURITY.md](./SECURITY.md) — vulnerability reporting
-- [README.md](./README.md) — product overview, configuration, supported commands, WASM feature matrix
+- [README.md](./README.md) — product overview, configuration, supported commands
+- [COMMANDS.md](./COMMANDS.md) — per-command status and known gaps
 - [Strands Agents Documentation](https://strandsagents.com/)

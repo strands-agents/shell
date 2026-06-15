@@ -178,67 +178,17 @@ console.log(out.stdout)  // HELLO
 All methods return Promises; bytes use `Uint8Array` (Node `Buffer` works
 unchanged).
 
-## WebAssembly (WASM)
-
-Strands Shell compiles to a `wasm32-wasip2` module, so the shell can run inside
-any WASI runtime with each instance isolated in its own linear memory. Build it
-with [wasi-sdk](https://github.com/WebAssembly/wasi-sdk) 32+ and run it through a
-WASI host such as [wasmtime](https://wasmtime.dev/):
-
-```sh
-./scripts/build-wasm.sh --release
-echo 'echo hello from wasm' | wasmtime -W exceptions=y -S http strands-shell-wasm.wasm
-```
-
-The WASM build is a reduced surface: it reads commands from stdin and writes to
-stdout/stderr, with no PyO3/Node bindings, no built-in MCP server, and no
-`--config` file. `curl` requires the host to grant outbound HTTP (the `-S http`
-flag above).
-
 ## Supported Commands
 
 Strands Shell reimplements a curated subset of POSIX/coreutils — the operations
-agents reach for most — not the full toolset. See **[COMMANDS.md](COMMANDS.md)**
-for the per-command status: what's implemented, the notable missing flags, and
-known correctness divergences from GNU/BSD.
+agents reach for most — plus an embedded Lua 5.4 interpreter and SSRF-guarded
+`curl`. It also supports the usual shell machinery: pipelines, redirections,
+here-documents, conditionals, loops, functions, variable/command/arithmetic
+expansion, globbing, and background jobs.
 
-### File Operations
-`cat`, `cp`, `chmod`, `head`, `ln`, `ls`, `mkdir`, `mktemp`, `mv`, `rm`,
-`rmdir`, `tail`, `tee`, `touch`
-
-### Text Processing
-`cut`, `grep`, `jq`, `sed`, `sort`, `tr`, `uniq`, `wc`
-
-### Search
-`find`, `xargs`
-
-### Networking
-`curl` — SSRF-guarded, with automatic credential injection
-
-### Path Utilities
-`basename`, `dirname`, `readlink`
-
-### Other
-`date`, `echo`, `env`, `false`, `pwd`, `sleep`, `true`
-
-### Scripting
-`lua` — embedded Lua 5.4 interpreter with interactive REPL (`lua -i`)
-
-### Shell Builtins
-`alias`, `cd`, `eval`, `exec`, `exit`, `export`, `getopts`, `hash`,
-`local`, `printf`, `read`, `readonly`, `return`, `set`, `shift`, `source`
-(`.`), `test` (`[`), `trap`, `type`, `umask`, `unalias`, `unset`, `wait`
-
-### Shell Features
-
-Pipelines, redirections (`>`, `>>`, `<`, `2>`, `&>`, here-documents `<<`),
-conditionals (`if`/`elif`/`else`, `&&`, `||`), loops (`for`, `while`,
-`until`), case statements, command groups and subshells, functions,
-variable expansion (`$VAR`, `${VAR:-default}`, `${VAR%pattern}`,
-`${#VAR}`), command substitution (`` `cmd` `` and `$(cmd)`), arithmetic
-expansion, glob expansion, single/double quoting, background jobs (`&`),
-script execution (`. script.sh`, `source`), aliases, local variables,
-`set -e`/`-u`/`-x`, readonly variables.
+See **[COMMANDS.md](COMMANDS.md)** for the full command list with per-command
+status — what's implemented, the notable missing flags, and known correctness
+divergences from GNU/BSD.
 
 ## Documentation
 
