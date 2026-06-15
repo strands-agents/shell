@@ -197,6 +197,11 @@ flag above).
 
 ## Supported Commands
 
+Strands Shell reimplements a curated subset of POSIX/coreutils — the operations
+agents reach for most — not the full toolset. See **[COMMANDS.md](COMMANDS.md)**
+for the per-command status: what's implemented, the notable missing flags, and
+known correctness divergences from GNU/BSD.
+
 ### File Operations
 `cat`, `cp`, `chmod`, `head`, `ln`, `ls`, `mkdir`, `mktemp`, `mv`, `rm`,
 `rmdir`, `tail`, `tee`, `touch`
