@@ -139,6 +139,8 @@ shell = strands_shell.Shell(
 )
 ```
 
+> ⚠️ **`mode: "direct"` mounts are live.** The agent can read and modify host files in real time. Use only for designated output directories. Never direct-bind directories containing secrets, credentials, or configuration you don't want the agent to modify.
+
 ### TOML
 
 You can load all of this from a config file instead:
@@ -174,6 +176,8 @@ If you declare `[[mcp]]` servers in your TOML config, they show up as Lua module
 
 ## Security Model
 
+> **Strands Shell is a mediation layer, not a security sandbox.** It enforces what the agent *should* access via Kernel-mediated deny-by-default. It does NOT protect against: memory-safety exploits in the shell engine itself, timing side-channels, or an attacker who controls the host process. For multi-tenant or adversarial workloads, run each Shell instance inside a container or microVM.
+
 The Kernel mediates everything; it runs in the same process as your code, not in a VM. If your threat model is "untrusted tenant running arbitrary code," put Strands Shell inside a container too. For "my agent shouldn't access things I haven't explicitly allowed," the Kernel handles it.
 
 **Default-deny. You allowlist what the agent can reach:**
@@ -188,6 +192,16 @@ If you bypass any of these, report it. See [SECURITY.md](SECURITY.md).
 **Limits (best-effort):** timeouts, output caps, fd limits, inode limits. These catch runaway agents but won't stop someone actively trying to break out. OS-level isolation for that.
 
 **Multi-tenant:** a Shell instance is single-owner. If you're serving multiple agents, create one Shell per session. Construction is cheap (no containers, no VMs, just an in-memory VFS), so spinning up per-request is the intended pattern.
+
+### Secure Defaults
+
+Out of the box, the shell is an empty sandbox — no files, no network, no credentials. When you grant access, follow least privilege:
+
+- **Prefer `mode: "copy"` over `mode: "direct"` for source code.** Copy-on-create isolates the agent from your live files. Use `direct` only for output directories where the agent needs to persist results.
+- **Scope binds narrowly.** Bind `/my/project/src` rather than `/my/project` or `/`. The agent doesn't need your `.git/`, `.env`, or `node_modules/`.
+- **Allowlist URLs explicitly.** Don't use `allowed_urls: ["https://"]` — this disables SSRF protection entirely. List the specific API endpoints the agent needs.
+- **Set timeouts.** The default has no per-command timeout. Set `timeout` to bound runaway commands (30s is reasonable for most agent loops).
+- **Use limits.** Set `max_output` to prevent agents from filling memory with unbounded command output (1MB is a good default).
 
 ## Commands
 
