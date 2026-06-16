@@ -1,0 +1,62 @@
+name: Stamp version
+description: >-
+  Write the release version (derived from the git tag) into the package
+  manifests. The git tag is the single source of truth for the version; the
+  committed manifests carry a 0.0.0 placeholder and never hold a real version.
+  This action stamps the tag's version into Cargo.toml, pyproject.toml, and
+  package.json right after checkout, before the build tools (maturin / napi)
+  read them. Run it in every job that builds, packs, or publishes.
+
+# ── Why stamp at all (vs. committing the version) ───────────────────────────
+# Committing a concrete version in three manifests means three things to bump
+# in lockstep on every release, and they silently drift. Deriving from the tag
+# keeps one source of truth and makes "cut a vX.Y.Z tag" the entire release
+# action. (See the `version` job in release.yml, which parses + validates the
+# tag and passes it here.)
+#
+# ── Why a tiny perl edit and not a dedicated tool ───────────────────────────
+# - Cargo has no built-in "version from git tag". The official option is
+#   `cargo set-version` from the `cargo-edit` crate, but that means a
+#   `cargo install cargo-edit` step (network + ~30-60s) in every build job just
+#   to rewrite one line. The crate is not published to crates.io (we release to
+#   PyPI + npm only), so Cargo.toml's version exists solely to feed maturin's
+#   wheel metadata — not worth an extra toolchain dependency.
+# - The perl one-liner rewrites ONLY the first top-level `version = "..."` line
+#   (the [package] / [project] version). Dependency and path-dep versions
+#   (e.g. napi = { version = "3" }, the strands-shell-macros path dep) appear
+#   later and are left untouched. perl -i ships on both Linux and macOS GitHub
+#   runners, so it works across the whole build matrix.
+# - package.json uses npm's own `npm version` command (the official mechanism,
+#   matching the strands-agents golden path), not a regex.
+
+inputs:
+  version:
+    description: The version to stamp (no leading "v"), e.g. 0.2.0
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Stamp version into manifests
+      shell: bash
+      env:
+        V: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        # Rewrite the first `version = "..."` in each TOML (the package version).
+        perl -i -pe 'if (!$done && /^version\s*=\s*"/) { s/"[^"]*"/"$ENV{V}"/; $done=1 }' Cargo.toml
+        perl -i -pe 'if (!$done && /^version\s*=\s*"/) { s/"[^"]*"/"$ENV{V}"/; $done=1 }' pyproject.toml
+        echo "Stamped version $V:"
+        echo "  Cargo.toml=$(grep -m1 '^version' Cargo.toml)"
+        echo "  pyproject.toml=$(grep -m1 '^version' pyproject.toml)"
+        # package.json via npm's official version command. This is only needed by
+        # the Node jobs; the Python build jobs (python-wheels/sdist) set up Python
+        # but not Node — and python-wheels runs in a manylinux container with no
+        # npm — so guard on npm being available and skip otherwise.
+        if command -v npm >/dev/null 2>&1; then
+          # --allow-same-version so re-runs against an already-stamped tree pass.
+          npm version "$V" --no-git-tag-version --allow-same-version >/dev/null
+          echo "  package.json=$(node -p "require('./package.json').version")"
+        else
+          echo "  package.json=skipped (npm not available — Python-only job)"
+        fi
