@@ -15,6 +15,11 @@ pub struct VfsKernel {
     pub vfs: Arc<Mutex<Vfs>>,
     pub creds: Vec<ResolvedCred>,
     pub allowed_url_prefixes: Vec<String>,
+    /// Optional Cedar authorization policy. When `None`, all `check_policy`
+    /// calls allow (unchanged behavior); when `Some`, gated actions must be
+    /// permitted by the policy. Layers on top of the SSRF/VFS checks.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub policy: Option<Arc<crate::policy::PolicyEngine>>,
 }
 
 impl VfsKernel {
@@ -23,6 +28,8 @@ impl VfsKernel {
             vfs: Arc::new(Mutex::new(vfs)),
             creds,
             allowed_url_prefixes: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            policy: None,
         }
     }
 
@@ -252,6 +259,22 @@ impl Kernel for VfsKernel {
     async fn open(&self, proc: &mut Process, path: &str, flags: OpenFlags) -> io::Result<Fd> {
         let abs = Self::abs(proc, path);
 
+        // Policy gate. A pure read is fs:read; otherwise it's a mutation — and
+        // we distinguish creating a new file (fs:create) from modifying an
+        // existing one (fs:write) by probing existence. Read-write (`<>`) maps
+        // to fs:write since it can mutate.
+        {
+            let action = if !flags.write && !flags.create {
+                "fs:read"
+            } else if flags.create {
+                let exists = self.vfs.lock().await.resolve(&abs, true).is_ok();
+                if exists { "fs:write" } else { "fs:create" }
+            } else {
+                "fs:write"
+            };
+            self.check_policy(action, &[("path", &abs)])?;
+        }
+
         // Check for host-backed path (bind_direct passthrough)
         {
             let vfs = self.vfs.lock().await;
@@ -402,6 +425,7 @@ impl Kernel for VfsKernel {
 
     async fn list_dir(&self, proc: &Process, path: &str) -> io::Result<Vec<DirEntry>> {
         let abs = Self::abs(proc, path);
+        self.check_policy("fs:list", &[("path", &abs)])?;
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -434,6 +458,7 @@ impl Kernel for VfsKernel {
 
     async fn change_dir(&self, proc: &mut Process, path: &str) -> io::Result<()> {
         let abs = Self::abs(proc, path);
+        self.check_policy("fs:list", &[("path", &abs)])?;
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -463,6 +488,10 @@ impl Kernel for VfsKernel {
 
     async fn stat(&self, proc: &Process, path: &str) -> FileStat {
         let abs = Self::abs(proc, path);
+        // stat is infallible; a policy denial fails closed to "does not exist".
+        if self.check_policy("fs:stat", &[("path", &abs)]).is_err() {
+            return FileStat::default();
+        }
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -481,6 +510,10 @@ impl Kernel for VfsKernel {
 
     async fn lstat(&self, proc: &Process, path: &str) -> FileStat {
         let abs = Self::abs(proc, path);
+        // lstat is infallible; a policy denial fails closed to "does not exist".
+        if self.check_policy("fs:stat", &[("path", &abs)]).is_err() {
+            return FileStat::default();
+        }
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -591,6 +624,7 @@ impl Kernel for VfsKernel {
 
     async fn remove_file(&self, proc: &Process, path: &str) -> io::Result<()> {
         let abs = Self::abs(proc, path);
+        self.check_policy("fs:delete", &[("path", &abs)])?;
         let vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -609,6 +643,7 @@ impl Kernel for VfsKernel {
 
     async fn remove_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
         let abs = Self::abs(proc, path);
+        self.check_policy("fs:delete", &[("path", &abs)])?;
         let vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -627,6 +662,7 @@ impl Kernel for VfsKernel {
 
     async fn create_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
         let abs = Self::abs(proc, path);
+        self.check_policy("fs:create", &[("path", &abs)])?;
         let vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -650,6 +686,7 @@ impl Kernel for VfsKernel {
     async fn rename(&self, proc: &Process, from: &str, to: &str) -> io::Result<()> {
         let abs_from = Self::abs(proc, from);
         let abs_to = Self::abs(proc, to);
+        self.check_policy("fs:rename", &[("src", &abs_from), ("dst", &abs_to)])?;
         let vfs = self.vfs.lock().await;
         let host_from = Self::resolve_host(&vfs, &abs_from);
         let host_to = Self::resolve_host(&vfs, &abs_to);
@@ -674,6 +711,7 @@ impl Kernel for VfsKernel {
 
     async fn symlink(&self, proc: &Process, target: &str, link: &str) -> io::Result<()> {
         let abs_link = Self::abs(proc, link);
+        self.check_policy("fs:create", &[("path", &abs_link)])?;
         let mut vfs = self.vfs.lock().await;
         Self::check_parent_write(&vfs, &abs_link)?;
         vfs.symlink(&abs_link, target, LASH_UID, LASH_GID)?;
@@ -695,6 +733,7 @@ impl Kernel for VfsKernel {
 
     async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()> {
         let abs = Self::abs(proc, path);
+        self.check_policy("fs:write", &[("path", &abs)])?;
         let mut vfs = self.vfs.lock().await;
         let ino = vfs.resolve(&abs, true)?;
         let inode = vfs.get_mut(ino)?;
@@ -712,6 +751,14 @@ impl Kernel for VfsKernel {
 
     fn now(&self) -> std::time::SystemTime {
         std::time::SystemTime::now()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn check_policy(&self, action: &str, fields: &[(&str, &str)]) -> io::Result<()> {
+        match &self.policy {
+            Some(engine) => engine.check(action, fields),
+            None => Ok(()),
+        }
     }
 
     fn check_url(&self, url: &str) -> io::Result<()> {
@@ -768,6 +815,10 @@ impl Kernel for VfsKernel {
     }
 
     async fn http_request(&self, req: HttpRequest) -> io::Result<HttpResponse> {
+        // Policy gate. This runs *before* the SSRF check below, which always
+        // still runs — Cedar can only further restrict, never weaken SSRF.
+        self.check_policy("net:request", &[("url", &req.url), ("method", &req.method)])?;
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             // 1. Check URL via self.check_url
