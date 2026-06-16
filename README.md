@@ -190,7 +190,12 @@ permit(
 );
 ```
 
-Load it from the CLI, the Rust builder, or a TOML key:
+Load it from Python, the CLI, the Rust builder, or a TOML key:
+
+```python
+shell = strands_shell.Shell(policy_file="read-only.cedar")
+# or inline: strands_shell.Shell(policy=open("read-only.cedar").read())
+```
 
 ```sh
 strands-shell --policy read-only.cedar -c 'ls /'
@@ -201,8 +206,7 @@ let shell = Shell::builder().policy_file("read-only.cedar")?.build()?;
 ```
 
 ```toml
-# in your config file, resolved relative to it; picked up by --config and by
-# the Python/Node config_file option
+# in your config file, resolved relative to it; also picked up by --config
 policy = "read-only.cedar"
 ```
 
