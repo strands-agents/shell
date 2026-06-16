@@ -16,7 +16,6 @@
   <div align="center">
     <a href="https://pypi.org/project/strands-shell/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python"/></a>
     <a href="https://www.npmjs.com/package/@strands-agents/shell"><img alt="Node" src="https://img.shields.io/badge/Node-18%2B-green?logo=nodedotjs"/></a>
-    <a href="https://crates.io/crates/strands-shell"><img alt="crates.io" src="https://img.shields.io/crates/v/strands-shell"/></a>
     <a href="#license"><img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue"/></a>
     <a href="https://discord.gg/strands"><img alt="Strands Discord" src="https://img.shields.io/badge/Discord-Strands-5865F2?logo=discord&logoColor=white"/></a>
   </div>
@@ -26,7 +25,6 @@
     ◆ <a href="#mcp-server">MCP Server</a>
     ◆ <a href="#python">Python</a>
     ◆ <a href="#nodejs">Node.js</a>
-    ◆ <a href="#rust">Rust</a>
   </p>
 </div>
 
@@ -118,7 +116,7 @@ flowchart TB
     end
 ```
 
-It's a Rust crate that compiles to native (macOS/Linux), Python via PyO3, Node.js via napi-rs, and WASM (wasi-p2). State persists across `run()` calls (env vars, working directory, functions). The filesystem is shared.
+Written in Rust, with native bindings for Python (PyO3) and Node.js (napi-rs). State persists across `run()` calls (env vars, working directory, functions). The filesystem is shared.
 
 ## Configuration
 
@@ -209,32 +207,6 @@ data = shell.read_file("/workspace/note.txt")
 entries = shell.list_files("/workspace")
 shell.remove_file("/workspace/note.txt")
 ```
-
-## Rust
-
-```rust
-use strands_shell::{Shell, Bind, BindMode};
-
-let shell = Shell::builder()
-    .bind(Bind::new("/host/project", "/workspace", BindMode::Copy))
-    .timeout(30)
-    .build()
-    .unwrap();
-
-let out = shell.run("grep -rn TODO /workspace").await;
-println!("{}", out.stdout);
-```
-
-## WASM
-
-Compiles to `wasm32-wasip2`. Run it in any WASI runtime:
-
-```sh
-./scripts/build-wasm.sh --release
-echo 'echo hello' | wasmtime -W exceptions=y -S http strands-shell-wasm.wasm
-```
-
-The WASM build is stripped down: stdin/stdout only, no bindings, no MCP server. `curl` works if the host grants outbound HTTP.
 
 ## Contributing
 
