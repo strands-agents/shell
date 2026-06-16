@@ -1,6 +1,8 @@
 [package]
 name = "strands-shell"
-version = "0.1.0"
+# Placeholder — the real version comes from the release git tag, stamped at
+# build time by .github/actions/stamp-version. Do not bump this by hand.
+version = "0.0.0"
 edition = "2024"
 description = "A virtual shell sandbox for AI agents"
 license = "Apache-2.0"
@@ -44,8 +46,8 @@ jaq-json = { version = "1", features = ["serde_json"] }
 # ----- Native-only dependencies -----
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 inventory = "0.3"
-napi = { version = "2", features = ["napi9", "tokio_rt"], optional = true }
-napi-derive = { version = "2", optional = true }
+napi = { version = "3", features = ["napi9", "tokio_rt"], optional = true }
+napi-derive = { version = "3", optional = true }
 pyo3 = { version = "0.29", features = ["extension-module"], optional = true }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 rustyline = "17.0"
@@ -67,5 +69,8 @@ members = [".", "strands-shell-macros", "xtask"]
 [dev-dependencies]
 axum = "0.8"
 
+# napi-build stays on 2.x — the build-script helper is versioned
+# independently of the napi/napi-derive runtime crates and has no 3.x release
+# (latest is 2.3.2, which is what pairs with napi 3.x).
 [build-dependencies]
 napi-build = { version = "2", optional = true }

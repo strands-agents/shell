@@ -4,7 +4,9 @@ build-backend = "maturin"
 
 [project]
 name = "strands-shell"
-version = "0.1.0"
+# Placeholder — the real version comes from the release git tag, stamped at
+# build time by .github/actions/stamp-version. Do not bump this by hand.
+version = "0.0.0"
 description = "A virtual shell for AI agents"
 readme = "README.md"
 requires-python = ">=3.10"

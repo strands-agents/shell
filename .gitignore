@@ -5,6 +5,7 @@
 __pycache__/
 *.egg-info/
 .pytest_cache/
+uv.lock
 node_modules/
 package-lock.json
 # Editor / AI-agent local config
@@ -17,3 +18,7 @@ CLAUDE.md
 # The napi-generated loader is emitted to native.js / native.d.ts (artifacts).
 /native.js
 /native.d.ts
+# napi-generated per-platform package dirs and locally packed tarballs.
+/npm/
+/dist-npm/
+/artifacts/
