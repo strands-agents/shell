@@ -10,6 +10,21 @@ updates:
       - "rust"
     commit-message:
       prefix: "ci(rust)"
+    cooldown:
+      default-days: 5
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    groups:
+      development-dependencies:
+        dependency-type: "development"
+        applies-to: version-updates
+      production-minor:
+        dependency-type: "production"
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
@@ -20,6 +35,11 @@ updates:
       - "python"
     commit-message:
       prefix: "ci(python)"
+    cooldown:
+      default-days: 5
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
     groups:
       dev-dependencies:
         patterns:
@@ -35,6 +55,21 @@ updates:
       - "node"
     commit-message:
       prefix: "ci(node)"
+    cooldown:
+      default-days: 5
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    groups:
+      development-dependencies:
+        dependency-type: "development"
+        applies-to: version-updates
+      production-minor:
+        dependency-type: "production"
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -42,3 +77,13 @@ updates:
     open-pull-requests-limit: 100
     commit-message:
       prefix: ci
+    cooldown:
+      default-days: 5
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    groups:
+      actions:
+        patterns:
+          - "*"
+        applies-to: version-updates
