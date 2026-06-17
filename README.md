@@ -21,7 +21,7 @@
   </div>
 
   <p>
-    <a href="https://strandsagents.com/docs/user-guide/shell-sdk/">Documentation</a>
+    <a href="https://strandsagents.com/docs/user-guide/shell/">Documentation</a>
     ◆ <a href="#mcp-server">MCP Server</a>
     ◆ <a href="#python">Python</a>
     ◆ <a href="#nodejs">Node.js</a>
