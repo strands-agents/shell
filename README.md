@@ -209,7 +209,7 @@ Out of the box, the shell is an empty sandbox — no files, no network, no crede
 
 The commands agents use constantly: `grep`, `find`, `cat`, `head`, `tail`, `jq` for reading and searching. `sed`, `sort`, `tr`, `cut` for transforming output. `cp`, `mv`, `rm`, `mkdir` for managing files. `curl` for HTTP (SSRF-guarded, credentials auto-injected). `lua` for scripting when shell gets awkward.
 
-The [full command reference](https://strandsagents.com/docs/user-guide/shell-sdk/commands/) has the inventory with implementation status, supported flags, and known gaps vs GNU coreutils.
+The [full command reference](https://strandsagents.com/docs/user-guide/shell/commands/) has the inventory with implementation status, supported flags, and known gaps vs GNU coreutils.
 
 ## File Operations API
 
