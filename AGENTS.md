@@ -163,5 +163,5 @@ PR titles must follow [Conventional Commits](https://www.conventionalcommits.org
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — human contributor guidelines, full development environment setup
 - [SECURITY.md](./SECURITY.md) — vulnerability reporting
 - [README.md](./README.md) — product overview, configuration, supported commands
-- [COMMANDS.md](./COMMANDS.md) — per-command status and known gaps
+- [Command Reference](https://strandsagents.com/docs/user-guide/shell-sdk/commands/) — per-command status and known gaps
 - [Strands Agents Documentation](https://strandsagents.com/)
