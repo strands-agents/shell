@@ -216,9 +216,10 @@ default-deny) — and this layers *on top of* the SSRF guard and filesystem
 permissions, which it can never weaken. A policy that permits all
 `net:request` still can't reach `169.254.169.254`.
 
-Three worked examples (read-only, a workspace jail, and mixed controls with a
-`forbid` override) plus a runnable demo live in
-[`examples/`](examples/README.md):
+Five worked examples — from a read-only sandbox up to anti-exfiltration egress
+allowlists and shielding secrets from the agent (the
+["lethal trifecta"](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)
+mitigations) — plus a runnable demo live in [`examples/`](examples/README.md):
 
 ```sh
 ./examples/run-policies.sh
