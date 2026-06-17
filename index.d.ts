@@ -63,6 +63,61 @@ export interface ShellConfig {
   configFile?: string
 }
 
+/** A bind mount in a {@link ShellConfigSnapshot}. */
+export interface BindInfo {
+  readonly source: string
+  readonly destination: string
+  /** `'copy'` (build-time snapshot) or `'direct'` (host passthrough). */
+  readonly mode: 'copy' | 'direct'
+  readonly readonly: boolean
+}
+
+/**
+ * A credential rule in a {@link ShellConfigSnapshot}.
+ *
+ * The secret value is never exposed. `envVar` holds the environment-variable
+ * name when the credential was configured from the environment; `fromLiteral`
+ * is `true` when a literal token was supplied directly (its value is withheld).
+ */
+export interface CredInfo {
+  readonly url: string
+  readonly kind: 'bearer' | 'query'
+  readonly methods: readonly string[]
+  readonly param: string | null
+  readonly envVar: string | null
+  readonly fromLiteral: boolean
+}
+
+/** Resource caps in a {@link ShellConfigSnapshot}. Every cap is present. */
+export interface LimitsInfo {
+  readonly maxDepth: number
+  readonly maxOutput: number
+  readonly maxFds: number
+  readonly maxBgJobs: number
+  readonly maxPipeline: number
+  readonly maxInput: number
+  readonly maxFileSize: number
+  readonly maxInodes: number
+}
+
+/**
+ * A read-only snapshot of how a {@link Shell} was configured, returned by
+ * {@link Shell.config}. Lets an embedder introspect a constructed shell — to
+ * build tool descriptions, surface the network allowlist, or report active
+ * limits — without having held onto the {@link ShellConfig} it was built from.
+ * Secret values are never included.
+ */
+export interface ShellConfigSnapshot {
+  readonly binds: readonly BindInfo[]
+  readonly credentials: readonly CredInfo[]
+  readonly allowedUrls: readonly string[]
+  readonly env: Readonly<Record<string, string>>
+  readonly umask: number
+  /** Per-command timeout in seconds, or `null` for no timeout. */
+  readonly timeout: number | null
+  readonly limits: LimitsInfo
+}
+
 /** errno-style discriminator carried on every {@link ShellError}. */
 export type ShellErrorCode = 'ENOENT' | 'EACCES' | 'EFBIG' | 'EOTHER'
 
@@ -89,6 +144,11 @@ export declare class Shell {
   setEnv(key: string, value: string): Promise<void>
   /** Get an environment variable. */
   getEnv(key: string): Promise<string | null>
+  /**
+   * A read-only snapshot of how this shell was configured. Secret values are
+   * never included — see {@link CredInfo}. The returned object is deep-frozen.
+   */
+  config(): Promise<ShellConfigSnapshot>
   /** Read a file as raw bytes. Rejects with {@link NotFoundError} if missing. */
   readFile(path: string): Promise<Uint8Array>
   /** Write raw bytes; creates parent dirs (mkdir -p) and truncates. */

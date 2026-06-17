@@ -141,6 +141,47 @@ shell = strands_shell.Shell(
 
 > ⚠️ **`mode: "direct"` mounts are live.** The agent can read and modify host files in real time. Use only for designated output directories. Never direct-bind directories containing secrets, credentials, or configuration you don't want the agent to modify.
 
+### Inspecting configuration
+
+A constructed shell exposes a read-only snapshot of how it was configured. This
+is useful when you embed Strands Shell as a sandbox in a larger framework and
+need to build tool descriptions, surface the network allowlist, or report the
+active resource caps from a shell object you were handed.
+
+```python
+shell = strands_shell.Shell(
+    allowed_urls=["https://api.example.com/"],
+    credentials=[strands_shell.Cred("https://api.example.com/", env_var="API_TOKEN")],
+    timeout=30.0,
+)
+
+cfg = shell.config           # a frozen ShellConfig snapshot
+cfg.allowed_urls             # ('https://api.example.com/',)
+cfg.timeout                  # 30.0
+cfg.credentials[0].url       # 'https://api.example.com/'
+cfg.credentials[0].env_var   # 'API_TOKEN'  (the secret value is never exposed)
+```
+
+```javascript
+const shell = await Shell.create({
+  allowedUrls: ['https://api.example.com/'],
+  credentials: [{ url: 'https://api.example.com/', envVar: 'API_TOKEN' }],
+  timeout: 30,
+})
+
+const cfg = await shell.config()   // a deep-frozen snapshot object
+cfg.allowedUrls                    // ['https://api.example.com/']
+cfg.timeout                        // 30
+cfg.credentials[0].envVar          // 'API_TOKEN'  (the secret value is never exposed)
+```
+
+The snapshot reports binds, credentials, the network allowlist, environment
+variables, umask, timeout, and resource limits. Credential **secrets are never
+included** — each entry reports its URL pattern, kind, and source (a literal
+token was supplied, or the name of the environment variable it is read from),
+so you can reason about credentials without the agent or your tooling ever
+seeing the secret itself.
+
 ### TOML
 
 You can load all of this from a config file instead:

@@ -27,6 +27,10 @@ __all__ = [
     "Limits",
     "Output",
     "FileInfo",
+    "ShellConfig",
+    "ConfigBind",
+    "ConfigCred",
+    "ConfigLimits",
     "ShellError",
     "FileNotFoundError",
     "PermissionDeniedError",
@@ -97,6 +101,120 @@ class Limits:
     max_input: int = 1 << 20  # 1 MiB
     max_inodes: int = 10_000
     max_depth: int = 64
+
+
+# --------------------------------------------------------------------------- #
+# Read-only config snapshot (returned by ``Shell.config``)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class ConfigBind:
+    """A bind mount as reported by :attr:`Shell.config`.
+
+    Read-only view; mirrors the :class:`Bind` you pass in, with ``mode``
+    normalized to ``"copy"`` / ``"direct"``.
+    """
+
+    source: str
+    destination: str
+    mode: Literal["direct", "copy"]
+    readonly: bool
+
+
+@dataclass(frozen=True)
+class ConfigCred:
+    """A credential rule as reported by :attr:`Shell.config`.
+
+    The secret value is **never** exposed. ``env_var`` holds the environment
+    variable name when the credential was configured from the environment;
+    ``from_literal`` is ``True`` when a literal token was supplied directly
+    (its value is still withheld).
+    """
+
+    url: str
+    kind: str
+    methods: tuple[str, ...]
+    param: str | None
+    env_var: str | None
+    from_literal: bool
+
+
+@dataclass(frozen=True)
+class ConfigLimits:
+    """Resource caps as reported by :attr:`Shell.config`.
+
+    Unlike :class:`Limits` (the input bundle), this view always carries every
+    cap with its concrete active value.
+    """
+
+    max_depth: int
+    max_output: int
+    max_fds: int
+    max_bg_jobs: int
+    max_pipeline: int
+    max_input: int
+    max_file_size: int
+    max_inodes: int
+
+
+@dataclass(frozen=True)
+class ShellConfig:
+    """A read-only snapshot of how a :class:`Shell` was configured.
+
+    Returned by :attr:`Shell.config`. Lets an embedder introspect a constructed
+    shell after the fact (to build tool descriptions, surface the network
+    allowlist, or report active limits) without having held onto the
+    construction arguments. Secret values are never included.
+    """
+
+    binds: tuple[ConfigBind, ...]
+    credentials: tuple[ConfigCred, ...]
+    allowed_urls: tuple[str, ...]
+    env: dict[str, str]
+    umask: int
+    timeout: float | None
+    limits: ConfigLimits
+
+
+def _snapshot_from_native(native_config: object) -> ShellConfig:
+    """Convert a ``_native.ShellConfig`` into the frozen public dataclass."""
+    return ShellConfig(
+        binds=tuple(
+            ConfigBind(
+                source=b.source,
+                destination=b.destination,
+                mode=b.mode,  # type: ignore[arg-type]
+                readonly=b.readonly,
+            )
+            for b in native_config.binds
+        ),
+        credentials=tuple(
+            ConfigCred(
+                url=c.url,
+                kind=c.kind,
+                methods=tuple(c.methods),
+                param=c.param,
+                env_var=c.env_var,
+                from_literal=c.from_literal,
+            )
+            for c in native_config.credentials
+        ),
+        allowed_urls=tuple(native_config.allowed_urls),
+        env=dict(native_config.env),
+        umask=native_config.umask,
+        timeout=native_config.timeout,
+        limits=ConfigLimits(
+            max_depth=native_config.limits.max_depth,
+            max_output=native_config.limits.max_output,
+            max_fds=native_config.limits.max_fds,
+            max_bg_jobs=native_config.limits.max_bg_jobs,
+            max_pipeline=native_config.limits.max_pipeline,
+            max_input=native_config.limits.max_input,
+            max_file_size=native_config.limits.max_file_size,
+            max_inodes=native_config.limits.max_inodes,
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -250,6 +368,23 @@ class Shell:
 
     def get_env(self, key: str) -> str | None:
         return self._shell.get_env(key)
+
+    # ---- Configuration introspection ----
+
+    @property
+    def config(self) -> ShellConfig:
+        """A read-only snapshot of how this shell was configured.
+
+        Reports bind mounts, credential rules, the network allowlist, seeded
+        environment variables, umask, timeout, and resource caps. Useful for
+        introspecting a constructed shell — e.g. to build tool descriptions or
+        surface the allowlist — without having held onto the constructor args.
+
+        Secret values are never included: each :class:`ConfigCred` reports its
+        URL pattern, kind, and source (literal vs environment variable name),
+        but never the token itself.
+        """
+        return _snapshot_from_native(self._shell.config())
 
     # ---- VFS file operations ----
     # Each accepts **kwargs and ignores unknown keys, matching the

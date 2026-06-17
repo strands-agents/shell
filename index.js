@@ -190,6 +190,52 @@ class Shell {
     return this._inner.getEnv(key)
   }
 
+  // ---- Configuration introspection ----
+
+  /**
+   * A read-only snapshot of how this shell was configured. Resolves to an
+   * object reporting binds, credentials, allowedUrls, env, umask, timeout,
+   * and limits.
+   *
+   * Secret values are never included: each credential reports its `url`
+   * pattern, `kind`, and source (`envVar` name, or `fromLiteral: true`), but
+   * never the token itself. The returned object and its nested objects/arrays
+   * are deep-frozen so the snapshot cannot be mutated.
+   */
+  async config() {
+    const c = await this._inner.config()
+    const snapshot = {
+      binds: c.binds.map((b) =>
+        Object.freeze({
+          source: b.source,
+          destination: b.destination,
+          mode: b.mode,
+          readonly: b.readonly,
+        }),
+      ),
+      credentials: c.credentials.map((cr) =>
+        Object.freeze({
+          url: cr.url,
+          kind: cr.kind,
+          methods: Object.freeze([...cr.methods]),
+          param: cr.param ?? null,
+          envVar: cr.envVar ?? null,
+          fromLiteral: cr.fromLiteral,
+        }),
+      ),
+      allowedUrls: c.allowedUrls,
+      env: c.env,
+      umask: c.umask,
+      timeout: c.timeout ?? null,
+      limits: Object.freeze({ ...c.limits }),
+    }
+    Object.freeze(snapshot.binds)
+    Object.freeze(snapshot.credentials)
+    Object.freeze(snapshot.allowedUrls)
+    Object.freeze(snapshot.env)
+    return Object.freeze(snapshot)
+  }
+
   // ---- VFS file operations ----
 
   readFile(path) {

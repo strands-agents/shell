@@ -18,6 +18,10 @@ import {
   type CredConfig,
   type ShellLimits,
   type ShellErrorCode,
+  type ShellConfigSnapshot,
+  type BindInfo,
+  type CredInfo,
+  type LimitsInfo,
 } from '../../index.js'
 
 async function usage(): Promise<void> {
@@ -52,6 +56,20 @@ async function usage(): Promise<void> {
 
   const entries: FileInfo[] = await shell.listFiles('/work')
   const _name: string = entries[0].name
+
+  // Read-only config snapshot: every field is typed and readonly.
+  const snapshot: ShellConfigSnapshot = await shell.config()
+  const _binds: readonly BindInfo[] = snapshot.binds
+  const _mode: 'copy' | 'direct' = snapshot.binds[0].mode
+  const _creds: readonly CredInfo[] = snapshot.credentials
+  const _credKind: 'bearer' | 'query' = snapshot.credentials[0].kind
+  const _envVar: string | null = snapshot.credentials[0].envVar
+  const _fromLiteral: boolean = snapshot.credentials[0].fromLiteral
+  const _allowed: readonly string[] = snapshot.allowedUrls
+  const _umask: number = snapshot.umask
+  const _timeout: number | null = snapshot.timeout
+  const _limits: LimitsInfo = snapshot.limits
+  const _maxOutput: number = snapshot.limits.maxOutput
 
   // Typed error hierarchy: subclasses are ShellErrors carrying path + code.
   try {
