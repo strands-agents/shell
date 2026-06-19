@@ -128,11 +128,22 @@ fn default_mode() -> BindMode {
     BindMode::Copy
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BindMode {
     Copy,
     Direct,
+}
+
+impl BindMode {
+    /// The lowercase string the TOML / bindings use for this mode
+    /// (`"copy"` or `"direct"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BindMode::Copy => "copy",
+            BindMode::Direct => "direct",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -148,11 +159,22 @@ pub struct CredEntry {
     pub param: Option<String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CredKind {
     Bearer,
     Query,
+}
+
+impl CredKind {
+    /// The lowercase string the TOML / bindings use for this kind
+    /// (`"bearer"` or `"query"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CredKind::Bearer => "bearer",
+            CredKind::Query => "query",
+        }
+    }
 }
 
 /// Parse a VFS config from a TOML string.
@@ -201,7 +223,7 @@ pub fn resolve_creds(creds: &[CredEntry]) -> io::Result<Vec<ResolvedCred>> {
             Ok(ResolvedCred {
                 url: c.url.clone(),
                 methods: c.methods.iter().map(|m| m.to_uppercase()).collect(),
-                kind: c.kind.clone(),
+                kind: c.kind,
                 api_key,
                 param: c.param.clone(),
             })

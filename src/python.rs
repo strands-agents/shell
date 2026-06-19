@@ -101,6 +101,155 @@ impl FileInfo {
     }
 }
 
+// --------------------------------------------------------------------------- #
+// Read-only config snapshot carriers
+//
+// These mirror the Rust `crate::shell::{ShellConfig, BindInfo, CredInfo,
+// LimitsInfo}` view types. They are the low-level surface; the pure-Python
+// wrapper (`strands_shell/__init__.py`) re-shapes them into frozen public
+// dataclasses. Secret values are never carried — see `CredInfo`.
+// --------------------------------------------------------------------------- #
+
+/// A single bind mount in a config snapshot.
+#[pyclass(skip_from_py_object)]
+#[derive(Clone)]
+pub struct BindInfo {
+    #[pyo3(get)]
+    pub source: String,
+    #[pyo3(get)]
+    pub destination: String,
+    /// `"copy"` or `"direct"`.
+    #[pyo3(get)]
+    pub mode: String,
+    #[pyo3(get)]
+    pub readonly: bool,
+}
+
+#[pymethods]
+impl BindInfo {
+    fn __repr__(&self) -> String {
+        format!(
+            "BindInfo(source={:?}, destination={:?}, mode={:?}, readonly={})",
+            self.source,
+            self.destination,
+            self.mode,
+            if self.readonly { "True" } else { "False" }
+        )
+    }
+}
+
+/// A single credential rule in a config snapshot. Never carries the secret.
+#[pyclass(skip_from_py_object)]
+#[derive(Clone)]
+pub struct CredInfo {
+    #[pyo3(get)]
+    pub url: String,
+    /// `"bearer"` or `"query"`.
+    #[pyo3(get)]
+    pub kind: String,
+    #[pyo3(get)]
+    pub methods: Vec<String>,
+    #[pyo3(get)]
+    pub param: Option<String>,
+    /// Name of the env var the secret is read from, or `None` for a literal.
+    #[pyo3(get)]
+    pub env_var: Option<String>,
+    /// True when a literal token was supplied (value itself never exposed).
+    #[pyo3(get)]
+    pub from_literal: bool,
+}
+
+#[pymethods]
+impl CredInfo {
+    fn __repr__(&self) -> String {
+        format!(
+            "CredInfo(url={:?}, kind={:?}, methods={:?}, param={:?}, env_var={:?}, from_literal={})",
+            self.url,
+            self.kind,
+            self.methods,
+            self.param,
+            self.env_var,
+            if self.from_literal { "True" } else { "False" }
+        )
+    }
+}
+
+/// Resource caps in a config snapshot.
+#[pyclass(skip_from_py_object)]
+#[derive(Clone)]
+pub struct LimitsInfo {
+    #[pyo3(get)]
+    pub max_depth: u32,
+    #[pyo3(get)]
+    pub max_output: usize,
+    #[pyo3(get)]
+    pub max_fds: usize,
+    #[pyo3(get)]
+    pub max_bg_jobs: usize,
+    #[pyo3(get)]
+    pub max_pipeline: usize,
+    #[pyo3(get)]
+    pub max_input: usize,
+    #[pyo3(get)]
+    pub max_file_size: usize,
+    #[pyo3(get)]
+    pub max_inodes: usize,
+}
+
+#[pymethods]
+impl LimitsInfo {
+    fn __repr__(&self) -> String {
+        format!(
+            "LimitsInfo(max_depth={}, max_output={}, max_fds={}, max_bg_jobs={}, max_pipeline={}, max_input={}, max_file_size={}, max_inodes={})",
+            self.max_depth,
+            self.max_output,
+            self.max_fds,
+            self.max_bg_jobs,
+            self.max_pipeline,
+            self.max_input,
+            self.max_file_size,
+            self.max_inodes
+        )
+    }
+}
+
+/// A read-only snapshot of how a `Shell` was configured.
+#[pyclass(skip_from_py_object)]
+#[derive(Clone)]
+pub struct ShellConfig {
+    #[pyo3(get)]
+    pub binds: Vec<BindInfo>,
+    #[pyo3(get)]
+    pub credentials: Vec<CredInfo>,
+    #[pyo3(get)]
+    pub allowed_urls: Vec<String>,
+    /// List of `(key, value)` pairs, in declaration order.
+    #[pyo3(get)]
+    pub env: Vec<(String, String)>,
+    #[pyo3(get)]
+    pub umask: u32,
+    /// Per-command timeout in seconds, or `None` for no timeout.
+    #[pyo3(get)]
+    pub timeout: Option<f64>,
+    #[pyo3(get)]
+    pub limits: LimitsInfo,
+}
+
+#[pymethods]
+impl ShellConfig {
+    fn __repr__(&self) -> String {
+        format!(
+            "ShellConfig(binds={} entries, credentials={} entries, allowed_urls={:?}, env={} vars, umask={:#o}, timeout={:?})",
+            self.binds.len(),
+            self.credentials.len(),
+            self.allowed_urls,
+            self.env.len(),
+            self.umask,
+            self.timeout
+        )
+    }
+}
+
 /// Builder for configuring a Shell.
 #[pyclass]
 pub struct ShellBuilder {
@@ -336,6 +485,56 @@ impl Shell {
         Ok(shell.get_env(key).map(|s| s.to_string()))
     }
 
+    /// Read-only snapshot of the configuration this shell was built with.
+    ///
+    /// Mirrors `Shell::config()` in the core. Never carries secret values —
+    /// each credential reports its source (literal vs env-var name) only.
+    fn config(&self) -> PyResult<ShellConfig> {
+        let shell = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("shell consumed"))?;
+        let c = shell.config();
+        Ok(ShellConfig {
+            binds: c
+                .binds
+                .iter()
+                .map(|b| BindInfo {
+                    source: b.source.clone(),
+                    destination: b.destination.clone(),
+                    mode: b.mode.to_string(),
+                    readonly: b.readonly,
+                })
+                .collect(),
+            credentials: c
+                .credentials
+                .iter()
+                .map(|cr| CredInfo {
+                    url: cr.url.clone(),
+                    kind: cr.kind.to_string(),
+                    methods: cr.methods.clone(),
+                    param: cr.param.clone(),
+                    env_var: cr.env_var.clone(),
+                    from_literal: cr.from_literal,
+                })
+                .collect(),
+            allowed_urls: c.allowed_urls.clone(),
+            env: c.env.clone(),
+            umask: c.umask,
+            timeout: c.timeout_secs,
+            limits: LimitsInfo {
+                max_depth: c.limits.max_depth,
+                max_output: c.limits.max_output,
+                max_fds: c.limits.max_fds,
+                max_bg_jobs: c.limits.max_bg_jobs,
+                max_pipeline: c.limits.max_pipeline,
+                max_input: c.limits.max_input,
+                max_file_size: c.limits.max_file_size,
+                max_inodes: c.limits.max_inodes,
+            },
+        })
+    }
+
     /// Read a file from the virtual filesystem as raw bytes.
     ///
     /// Mirrors `Sandbox.read_file` from the Strands SDK.
@@ -435,6 +634,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ShellBuilder>()?;
     m.add_class::<Output>()?;
     m.add_class::<FileInfo>()?;
+    m.add_class::<ShellConfig>()?;
+    m.add_class::<BindInfo>()?;
+    m.add_class::<CredInfo>()?;
+    m.add_class::<LimitsInfo>()?;
     m.add("NativeShellError", m.py().get_type::<NativeShellError>())?;
     m.add_function(wrap_pyfunction!(cli_main, m)?)?;
     Ok(())

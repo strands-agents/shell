@@ -164,5 +164,8 @@ pub mod python;
 pub mod js;
 
 // Primary public API
-pub use shell::{FileInfo, FileOpErrorKind, Output, Shell, ShellBuilder};
+pub use shell::{
+    BindInfo, CredInfo, FileInfo, FileOpErrorKind, LimitsInfo, Output, Shell, ShellBuilder,
+    ShellConfig,
+};
 pub use vfs_config::CredKind;

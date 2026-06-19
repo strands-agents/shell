@@ -70,6 +70,144 @@ pub struct FileInfo {
     pub size: Option<u64>,
 }
 
+/// A read-only snapshot of how a [`Shell`] was configured.
+///
+/// Captured at [`build()`](ShellBuilder::build) time and returned by
+/// [`Shell::config()`]. This exists so an embedder (for example a sandbox
+/// adapter in another SDK) can introspect a constructed `Shell` after the
+/// fact — to build tool descriptions, surface the network allowlist, or
+/// report the active resource caps — without having held onto the builder.
+///
+/// The snapshot intentionally **never carries resolved secret values**.
+/// strands-shell's security model is that the agent never sees credentials,
+/// so [`CredInfo`] reports only the URL pattern, the credential *kind*, and
+/// the *source* of the secret (a literal was provided, or the name of the
+/// environment variable it is read from) — never the token itself.
+///
+/// `#[non_exhaustive]` so future fields can be added without breaking callers
+/// who construct or pattern-match exhaustively.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ShellConfig {
+    /// Bind mounts mapping host paths into the VFS, in declaration order.
+    pub binds: Vec<BindInfo>,
+    /// Credential injection rules, in declaration order. Secret values are
+    /// never included — see [`CredInfo`].
+    pub credentials: Vec<CredInfo>,
+    /// SSRF allowlist: URL prefixes `curl` may reach, in declaration order.
+    pub allowed_urls: Vec<String>,
+    /// Environment variables seeded into the shell, in declaration order.
+    pub env: Vec<(String, String)>,
+    /// File-creation umask.
+    pub umask: u32,
+    /// Per-command wall-clock timeout in seconds, or `None` for no timeout.
+    pub timeout_secs: Option<f64>,
+    /// Active resource caps.
+    pub limits: LimitsInfo,
+}
+
+/// A single bind mount in a [`ShellConfig`] snapshot.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct BindInfo {
+    /// Host path that was mounted.
+    pub source: String,
+    /// Destination path inside the VFS.
+    pub destination: String,
+    /// `"copy"` (build-time snapshot) or `"direct"` (host passthrough).
+    pub mode: &'static str,
+    /// Whether writes through this mount are rejected.
+    pub readonly: bool,
+}
+
+/// A single credential rule in a [`ShellConfig`] snapshot.
+///
+/// Carries everything an embedder needs to reason about a credential —
+/// *except the secret itself*. When the credential was configured from an
+/// environment variable, [`env_var`](Self::env_var) holds that variable's
+/// name; the value is never read into the snapshot. When a literal token was
+/// supplied, [`from_literal`](Self::from_literal) is `true` and `env_var` is
+/// `None`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CredInfo {
+    /// URL pattern the credential applies to (supports glob patterns).
+    pub url: String,
+    /// `"bearer"` or `"query"`.
+    pub kind: &'static str,
+    /// HTTP methods this credential is scoped to (empty means all methods).
+    pub methods: Vec<String>,
+    /// Query-parameter name, set only for `kind == "query"` credentials.
+    pub param: Option<String>,
+    /// Name of the environment variable the secret is read from, or `None`
+    /// when a literal token was supplied.
+    pub env_var: Option<String>,
+    /// `true` when a literal token value was supplied directly (rather than
+    /// via an environment variable). The token value itself is never exposed.
+    pub from_literal: bool,
+}
+
+/// The resource caps active on a [`Shell`], as reported in a
+/// [`ShellConfig`] snapshot.
+///
+/// Unlike [`crate::os::ProcessLimits`] (process-only), this view also carries
+/// the two VFS-level caps (`max_file_size`, `max_inodes`) so the snapshot
+/// reflects every limit the builder applied in one place.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct LimitsInfo {
+    /// Max recursion depth for functions/subshells.
+    pub max_depth: u32,
+    /// Max size in bytes for any single output accumulation.
+    pub max_output: usize,
+    /// Max open file descriptors per process.
+    pub max_fds: usize,
+    /// Max concurrent background jobs.
+    pub max_bg_jobs: usize,
+    /// Max stages in a single pipeline.
+    pub max_pipeline: usize,
+    /// Max input size in bytes the parser will accept.
+    pub max_input: usize,
+    /// Max size in bytes for any single file in the VFS.
+    pub max_file_size: usize,
+    /// Max inodes (files + directories) in the VFS.
+    pub max_inodes: usize,
+}
+
+impl Default for LimitsInfo {
+    /// Matches [`ShellBuilder::default`]'s caps, so a [`Shell`] built without
+    /// touching the limit setters reports these values.
+    fn default() -> Self {
+        Self {
+            max_depth: 64,
+            max_output: 1024 * 1024,
+            max_fds: 128,
+            max_bg_jobs: 8,
+            max_pipeline: 16,
+            max_input: 1024 * 1024,
+            max_file_size: 10 * 1024 * 1024,
+            max_inodes: 10_000,
+        }
+    }
+}
+
+impl Default for ShellConfig {
+    /// An empty snapshot with default umask, no timeout, and default caps.
+    /// Used for shells created via [`Shell::with_kernel`], which bypass the
+    /// builder and therefore have no captured configuration.
+    fn default() -> Self {
+        Self {
+            binds: Vec::new(),
+            credentials: Vec::new(),
+            allowed_urls: Vec::new(),
+            env: Vec::new(),
+            umask: 0o022,
+            timeout_secs: None,
+            limits: LimitsInfo::default(),
+        }
+    }
+}
+
 /// Classification of a file-op `io::Error` into the categories the language
 /// bindings surface as typed errors.
 ///
@@ -181,6 +319,10 @@ pub struct Shell {
     /// never pull more into memory than a write is allowed to commit.
     /// `0` means no cap. Mirrors the kernel's write-side `max_file_size`.
     max_file_size: usize,
+    /// Read-only snapshot of the configuration this shell was built with.
+    /// Captured at build time so embedders can introspect a constructed
+    /// shell (see [`Shell::config`]). Never carries secret values.
+    config: ShellConfig,
     #[cfg(not(target_arch = "wasm32"))]
     mcp_clients: Rc<Vec<NamedMcpClient>>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -229,6 +371,7 @@ impl Shell {
             proc,
             timeout: None,
             max_file_size: 0,
+            config: ShellConfig::default(),
             #[cfg(not(target_arch = "wasm32"))]
             mcp_clients: Rc::new(Vec::new()),
             #[cfg(not(target_arch = "wasm32"))]
@@ -339,6 +482,26 @@ impl Shell {
     /// so per-request processes inherit the same limits.
     pub fn limits(&self) -> crate::os::ProcessLimits {
         self.proc.limits()
+    }
+
+    /// Get a read-only snapshot of the configuration this shell was built
+    /// with.
+    ///
+    /// The snapshot is captured at [`build()`](ShellBuilder::build) time and
+    /// reports bind mounts, credential rules, the network allowlist, seeded
+    /// environment variables, umask, timeout, and resource caps. It exists so
+    /// an embedder (e.g. a sandbox adapter in another SDK) can introspect a
+    /// constructed `Shell` without having held onto the builder — to build
+    /// tool descriptions, surface the allowlist, or report active limits.
+    ///
+    /// Secret values are never included: [`CredInfo`] reports the credential's
+    /// URL pattern, kind, and source (literal vs environment variable name),
+    /// but never the token itself.
+    ///
+    /// Shells created via [`with_kernel`](Shell::with_kernel) (which bypass the
+    /// builder) report a [`ShellConfig::default`] snapshot.
+    pub fn config(&self) -> &ShellConfig {
+        &self.config
     }
 
     /// Read a file from the virtual filesystem as raw bytes.
@@ -961,6 +1124,51 @@ impl ShellBuilder {
                 "timeout must be greater than zero (omit it for no timeout)",
             ));
         }
+
+        // Capture a read-only config snapshot before the builder's fields are
+        // moved into the kernel/process below. This is what `Shell::config()`
+        // returns. Secret values are deliberately omitted: a credential
+        // reports its source (literal vs env-var name) but never the token.
+        let config_snapshot = ShellConfig {
+            binds: self
+                .config
+                .bind
+                .iter()
+                .map(|b| BindInfo {
+                    source: b.source.clone(),
+                    destination: b.destination.clone(),
+                    mode: b.mode.as_str(),
+                    readonly: b.readonly,
+                })
+                .collect(),
+            credentials: self
+                .creds
+                .iter()
+                .map(|c| CredInfo {
+                    url: c.url.clone(),
+                    kind: c.kind.as_str(),
+                    methods: c.methods.clone(),
+                    param: c.param.clone(),
+                    env_var: c.api_key_env.clone(),
+                    from_literal: c.api_key.is_some(),
+                })
+                .collect(),
+            allowed_urls: self.allowed_url_prefixes.clone(),
+            env: self.env.clone(),
+            umask: self.config.umask,
+            timeout_secs: self.timeout.map(|d| d.as_secs_f64()),
+            limits: LimitsInfo {
+                max_depth: self.max_depth,
+                max_output: self.max_output,
+                max_fds: self.max_fds,
+                max_bg_jobs: self.max_bg_jobs,
+                max_pipeline: self.max_pipeline,
+                max_input: self.max_input,
+                max_file_size: self.max_file_size,
+                max_inodes: self.max_inodes,
+            },
+        };
+
         let resolved_creds = resolve_creds(&self.creds)?;
         let mut vfs = build_vfs(&self.config)?;
         vfs.max_file_size = self.max_file_size;
@@ -999,6 +1207,7 @@ impl ShellBuilder {
             proc,
             timeout: self.timeout,
             max_file_size: self.max_file_size,
+            config: config_snapshot,
             #[cfg(not(target_arch = "wasm32"))]
             mcp_clients: Rc::new(Vec::new()),
             #[cfg(not(target_arch = "wasm32"))]

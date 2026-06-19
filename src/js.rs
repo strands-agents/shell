@@ -167,6 +167,66 @@ pub struct FileInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Read-only config snapshot — plain object shapes mirrored from the core
+// `crate::shell::{ShellConfig, BindInfo, CredInfo, LimitsInfo}` view types.
+// Returned by `Shell.config()`. Secret values are never carried — see
+// `CredInfo`.
+// ---------------------------------------------------------------------------
+
+/// A single bind mount in a config snapshot.
+#[napi(object)]
+pub struct BindInfo {
+    pub source: String,
+    pub destination: String,
+    /// `"copy"` or `"direct"`.
+    pub mode: String,
+    pub readonly: bool,
+}
+
+/// A single credential rule in a config snapshot. Never carries the secret.
+#[napi(object)]
+pub struct CredInfo {
+    pub url: String,
+    /// `"bearer"` or `"query"`.
+    pub kind: String,
+    pub methods: Vec<String>,
+    pub param: Option<String>,
+    /// Name of the env var the secret is read from, or `null` for a literal.
+    pub env_var: Option<String>,
+    /// True when a literal token was supplied (value itself never exposed).
+    pub from_literal: bool,
+}
+
+/// Resource caps in a config snapshot.
+#[napi(object)]
+pub struct LimitsInfo {
+    // f64 because JS numbers are doubles; values fit comfortably (max_inodes
+    // default 10_000, max_file_size default 10 MiB — well within 2^53).
+    pub max_depth: f64,
+    pub max_output: f64,
+    pub max_fds: f64,
+    pub max_bg_jobs: f64,
+    pub max_pipeline: f64,
+    pub max_input: f64,
+    pub max_file_size: f64,
+    pub max_inodes: f64,
+}
+
+/// A read-only snapshot of how a `Shell` was configured.
+#[napi(object)]
+pub struct ShellConfig {
+    pub binds: Vec<BindInfo>,
+    pub credentials: Vec<CredInfo>,
+    pub allowed_urls: Vec<String>,
+    /// Seeded environment variables as a plain object.
+    pub env: std::collections::HashMap<String, String>,
+    pub umask: f64,
+    /// Per-command timeout in seconds, or `null` for no timeout.
+    pub timeout: Option<f64>,
+    pub limits: LimitsInfo,
+}
+
+// ---------------------------------------------------------------------------
 // ShellBuilder
 // ---------------------------------------------------------------------------
 
@@ -397,6 +457,57 @@ impl Shell {
     pub async fn get_env(&self, key: String) -> Result<Option<String>> {
         self.worker
             .run(move |shell, _rt| shell.get_env(&key).map(|s| s.to_string()))
+            .await
+    }
+
+    /// Read-only snapshot of the configuration this shell was built with.
+    ///
+    /// Mirrors `Shell::config()` in the core. Never carries secret values —
+    /// each credential reports its source (literal vs env-var name) only.
+    #[napi]
+    pub async fn config(&self) -> Result<ShellConfig> {
+        self.worker
+            .run(move |shell, _rt| {
+                let c = shell.config();
+                ShellConfig {
+                    binds: c
+                        .binds
+                        .iter()
+                        .map(|b| BindInfo {
+                            source: b.source.clone(),
+                            destination: b.destination.clone(),
+                            mode: b.mode.to_string(),
+                            readonly: b.readonly,
+                        })
+                        .collect(),
+                    credentials: c
+                        .credentials
+                        .iter()
+                        .map(|cr| CredInfo {
+                            url: cr.url.clone(),
+                            kind: cr.kind.to_string(),
+                            methods: cr.methods.clone(),
+                            param: cr.param.clone(),
+                            env_var: cr.env_var.clone(),
+                            from_literal: cr.from_literal,
+                        })
+                        .collect(),
+                    allowed_urls: c.allowed_urls.clone(),
+                    env: c.env.iter().cloned().collect(),
+                    umask: c.umask as f64,
+                    timeout: c.timeout_secs,
+                    limits: LimitsInfo {
+                        max_depth: c.limits.max_depth as f64,
+                        max_output: c.limits.max_output as f64,
+                        max_fds: c.limits.max_fds as f64,
+                        max_bg_jobs: c.limits.max_bg_jobs as f64,
+                        max_pipeline: c.limits.max_pipeline as f64,
+                        max_input: c.limits.max_input as f64,
+                        max_file_size: c.limits.max_file_size as f64,
+                        max_inodes: c.limits.max_inodes as f64,
+                    },
+                }
+            })
             .await
     }
 
