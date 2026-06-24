@@ -60,6 +60,8 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             manylinux: "2_28"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -158,7 +160,7 @@ jobs:
           set -euo pipefail
           echo "Dists:"; ls -1 dist/
           missing=()
-          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc; do
             # Maturin encodes the target in the wheel filename's platform tag:
             #   aarch64-apple-darwin   → macosx_*_arm64
             #   x86_64-apple-darwin    → macosx_*_x86_64
@@ -169,6 +171,7 @@ jobs:
               x86_64-apple-darwin)        pattern="macosx_*_x86_64" ;;
               x86_64-unknown-linux-gnu)   pattern="manylinux_*_x86_64" ;;
               aarch64-unknown-linux-gnu)  pattern="manylinux_*_aarch64" ;;
+              x86_64-pc-windows-msvc)     pattern="win_amd64" ;;
             esac
             if ! ls dist/*${pattern}*.whl >/dev/null 2>&1; then
               missing+=("$target")
@@ -228,6 +231,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -353,11 +358,11 @@ jobs:
         # changed the targets to update node-publish-platform's matrix to match.
         run: |
           set -euo pipefail
-          expected=5
+          expected=6
           actual=$(ls dist-npm/*.tgz | wc -l | tr -d ' ')
           echo "Packed tarballs ($actual):"; ls -1 dist-npm/*.tgz
           if [ "$actual" -ne "$expected" ]; then
-            echo "::error::Expected $expected npm packages (1 main + 4 platform) but packed $actual. If napi.targets changed, update node-publish-platform's matrix to match."
+            echo "::error::Expected $expected npm packages (1 main + 5 platform) but packed $actual. If napi.targets changed, update node-publish-platform's matrix to match."
             exit 1
           fi
 
@@ -401,6 +406,7 @@ jobs:
           - strands-agents-shell-darwin-arm64
           - strands-agents-shell-linux-x64-gnu
           - strands-agents-shell-linux-arm64-gnu
+          - strands-agents-shell-win32-x64-msvc
     env:
       V: ${{ needs.version.outputs.version }}
     steps:

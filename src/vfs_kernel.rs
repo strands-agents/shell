@@ -121,20 +121,35 @@ impl VfsKernel {
         canon_base: &std::path::Path,
     ) -> io::Result<Fd> {
         if flags.read && !flags.write {
-            // Open the file, then verify via /proc/self/fd that the
-            // opened fd still points within the bind mount. This
-            // eliminates the TOCTOU between canonicalize and read.
             let file = std::fs::File::open(host_path)?;
-            use std::os::unix::io::AsRawFd;
-            let fd_path = format!("/proc/self/fd/{}", file.as_raw_fd());
-            if let Ok(real) = std::fs::read_link(&fd_path)
-                && !real.starts_with(canon_base)
+
+            // Defense-in-depth TOCTOU check: after opening, verify via
+            // /proc/self/fd that the opened fd still points within the bind
+            // mount. This closes the race between canonicalize() and open().
+            //
+            // This is Linux-only: /proc/self/fd is a Linux procfs interface
+            // with no portable equivalent (macOS has no /proc; Windows has no
+            // procfs at all). On other platforms the canonical-path check
+            // performed before this function is called is the primary security
+            // boundary, so we simply skip this extra verification there.
+            #[cfg(target_os = "linux")]
             {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "access denied: path escaped bind mount",
-                ));
+                use std::os::unix::io::AsRawFd;
+                let fd_path = format!("/proc/self/fd/{}", file.as_raw_fd());
+                if let Ok(real) = std::fs::read_link(&fd_path)
+                    && !real.starts_with(canon_base)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "access denied: path escaped bind mount",
+                    ));
+                }
             }
+            // `canon_base` is only consumed by the Linux-only check above; on
+            // other targets it is intentionally unused.
+            #[cfg(not(target_os = "linux"))]
+            let _ = canon_base;
+
             use std::io::Read;
             let mut data = Vec::new();
             let mut file = file;

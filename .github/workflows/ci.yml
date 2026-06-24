@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -43,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
@@ -62,17 +62,27 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      # Create the venv and put its bin/Scripts dir on PATH so the
+      # subsequent steps work identically on Unix (.venv/bin) and
+      # Windows (.venv/Scripts).
       - name: Create virtualenv
-        run: python -m venv .venv
+        shell: bash
+        run: |
+          python -m venv .venv
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          fi
 
       - name: Install build deps
-        run: .venv/bin/pip install maturin pytest
+        run: pip install maturin pytest
 
       - name: Build and install wheel
-        run: .venv/bin/maturin develop --release
+        run: maturin develop --release
 
       - name: pytest
-        run: .venv/bin/pytest tests/python -v
+        run: pytest tests/python -v
 
   audit:
     name: Security audit
@@ -115,7 +125,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         node: ["20", "22", "24"]
     runs-on: ${{ matrix.os }}
     steps:
@@ -133,6 +143,15 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
+
+      # The package.json build scripts use `$(npm run --silent host-triple)`
+      # command substitution. npm runs script bodies with its configured
+      # script-shell, which defaults to cmd.exe on Windows (no `$(...)`
+      # support). Point it at the Git Bash that ships on the windows-latest
+      # runner so the substitution works identically across platforms.
+      - name: Use bash as npm script-shell (Windows)
+        if: runner.os == 'Windows'
+        run: npm config set script-shell bash
 
       - name: npm install
         # package-lock.json is gitignored, so `npm ci` can't run; use install.
