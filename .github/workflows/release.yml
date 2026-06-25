@@ -290,9 +290,9 @@ jobs:
             native.js
             native.d.ts
 
-  # ── Pack all 5 npm packages (fan-in from the per-platform builds) ─────────
+  # ── Pack all 6 npm packages (fan-in from the per-platform builds) ─────────
   # Assembles the exact publishable set — the main @strands-agents/shell package
-  # plus the 4 per-platform packages — using the napi-rs v3 release flow, then
+  # plus the 5 per-platform packages — using the napi-rs v3 release flow, then
   # packs each to a .tgz and uploads them. Download the `npm-packages` artifact
   # to install/test the real tarballs locally before any publish happens.
   node-pack:
@@ -351,8 +351,8 @@ jobs:
           for d in npm/*/; do (cd "$d" && npm pack --pack-destination "$GITHUB_WORKSPACE/dist-npm"); done
 
       - name: Verify the packaged set matches the publish matrix
-        # Guard against drift: the publish stage uses a static matrix of the 4
-        # platform packages (+ the main package = 5 total). If package.json's
+        # Guard against drift: the publish stage uses a static matrix of the 5
+        # platform packages (+ the main package = 6 total). If package.json's
         # napi.targets gains/loses a target, the packed count changes here and
         # this fails the run BEFORE anything is published — prompting whoever
         # changed the targets to update node-publish-platform's matrix to match.
@@ -379,7 +379,7 @@ jobs:
           name: npm-packages
           path: dist-npm/*.tgz
 
-  # ── Publish the 4 per-platform packages (one independently retriable job each)
+  # ── Publish the 5 per-platform packages (one independently retriable job each)
   # Each leg publishes exactly one tarball that node-inspect packed + uploaded,
   # so a flaky single platform can be re-run on its own via "Re-run failed jobs"
   # without touching the others. The matrix is static — its entries must match

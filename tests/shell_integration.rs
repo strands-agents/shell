@@ -5352,7 +5352,7 @@ umask = "077"
 
 [[bind]]
 mode = "copy"
-source = "{}"
+source = '{}'
 destination = "/workspace"
 readonly = true
 

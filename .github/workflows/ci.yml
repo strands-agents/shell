@@ -69,8 +69,13 @@ jobs:
         shell: bash
         run: |
           python -m venv .venv
+          # GITHUB_PATH entries must be native paths. In Git Bash on Windows
+          # $PWD is an MSYS path (/d/a/shell/shell) that the runner's Windows
+          # PATH cannot resolve, so the venv would be silently ignored and
+          # later steps would fall back to the host interpreter. Convert to a
+          # native Windows path with cygpath so .venv\Scripts is actually used.
           if [ "$RUNNER_OS" == "Windows" ]; then
-            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
+            cygpath -w "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
           else
             echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           fi
