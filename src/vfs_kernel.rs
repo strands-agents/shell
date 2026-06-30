@@ -123,15 +123,9 @@ impl VfsKernel {
         if flags.read && !flags.write {
             let file = std::fs::File::open(host_path)?;
 
-            // Defense-in-depth TOCTOU check: after opening, verify via
-            // /proc/self/fd that the opened fd still points within the bind
-            // mount. This closes the race between canonicalize() and open().
-            //
-            // This is Linux-only: /proc/self/fd is a Linux procfs interface
-            // with no portable equivalent (macOS has no /proc; Windows has no
-            // procfs at all). On other platforms the canonical-path check
-            // performed before this function is called is the primary security
-            // boundary, so we simply skip this extra verification there.
+            // Defense-in-depth TOCTOU re-check (Linux-only): /proc/self/fd has
+            // no portable equivalent, and the canonical-path check above is the
+            // primary guard, so this extra layer is simply skipped elsewhere.
             #[cfg(target_os = "linux")]
             {
                 use std::os::unix::io::AsRawFd;
@@ -145,10 +139,8 @@ impl VfsKernel {
                     ));
                 }
             }
-            // `canon_base` is only consumed by the Linux-only check above; on
-            // other targets it is intentionally unused.
             #[cfg(not(target_os = "linux"))]
-            let _ = canon_base;
+            let _ = canon_base; // only consumed by the Linux-only check above
 
             use std::io::Read;
             let mut data = Vec::new();
