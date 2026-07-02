@@ -121,20 +121,27 @@ impl VfsKernel {
         canon_base: &std::path::Path,
     ) -> io::Result<Fd> {
         if flags.read && !flags.write {
-            // Open the file, then verify via /proc/self/fd that the
-            // opened fd still points within the bind mount. This
-            // eliminates the TOCTOU between canonicalize and read.
             let file = std::fs::File::open(host_path)?;
-            use std::os::unix::io::AsRawFd;
-            let fd_path = format!("/proc/self/fd/{}", file.as_raw_fd());
-            if let Ok(real) = std::fs::read_link(&fd_path)
-                && !real.starts_with(canon_base)
+
+            // Defense-in-depth TOCTOU re-check (Linux-only): /proc/self/fd has
+            // no portable equivalent, and the canonical-path check above is the
+            // primary guard, so this extra layer is simply skipped elsewhere.
+            #[cfg(target_os = "linux")]
             {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "access denied: path escaped bind mount",
-                ));
+                use std::os::unix::io::AsRawFd;
+                let fd_path = format!("/proc/self/fd/{}", file.as_raw_fd());
+                if let Ok(real) = std::fs::read_link(&fd_path)
+                    && !real.starts_with(canon_base)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "access denied: path escaped bind mount",
+                    ));
+                }
             }
+            #[cfg(not(target_os = "linux"))]
+            let _ = canon_base; // only consumed by the Linux-only check above
+
             use std::io::Read;
             let mut data = Vec::new();
             let mut file = file;

@@ -60,6 +60,8 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             manylinux: "2_28"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -158,7 +160,7 @@ jobs:
           set -euo pipefail
           echo "Dists:"; ls -1 dist/
           missing=()
-          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc; do
             # Maturin encodes the target in the wheel filename's platform tag:
             #   aarch64-apple-darwin   → macosx_*_arm64
             #   x86_64-apple-darwin    → macosx_*_x86_64
@@ -169,6 +171,7 @@ jobs:
               x86_64-apple-darwin)        pattern="macosx_*_x86_64" ;;
               x86_64-unknown-linux-gnu)   pattern="manylinux_*_x86_64" ;;
               aarch64-unknown-linux-gnu)  pattern="manylinux_*_aarch64" ;;
+              x86_64-pc-windows-msvc)     pattern="win_amd64" ;;
             esac
             if ! ls dist/*${pattern}*.whl >/dev/null 2>&1; then
               missing+=("$target")
@@ -228,6 +231,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -285,9 +290,9 @@ jobs:
             native.js
             native.d.ts
 
-  # ── Pack all 5 npm packages (fan-in from the per-platform builds) ─────────
+  # ── Pack all 6 npm packages (fan-in from the per-platform builds) ─────────
   # Assembles the exact publishable set — the main @strands-agents/shell package
-  # plus the 4 per-platform packages — using the napi-rs v3 release flow, then
+  # plus the 5 per-platform packages — using the napi-rs v3 release flow, then
   # packs each to a .tgz and uploads them. Download the `npm-packages` artifact
   # to install/test the real tarballs locally before any publish happens.
   node-pack:
@@ -346,18 +351,18 @@ jobs:
           for d in npm/*/; do (cd "$d" && npm pack --pack-destination "$GITHUB_WORKSPACE/dist-npm"); done
 
       - name: Verify the packaged set matches the publish matrix
-        # Guard against drift: the publish stage uses a static matrix of the 4
-        # platform packages (+ the main package = 5 total). If package.json's
+        # Guard against drift: the publish stage uses a static matrix of the 5
+        # platform packages (+ the main package = 6 total). If package.json's
         # napi.targets gains/loses a target, the packed count changes here and
         # this fails the run BEFORE anything is published — prompting whoever
         # changed the targets to update node-publish-platform's matrix to match.
         run: |
           set -euo pipefail
-          expected=5
+          expected=6
           actual=$(ls dist-npm/*.tgz | wc -l | tr -d ' ')
           echo "Packed tarballs ($actual):"; ls -1 dist-npm/*.tgz
           if [ "$actual" -ne "$expected" ]; then
-            echo "::error::Expected $expected npm packages (1 main + 4 platform) but packed $actual. If napi.targets changed, update node-publish-platform's matrix to match."
+            echo "::error::Expected $expected npm packages (1 main + 5 platform) but packed $actual. If napi.targets changed, update node-publish-platform's matrix to match."
             exit 1
           fi
 
@@ -374,7 +379,7 @@ jobs:
           name: npm-packages
           path: dist-npm/*.tgz
 
-  # ── Publish the 4 per-platform packages (one independently retriable job each)
+  # ── Publish the 5 per-platform packages (one independently retriable job each)
   # Each leg publishes exactly one tarball that node-inspect packed + uploaded,
   # so a flaky single platform can be re-run on its own via "Re-run failed jobs"
   # without touching the others. The matrix is static — its entries must match
@@ -401,6 +406,7 @@ jobs:
           - strands-agents-shell-darwin-arm64
           - strands-agents-shell-linux-x64-gnu
           - strands-agents-shell-linux-arm64-gnu
+          - strands-agents-shell-win32-x64-msvc
     env:
       V: ${{ needs.version.outputs.version }}
     steps:

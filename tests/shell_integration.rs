@@ -4277,6 +4277,9 @@ fn builder_bind_direct_readonly_host() {
     }));
 }
 
+// Uses std::os::unix::fs::symlink — symlink creation differs on Windows
+// (requires elevated privileges), so this escape test is Unix-only.
+#[cfg(unix)]
 #[test]
 fn bind_direct_symlink_escape_blocked() {
     let (rt, local) = rt();
@@ -5349,7 +5352,7 @@ umask = "077"
 
 [[bind]]
 mode = "copy"
-source = "{}"
+source = '{}'
 destination = "/workspace"
 readonly = true
 
@@ -7381,6 +7384,9 @@ expect!(cmd_sleep_zero, "command sleep 0 && echo ok", "ok");
 
 // ── dangling symlink escape prevention ──────────────────────────────
 
+// Uses std::os::unix::fs::symlink — symlink creation differs on Windows
+// (requires elevated privileges), so this escape test is Unix-only.
+#[cfg(unix)]
 #[test]
 fn bind_direct_dangling_symlink_blocked() {
     let (rt, local) = rt();
