@@ -60,7 +60,7 @@ wasi = "0.14"
 
 # ----- Cross-platform (native + WASM) -----
 [dependencies.mlua]
-version = "0.11.6"
+version = "0.12.0"
 features = ["lua54", "async", "vendored"]
 
 [workspace]
