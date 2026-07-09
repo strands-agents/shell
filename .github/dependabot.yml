@@ -1,79 +1,127 @@
+# Dependabot configuration.
+#
+# Shared conventions across every ecosystem below (aligned with
+# strands-agents/harness-sdk):
+#   - cooldown: hold new updates for a few days before opening a PR so we don't
+#     churn on same-day releases. Majors get a long (30-day) window so a human
+#     can vet breaking changes before the PR lands.
+#   - groups: batch low-risk updates into grouped PRs. Dev tooling lands in one
+#     PR, minor/patch bumps in another. Major updates are intentionally left
+#     ungrouped so they arrive as individual, clearly-attributable PRs.
+#   - schedule: poll weekly. The cooldown already delays PRs by days, so daily
+#     polling just adds noise without surfacing updates any sooner.
+#   - versioning-strategy: increase-if-necessary, which bumps the constraint
+#     floor at a major boundary instead of just widening the upper bound, so CI
+#     actually resolves and tests the new major rather than sitting on the old
+#     one. Cargo does not support this option (it always updates the lockfile
+#     and Cargo.toml together), so only the pip and npm sections set it.
 version: 2
 updates:
-  - package-ecosystem: "cargo"
-    directory: "/"
+  # Rust workspace. Minor + patch bumps are batched; majors come individually
+  # and wait out the 30-day cooldown for review. Grouping is pattern-based
+  # because dependency-type grouping is not supported for cargo, so
+  # development/production groups never match and every bump would open its
+  # own PR.
+  - package-ecosystem: 'cargo'
+    directory: '/'
     schedule:
-      interval: "daily"
+      interval: 'weekly'
     open-pull-requests-limit: 100
     labels:
-      - "dependencies"
-      - "rust"
+      - 'dependencies'
+      - 'rust'
     commit-message:
-      prefix: "ci(rust)"
+      prefix: 'ci(rust)'
     cooldown:
       default-days: 5
       semver-major-days: 30
       semver-minor-days: 7
       semver-patch-days: 3
     groups:
-      development-dependencies:
-        dependency-type: "development"
-        applies-to: version-updates
+      # Minor + patch bumps in one PR. Majors aren't matched by any group, so
+      # they get individual PRs, gated by the 30-day semver-major cooldown
+      # above for manual review.
       production-minor:
-        dependency-type: "production"
         applies-to: version-updates
-        update-types:
-          - "minor"
-          - "patch"
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "daily"
-    open-pull-requests-limit: 100
-    labels:
-      - "dependencies"
-      - "python"
-    commit-message:
-      prefix: "ci(python)"
-    cooldown:
-      default-days: 5
-      semver-major-days: 30
-      semver-minor-days: 7
-      semver-patch-days: 3
-    groups:
-      dev-dependencies:
         patterns:
-          - "pytest"
-          - "maturin"
-  - package-ecosystem: "npm"
-    directory: "/"
+          - '*'
+        update-types:
+          - 'minor'
+          - 'patch'
+  # Python bindings (maturin build backend at the repo root). Same batching
+  # strategy as the Rust workspace.
+  - package-ecosystem: 'pip'
+    directory: '/'
     schedule:
-      interval: "daily"
+      interval: 'weekly'
     open-pull-requests-limit: 100
     labels:
-      - "dependencies"
-      - "node"
+      - 'dependencies'
+      - 'python'
     commit-message:
-      prefix: "ci(node)"
+      prefix: 'ci(python)'
+    versioning-strategy: increase-if-necessary
     cooldown:
       default-days: 5
       semver-major-days: 30
       semver-minor-days: 7
       semver-patch-days: 3
     groups:
+      # Dev/build tooling in one PR, matched by name because Dependabot does
+      # not classify PEP 621 pyproject dependencies as development vs
+      # production, so dependency-type grouping never matches for pip.
       development-dependencies:
-        dependency-type: "development"
         applies-to: version-updates
+        patterns:
+          - 'maturin'
+          - 'pytest*'
+      # Everything else: minor + patch bumps in one PR. Majors aren't matched
+      # by any group, so they get individual PRs, gated by the 30-day
+      # semver-major cooldown above for manual review.
       production-minor:
-        dependency-type: "production"
+        applies-to: version-updates
+        patterns:
+          - '*'
+        update-types:
+          - 'minor'
+          - 'patch'
+  # Node bindings at the repo root (napi). devDependencies only, so the
+  # development group catches everything; a hypothetical production major
+  # would still arrive as an individual PR.
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 100
+    labels:
+      - 'dependencies'
+      - 'typescript'
+    commit-message:
+      prefix: 'ci(typescript)'
+    versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 5
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    groups:
+      # All development dependencies in one PR.
+      development-dependencies:
+        dependency-type: 'development'
+        applies-to: version-updates
+      # Production minor + patch bumps in one PR.
+      production-minor:
+        dependency-type: 'production'
         applies-to: version-updates
         update-types:
-          - "minor"
-          - "patch"
-  - package-ecosystem: "github-actions"
-    directory: "/"
+          - 'minor'
+          - 'patch'
+  # GitHub Actions workflow pins. Low volume, so no grouping; the cooldown
+  # still holds majors back for review before the bump PR opens.
+  - package-ecosystem: 'github-actions'
+    directory: '/'
     schedule:
-      interval: "daily"
+      interval: 'weekly'
     open-pull-requests-limit: 100
     commit-message:
       prefix: ci
@@ -82,8 +130,3 @@ updates:
       semver-major-days: 30
       semver-minor-days: 7
       semver-patch-days: 3
-    groups:
-      actions:
-        patterns:
-          - "*"
-        applies-to: version-updates
