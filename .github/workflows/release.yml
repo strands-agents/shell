@@ -759,7 +759,8 @@ jobs:
       # No checkout/build — publish the exact tarball node-pack uploaded.
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          # npm@latest requires Node >= 22.22.2 / 24.15.0; Node 20 fails EBADENGINE.
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       - name: Update npm to latest
@@ -795,7 +796,8 @@ jobs:
     steps:
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          # npm@latest requires Node >= 22.22.2 / 24.15.0; Node 20 fails EBADENGINE.
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       - name: Update npm to latest
