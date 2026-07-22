@@ -928,4 +928,16 @@ pub trait Kernel: Send + Sync {
             "HTTP not available",
         ))
     }
+
+    /// Authorization-policy chokepoint.
+    ///
+    /// Gated sandbox operations call this with their Cedar action name (e.g.
+    /// `"fs:read"`) and the per-call input fields (e.g. `[("path", "/x")]`).
+    /// The default permits everything, so a kernel with no policy loaded is
+    /// unaffected. An implementation that returns `Err` denies the operation;
+    /// this only ever *adds* restrictions on top of the kernel's built-in
+    /// checks. See [`crate::policy`].
+    fn check_policy(&self, _action: &str, _fields: &[(&str, &str)]) -> io::Result<()> {
+        Ok(())
+    }
 }

@@ -83,6 +83,11 @@ pub struct VfsConfig {
     /// `allow_url` / the bindings' `allowed_urls`.
     #[serde(default)]
     pub allowed_urls: Vec<String>,
+    /// Path to a Cedar authorization-policy file, resolved relative to this
+    /// config file's directory. An *additional* restriction layer on top of
+    /// the SSRF/VFS checks; omit for unchanged (default-allow) behavior.
+    #[serde(default)]
+    pub policy: Option<String>,
     /// Environment variables seeded into the shell. A TOML `[env]` table.
     /// Ordered (BTreeMap) so config application is deterministic.
     #[serde(default)]
@@ -103,6 +108,7 @@ impl Default for VfsConfig {
             mcp: Vec::new(),
             limits: None,
             allowed_urls: Vec::new(),
+            policy: None,
             env: std::collections::BTreeMap::new(),
         }
     }

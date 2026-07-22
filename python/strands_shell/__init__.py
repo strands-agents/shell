@@ -280,6 +280,11 @@ class Shell:
     go in a single :class:`Limits` bundle; behavioral settings (``env``,
     ``umask``, ``timeout``) are top-level keyword args.
 
+    A Cedar authorization policy can be attached with ``policy_file`` (a path)
+    or ``policy`` (the policy text inline) — pass at most one. A policy only
+    ever *adds* restrictions on top of the mounts and SSRF guard; with none,
+    behavior is unchanged. See the README's "Authorization Policies" section.
+
     State (cwd, env, functions, open fds) persists across :meth:`run` calls.
     There is no ``close()`` — the embedded interpreter and in-process VFS are
     released by refcounting when the last reference drops.
@@ -296,7 +301,12 @@ class Shell:
         timeout: float | None = None,
         limits: Limits | None = None,
         config_file: str | None = None,
+        policy_file: str | None = None,
+        policy: str | None = None,
     ) -> None:
+        if policy_file is not None and policy is not None:
+            raise ValueError("pass at most one of `policy_file` or `policy`")
+
         builder = _native.Shell.builder()
 
         # config_file merges in first; explicit args below win over it. Each
@@ -306,6 +316,13 @@ class Shell:
         # real defaults when nothing is configured here or in the file.
         if config_file is not None:
             builder.config_file(config_file)
+
+        # A Cedar policy passed explicitly here overrides any `policy` key the
+        # config file set (same "explicit args win" rule as above).
+        if policy_file is not None:
+            builder.policy_file(policy_file)
+        elif policy is not None:
+            builder.policy_str(policy)
 
         for b in binds or []:
             if b.mode == "direct" and b.readonly:

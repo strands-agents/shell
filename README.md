@@ -204,6 +204,68 @@ command = "/path/to/mcp-server"
 args = ["--stdio"]
 ```
 
+## Authorization Policies (Cedar)
+
+Bind mounts and `allowed_urls` decide what *exists* in the sandbox. For finer
+control over what the agent may *do* with it, you can attach a policy written
+in [Cedar](https://www.cedarpolicy.com/), AWS's open-source authorization
+language. A policy gates individual operations at the Kernel boundary:
+
+| Action | Covers |
+|---|---|
+| `fs:read` `fs:stat` `fs:list` | reading, statting, and listing paths |
+| `fs:write` `fs:create` `fs:delete` `fs:rename` | mutating the filesystem |
+| `net:request` | `curl` / HTTP requests |
+| `env:read` | the `env` builtin |
+| `mcp:call` | calling a configured MCP tool |
+
+Per-call details live in `context.input` — `path` for filesystem actions,
+`url` and `method` for `net:request`, `server` and `tool` for `mcp:call`, and
+so on. A read-only sandbox is one rule:
+
+```cedar
+permit(
+  principal,
+  action in [Agent::Action::"fs:read", Agent::Action::"fs:stat", Agent::Action::"fs:list"],
+  resource
+);
+```
+
+Load it from Python, the CLI, the Rust builder, or a TOML key:
+
+```python
+shell = strands_shell.Shell(policy_file="read-only.cedar")
+# or inline: strands_shell.Shell(policy=open("read-only.cedar").read())
+```
+
+```sh
+strands-shell --policy read-only.cedar -c 'ls /'
+```
+
+```rust
+let shell = Shell::builder().policy_file("read-only.cedar")?.build()?;
+```
+
+```toml
+# in your config file, resolved relative to it; also picked up by --config
+policy = "read-only.cedar"
+```
+
+**Policies only ever add restrictions.** With no policy, behavior is unchanged.
+With a policy, a gated action must be permitted or it is denied (Cedar's
+default-deny) — and this layers *on top of* the SSRF guard and filesystem
+permissions, which it can never weaken. A policy that permits all
+`net:request` still can't reach `169.254.169.254`.
+
+Five worked examples — from a read-only sandbox up to anti-exfiltration egress
+allowlists and shielding secrets from the agent (the
+["lethal trifecta"](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)
+mitigations) — plus a runnable demo live in [`examples/`](examples/README.md):
+
+```sh
+./examples/run-policies.sh
+```
+
 ## MCP Server
 
 The built-in [MCP](https://modelcontextprotocol.io/) server exposes the shell over JSON-RPC on stdio, working with anything that speaks MCP.
