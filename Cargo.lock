@@ -783,6 +783,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jaq-core"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7561783b20275a6c9cb576e39208b0c635f34ef14357f1f05a2927a774f3adec"
+dependencies = [
+ "dyn-clone",
+ "once_cell",
+ "typed-arena",
+]
+
+[[package]]
 name = "jaq-json"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -791,7 +802,7 @@ dependencies = [
  "foldhash",
  "hifijson",
  "indexmap",
- "jaq-core",
+ "jaq-core 2.2.1",
  "jaq-std",
  "serde_json",
 ]
@@ -805,7 +816,7 @@ dependencies = [
  "aho-corasick",
  "base64",
  "chrono",
- "jaq-core",
+ "jaq-core 2.2.1",
  "libm",
  "log",
  "regex-lite",
@@ -1613,7 +1624,7 @@ dependencies = [
  "bytes",
  "clap",
  "inventory",
- "jaq-core",
+ "jaq-core 3.1.0",
  "jaq-json",
  "jaq-std",
  "lexopt",
