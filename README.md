@@ -241,7 +241,7 @@ Out of the box, the shell is an empty sandbox — no files, no network, no crede
 - **Prefer `mode: "copy"` over `mode: "direct"` for source code.** Copy-on-create isolates the agent from your live files. Use `direct` only for output directories where the agent needs to persist results.
 - **Scope binds narrowly.** Bind `/my/project/src` rather than `/my/project` or `/`. The agent doesn't need your `.git/`, `.env`, or `node_modules/`.
 - **Allowlist URLs explicitly.** Don't use `allowed_urls: ["https://"]` — this disables SSRF protection entirely. List the specific API endpoints the agent needs.
-- **Set timeouts.** The default has no per-command timeout. Set `timeout` to bound runaway commands (30s is reasonable for most agent loops).
+- **Rely on adjustable timeouts.** Commands run under an adjustable per-command timeout, defaulting to 30 seconds, which bounds runaway commands out of the box. Set `timeout` to raise or lower it for your agent loop.
 - **Use limits.** Set `max_output` to prevent agents from filling memory with unbounded command output (1MB is a good default).
 
 ## Commands
