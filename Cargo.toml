@@ -45,6 +45,7 @@ jaq-json = { version = "1", features = ["serde_json"] }
 
 # ----- Native-only dependencies -----
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cedar-policy = "4"
 inventory = "0.3"
 napi = { version = "3", features = ["napi9", "tokio_rt"], optional = true }
 napi-derive = { version = "3", optional = true }

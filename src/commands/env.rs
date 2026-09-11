@@ -4,7 +4,7 @@ const HELP: &str = "Usage: env
 Print the environment.";
 
 #[command("env")]
-async fn cmd_env(_os: &dyn Kernel, args: &[String]) -> CommandResult {
+async fn cmd_env(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut parser = lexopt::Parser::from_args(args);
     if let Some(arg) = parser.next()? {
         match arg {
@@ -16,6 +16,9 @@ async fn cmd_env(_os: &dyn Kernel, args: &[String]) -> CommandResult {
             _ => return Err(arg.unexpected().into()),
         }
     }
+    // `env` enumerates the whole environment table — gate it as an explicit
+    // environment read. Shell `$VAR` interpolation is deliberately not gated.
+    os.check_policy("env:read", &[("name", "*")])?;
     let mut vars: Vec<(String, String)> = io::with_process(|proc| {
         proc.env
             .iter()
