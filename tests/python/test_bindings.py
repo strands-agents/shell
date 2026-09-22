@@ -266,3 +266,50 @@ def test_omitted_and_positive_timeout_allowed():
     # Omitted timeout => no limit; a positive value => bounded. Both build.
     assert strands_shell.Shell().run("echo ok").stdout.strip() == "ok"
     assert strands_shell.Shell(timeout=5.0).run("echo ok").stdout.strip() == "ok"
+
+
+# --------------------------------------------------------------------------- #
+# Cedar authorization policies
+# --------------------------------------------------------------------------- #
+
+_READ_ONLY_POLICY = (
+    'permit(principal, action in ['
+    'Agent::Action::"fs:read", Agent::Action::"fs:stat", Agent::Action::"fs:list"'
+    '], resource);'
+)
+
+
+def test_policy_str_denies_unpermitted_action():
+    """An inline read-only policy allows reads but denies writes."""
+    shell = strands_shell.Shell(policy=_READ_ONLY_POLICY)
+    assert shell.run("ls /").status == 0
+    # A write is not permitted by the policy => denied, non-zero exit.
+    assert shell.run("echo hi > /home/lash/x.txt").status != 0
+
+
+def test_policy_file_loads_from_path(tmp_path):
+    """A policy supplied as a file path behaves like the inline form."""
+    policy = tmp_path / "read-only.cedar"
+    policy.write_text(_READ_ONLY_POLICY)
+    shell = strands_shell.Shell(policy_file=str(policy))
+    assert shell.run("ls /").status == 0
+    assert shell.run("echo hi > /home/lash/x.txt").status != 0
+
+
+def test_no_policy_is_unchanged():
+    """With no policy, writes are allowed (default-allow)."""
+    shell = strands_shell.Shell()
+    assert shell.run("echo hi > /home/lash/x.txt && cat /home/lash/x.txt").status == 0
+
+
+def test_policy_and_policy_file_are_mutually_exclusive(tmp_path):
+    policy = tmp_path / "p.cedar"
+    policy.write_text(_READ_ONLY_POLICY)
+    with pytest.raises(ValueError, match="at most one"):
+        strands_shell.Shell(policy=_READ_ONLY_POLICY, policy_file=str(policy))
+
+
+def test_malformed_policy_raises():
+    """A malformed policy fails at construction (build())."""
+    with pytest.raises(Exception):
+        strands_shell.Shell(policy="permit(garbage")

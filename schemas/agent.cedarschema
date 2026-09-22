@@ -1,0 +1,41 @@
+// Cedar schema for strands-shell authorization policies.
+//
+// Defines the action vocabulary used to gate sandbox operations at the
+// `Kernel` boundary: fs:read, fs:stat, fs:write, fs:list, fs:create,
+// fs:delete, fs:rename, env:read, net:request, mcp:call.
+//
+// Resources are attribute-less singletons: every fs:* request targets the
+// same `Agent::Filesystem::"global"` UID; every net:request targets
+// `Agent::Network::"global"`; etc. Per-call data — the path being read, the
+// URL being fetched, the MCP server/tool being invoked — lives in
+// `context.input`, so policies match against `context.input.<field>` rather
+// than `resource.<field>`.
+//
+// There is a single principal type, `Shell`, used with the fixed UID
+// `Agent::Shell::"default"`.
+
+namespace Agent {
+  type FsPathInput     = { path: String };
+  type FsRenameInput   = { src: String, dst: String };
+  type EnvReadInput    = { name: String };
+  type NetRequestInput = { url: String, method: String };
+  type McpCallInput    = { server: String, tool: String };
+
+  entity Shell;
+
+  entity Filesystem;
+  entity Network;
+  entity Environment;
+  entity McpService;
+
+  action "fs:read"     appliesTo { principal: [Shell], resource: [Filesystem], context: { input: FsPathInput } };
+  action "fs:stat"     appliesTo { principal: [Shell], resource: [Filesystem], context: { input: FsPathInput } };
+  action "fs:write"    appliesTo { principal: [Shell], resource: [Filesystem], context: { input: FsPathInput } };
+  action "fs:list"     appliesTo { principal: [Shell], resource: [Filesystem], context: { input: FsPathInput } };
+  action "fs:create"   appliesTo { principal: [Shell], resource: [Filesystem], context: { input: FsPathInput } };
+  action "fs:delete"   appliesTo { principal: [Shell], resource: [Filesystem], context: { input: FsPathInput } };
+  action "fs:rename"   appliesTo { principal: [Shell], resource: [Filesystem], context: { input: FsRenameInput } };
+  action "net:request" appliesTo { principal: [Shell], resource: [Network], context: { input: NetRequestInput } };
+  action "env:read"    appliesTo { principal: [Shell], resource: [Environment], context: { input: EnvReadInput } };
+  action "mcp:call"    appliesTo { principal: [Shell], resource: [McpService], context: { input: McpCallInput } };
+}

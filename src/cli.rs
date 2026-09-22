@@ -22,6 +22,10 @@ struct Cli {
     #[arg(long)]
     config: Option<String>,
 
+    /// Path to a Cedar authorization-policy file (additional restrictions)
+    #[arg(long)]
+    policy: Option<String>,
+
     /// Execute a command string and exit
     #[arg(short = 'c')]
     command: Option<String>,
@@ -40,13 +44,23 @@ enum Commands {
     ListCommands,
 }
 
-fn build_shell(config: Option<&str>) -> Shell {
+fn build_shell(config: Option<&str>, policy: Option<&str>) -> Shell {
     let builder = Shell::builder();
     let builder = match config {
         Some(path) => match builder.config_file(path) {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("strands-shell: --config: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => builder,
+    };
+    let builder = match policy {
+        Some(path) => match builder.policy_file(path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("strands-shell: --policy: {e}");
                 std::process::exit(1);
             }
         },
@@ -87,7 +101,7 @@ where
         }
     }
 
-    let mut shell = build_shell(cli.config.as_deref());
+    let mut shell = build_shell(cli.config.as_deref(), cli.policy.as_deref());
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
