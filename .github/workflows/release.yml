@@ -58,7 +58,7 @@ jobs:
       prev_tag: ${{ steps.scan.outputs.prev_tag }}
       new_tag: ${{ steps.scan.outputs.new_tag }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -178,7 +178,7 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.scan-commits.outputs.release_sha }}
 
@@ -213,7 +213,7 @@ jobs:
     name: Python sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.scan-commits.outputs.release_sha }}
 
@@ -382,7 +382,7 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.scan-commits.outputs.release_sha }}
 
@@ -448,7 +448,7 @@ jobs:
     needs: [scan-commits, node-builds]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.scan-commits.outputs.release_sha }}
           persist-credentials: false
@@ -572,7 +572,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.scan-commits.outputs.release_sha }}
           fetch-depth: 0
@@ -661,7 +661,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.scan-commits.outputs.release_sha }}
           # This job creates the tag, so keep the GITHUB_TOKEN in git config
