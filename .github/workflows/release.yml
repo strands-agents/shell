@@ -182,7 +182,7 @@ jobs:
         with:
           ref: ${{ needs.scan-commits.outputs.release_sha }}
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -217,7 +217,7 @@ jobs:
         with:
           ref: ${{ needs.scan-commits.outputs.release_sha }}
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -257,7 +257,7 @@ jobs:
           pattern: python-*
           merge-multiple: true
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -579,7 +579,7 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
