@@ -423,6 +423,32 @@ impl ShellBuilder {
     }
 }
 
+/// Lets a `!Send` value cross [`Python::detach`], which runs its closure on
+/// the calling thread, so the value never leaves this thread.
+struct SameThread<T>(T);
+// SAFETY: `Shell` is `unsendable`, so PyO3 rejects calls from any other
+// thread, and the `&mut self` borrow held across `detach` rules out re-entry
+// on this thread while the GIL is released.
+unsafe impl<T> Send for SameThread<T> {}
+
+impl<T> SameThread<T> {
+    /// Unwraps by value, so a closure captures the whole wrapper rather than its `!Send` field.
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+/// Drives `fut` to completion with the GIL released, so other Python threads
+/// and the asyncio event loop keep running while a command executes.
+fn block_on_detached<F>(py: Python<'_>, runtime: &tokio::runtime::Runtime, fut: F) -> F::Output
+where
+    F: std::future::Future,
+    F::Output: Send,
+{
+    let job = SameThread(fut);
+    py.detach(move || runtime.block_on(tokio::task::LocalSet::new().run_until(job.into_inner())))
+}
+
 /// A sandboxed shell environment.
 #[pyclass(unsendable)]
 pub struct Shell {
@@ -452,13 +478,12 @@ impl Shell {
     }
 
     /// Run a command and capture output.
-    fn run(&mut self, command: &str) -> PyResult<Output> {
+    fn run(&mut self, py: Python<'_>, command: &str) -> PyResult<Output> {
         let shell = self
             .inner
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("shell consumed"))?;
-        let local = tokio::task::LocalSet::new();
-        let output = self.runtime.block_on(local.run_until(shell.run(command)));
+        let output = block_on_detached(py, &self.runtime, shell.run(command));
         Ok(Output {
             status: output.status,
             stdout: output.stdout,
@@ -543,10 +568,7 @@ impl Shell {
             .inner
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("shell consumed"))?;
-        let local = tokio::task::LocalSet::new();
-        let bytes = self
-            .runtime
-            .block_on(local.run_until(shell.read_file(path)))
+        let bytes = block_on_detached(py, &self.runtime, shell.read_file(path))
             .map_err(|e| native_file_error(py, path, &e))?;
         Ok(PyBytes::new(py, &bytes))
     }
@@ -560,9 +582,7 @@ impl Shell {
             .inner
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("shell consumed"))?;
-        let local = tokio::task::LocalSet::new();
-        self.runtime
-            .block_on(local.run_until(shell.write_file(path, content)))
+        block_on_detached(py, &self.runtime, shell.write_file(path, content))
             .map_err(|e| native_file_error(py, path, &e))
     }
 
@@ -572,9 +592,7 @@ impl Shell {
             .inner
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("shell consumed"))?;
-        let local = tokio::task::LocalSet::new();
-        self.runtime
-            .block_on(local.run_until(shell.remove_file(path)))
+        block_on_detached(py, &self.runtime, shell.remove_file(path))
             .map_err(|e| native_file_error(py, path, &e))
     }
 
@@ -587,10 +605,7 @@ impl Shell {
             .inner
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("shell consumed"))?;
-        let local = tokio::task::LocalSet::new();
-        let infos = self
-            .runtime
-            .block_on(local.run_until(shell.list_files(path)))
+        let infos = block_on_detached(py, &self.runtime, shell.list_files(path))
             .map_err(|e| native_file_error(py, path, &e))?;
         Ok(infos
             .into_iter()
