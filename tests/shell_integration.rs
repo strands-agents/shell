@@ -2032,6 +2032,14 @@ fn grep_binary_run(tag: &str, cmd: &str) -> strands_shell::Output {
         }
         std::fs::write(dir.join("bin2.dat"), b"\xffneedle\nneedle\n").unwrap();
         std::fs::write(dir.join("nomatch.dat"), b"\0\xffzzz\n").unwrap();
+        std::fs::write(dir.join("dot.txt"), b"a\xffb\naxb\n").unwrap();
+        std::fs::write(dir.join("o.txt"), b"\xff foo\n").unwrap();
+        let filler: String = (0..20000).map(|i| format!("text {i}\n")).collect();
+        std::fs::write(
+            dir.join("late.txt"),
+            format!("needle early\n{filler}needle \0 nul\nneedle after\n"),
+        )
+        .unwrap();
         let mut shell = Shell::builder()
             .bind_direct(dir.to_str().unwrap(), "/g")
             .build()
@@ -2086,7 +2094,7 @@ fn grep_invalid_utf8_line_suppressed() {
 #[test]
 fn grep_only_matching_skips_binary_line() {
     let out = grep_binary_run("o", "grep -o needle /g/mid.txt");
-    assert_eq!(out.stdout, "needle\nneedle\n");
+    assert_eq!(out.stdout, "needle\nneedle\nneedle\n");
 }
 
 #[test]
@@ -2100,14 +2108,51 @@ fn grep_i_skips_binary_file() {
 #[test]
 fn grep_text_flag_prints_binary_lines() {
     let out = grep_binary_run("ba", "grep -a needle /g/mid.txt");
-    assert!(out.stdout.contains("needle ok"), "{:?}", out.stdout);
-    assert!(
-        out.stdout.contains("\u{FFFD}needle bad"),
-        "{:?}",
-        out.stdout
-    );
+    assert_eq!(out.stdout, "needle ok\n\u{FFFD}needle bad\nneedle after\n");
     assert_eq!(out.stderr, "");
     assert_eq!(out.status, 0);
+    // Matching still runs on raw bytes: `.` never matches the invalid byte.
+    let out = grep_binary_run("bal", "grep -a '^. foo' /g/o.txt");
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.status, 1);
+}
+
+#[test]
+fn grep_dot_does_not_match_invalid_byte() {
+    let out = grep_binary_run("dot", "grep -c 'a.b' /g/dot.txt");
+    assert_eq!(out.stdout, "1\n");
+}
+
+#[test]
+fn grep_only_matching_prints_valid_match_on_invalid_line() {
+    let out = grep_binary_run("ofoo", "grep -o foo /g/o.txt");
+    assert_eq!(out.stdout, "foo\n");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn grep_late_nul_hides_rest_of_file() {
+    let out = grep_binary_run("late", "grep needle /g/late.txt");
+    assert_eq!(out.stdout, "needle early\n");
+    assert_eq!(out.stderr, "grep: /g/late.txt: binary file matches\n");
+    let out = grep_binary_run("latei", "grep -I needle /g/late.txt");
+    assert_eq!(out.stdout, "needle early\n");
+    assert_eq!(out.stderr, "");
+    assert_eq!(out.status, 1);
+    let out = grep_binary_run("latec", "grep -c needle /g/late.txt");
+    assert_eq!(out.stdout, "3\n");
+    let out = grep_binary_run("lateci", "grep -cI needle /g/late.txt");
+    assert_eq!(out.stdout, "0\n");
+    assert_eq!(out.status, 1);
+    // -q/-l/-L stop at the first match, before the late NUL.
+    let out = grep_binary_run("lateqi", "grep -qI needle /g/late.txt");
+    assert_eq!(out.status, 0);
+    let out = grep_binary_run("lateli", "grep -lI needle /g/late.txt");
+    // The file is listed (single-file -l prints an empty name, a separate pre-existing quirk).
+    assert!(!out.stdout.is_empty(), "{:?}", out.stdout);
+    assert_eq!(out.status, 0);
+    let out = grep_binary_run("lateLi", "grep -LI needle /g/late.txt");
+    assert_eq!(out.stdout, "");
 }
 
 #[test]

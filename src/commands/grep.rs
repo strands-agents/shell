@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use crate::os;
 use crate::prelude::*;
 
@@ -39,7 +37,7 @@ Options:
 enum BinaryFiles {
     /// Report "binary file matches" instead of printing the lines.
     Binary,
-    /// Print every line, decoding invalid bytes lossily.
+    /// Print every line, decoding invalid bytes lossily (captured output must be UTF-8).
     Text,
     /// Treat files containing NUL as if they had no matches.
     WithoutMatch,
@@ -157,7 +155,9 @@ fn parse_args(args: &[String]) -> Result<Option<Opts>, Box<dyn std::error::Error
     Ok(Some(opts))
 }
 
-fn build_regex(opts: &Opts) -> Result<regex::Regex, Box<dyn std::error::Error + Send + Sync>> {
+fn build_regex(
+    opts: &Opts,
+) -> Result<regex::bytes::Regex, Box<dyn std::error::Error + Send + Sync>> {
     let combined = if opts.fixed {
         opts.patterns
             .iter()
@@ -174,7 +174,7 @@ fn build_regex(opts: &Opts) -> Result<regex::Regex, Box<dyn std::error::Error + 
     if opts.line_regexp {
         pat = format!("^(?:{})$", pat);
     }
-    let re = regex::RegexBuilder::new(&pat)
+    let re = regex::bytes::RegexBuilder::new(&pat)
         .case_insensitive(opts.ignore_case)
         .build()?;
     Ok(re)
@@ -245,28 +245,29 @@ async fn collect_files_recursive(os: &dyn Kernel, path: &str, opts: &Opts, out: 
 
 async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
     reader: R,
-    re: &regex::Regex,
+    re: &regex::bytes::Regex,
     opts: &Opts,
     prefix: &str,
     name: &str,
     w: &mut os::FdWriter,
     ew: &mut os::FdWriter,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let mut buf_reader = BufReader::new(reader);
+    let mut buf_reader = BufReader::with_capacity(96 * 1024, reader);
     let mut line: Vec<u8> = Vec::new();
     let mut lineno: u64 = 0;
     let mut match_count: u64 = 0;
     let mut found = false;
     let detect_binary = opts.binary_files != BinaryFiles::Text;
-    // A NUL in the first buffer marks the whole input binary; a later NUL hides only its line.
-    let file_binary = detect_binary && buf_reader.fill_buf().await?.contains(&0);
+    // A NUL in the first 96 KiB (GNU's first buffer) marks the whole input binary; a later NUL
+    // does so from its line on (GNU decides per buffer there).
+    let mut file_binary = detect_binary && buf_reader.fill_buf().await?.contains(&0);
     // A matched or context line was hidden as binary, so report it on stderr.
     let mut binary_matched = false;
     let summary_only = opts.quiet || opts.list || opts.list_non_matching || opts.count;
 
     let use_context = opts.before_context > 0 || opts.after_context > 0;
     // Ring buffer for before-context
-    let mut before_buf: std::collections::VecDeque<(u64, String)> =
+    let mut before_buf: std::collections::VecDeque<(u64, Vec<u8>)> =
         std::collections::VecDeque::new();
     // How many more after-context lines to print
     let mut after_remaining: usize = 0;
@@ -292,31 +293,36 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
         let mut raw = line.as_slice();
         raw = raw.strip_suffix(b"\n").unwrap_or(raw);
         raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        // Invalid UTF-8 is matched lossily but never printed unless -a.
-        let (text, is_binary) = match std::str::from_utf8(raw) {
-            Ok(s) => (
-                Cow::Borrowed(s),
-                file_binary || (detect_binary && s.contains('\0')),
-            ),
-            Err(_) => (String::from_utf8_lossy(raw), detect_binary),
-        };
-        let text = text.as_ref();
-        let matched = re.is_match(text) ^ opts.invert;
+        if detect_binary && !file_binary && raw.contains(&0) {
+            file_binary = true;
+            if opts.binary_files == BinaryFiles::WithoutMatch {
+                // GNU counts the whole file as non-matching; printed lines stay printed.
+                match_count = 0;
+                found = false;
+                break;
+            }
+        }
+        // Invalid UTF-8 is matched on raw bytes but never printed unless -a.
+        let invalid = detect_binary && std::str::from_utf8(raw).is_err();
+        let is_binary = file_binary || invalid;
+        // -o hides only matches that are themselves invalid UTF-8.
+        let per_match = opts.only_matching && !opts.invert && !file_binary;
+        let matched = re.is_match(raw) ^ opts.invert;
 
         if matched {
             found = true;
             match_count += 1;
 
             if summary_only {
-                if let Some(max) = opts.max_count
-                    && match_count >= max
-                {
+                // -q/-l/-L stop at the first match (GNU done_on_match).
+                let first_match_done = opts.quiet || opts.list || opts.list_non_matching;
+                if first_match_done || opts.max_count.is_some_and(|max| match_count >= max) {
                     break;
                 }
                 continue;
             }
 
-            if is_binary {
+            if is_binary && !per_match {
                 binary_matched = true;
                 if use_context {
                     // The hidden match ends any open context and breaks the group.
@@ -352,21 +358,26 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
                     if opts.line_number {
                         wprint!(w, "{}-", bno)?;
                     }
-                    wprintln!(w, "{}", btext)?;
+                    wprintln!(w, "{}", String::from_utf8_lossy(&btext))?;
                 }
                 after_remaining = opts.after_context;
             }
 
             printed_any = true;
             if opts.only_matching && !opts.invert {
-                for m in re.find_iter(text) {
+                for m in re.find_iter(raw) {
+                    // GNU drops the rest of the line once a match is suppressed.
+                    if invalid && std::str::from_utf8(m.as_bytes()).is_err() {
+                        binary_matched = true;
+                        break;
+                    }
                     if !prefix.is_empty() {
                         wprint!(w, "{}:", prefix)?;
                     }
                     if opts.line_number {
                         wprint!(w, "{}:", lineno)?;
                     }
-                    wprintln!(w, "{}", m.as_str())?;
+                    wprintln!(w, "{}", String::from_utf8_lossy(m.as_bytes()))?;
                 }
             } else {
                 if !prefix.is_empty() {
@@ -375,7 +386,7 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
                 if opts.line_number {
                     wprint!(w, "{}:", lineno)?;
                 }
-                wprintln!(w, "{}", text)?;
+                wprintln!(w, "{}", String::from_utf8_lossy(raw))?;
             }
 
             if let Some(max) = opts.max_count
@@ -408,7 +419,7 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
             if opts.line_number {
                 wprint!(w, "{}-", lineno)?;
             }
-            wprintln!(w, "{}", text)?;
+            wprintln!(w, "{}", String::from_utf8_lossy(raw))?;
             if after_remaining == 0 {
                 need_sep = true;
             }
@@ -417,7 +428,7 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
             if after_remaining == 0 && found && !need_sep {
                 need_sep = true;
             }
-            before_buf.push_back((lineno, text.to_string()));
+            before_buf.push_back((lineno, raw.to_vec()));
             while before_buf.len() > opts.before_context {
                 before_buf.pop_front();
             }
