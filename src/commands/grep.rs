@@ -21,6 +21,9 @@ Options:
   -H, --with-filename       print filename with matches
   -h, --no-filename         suppress filename prefix
   -o, --only-matching       show only the matching part
+  -a, --text                process a binary file as if it were text
+  -I                        ignore binary files (treat as non-matching)
+  --binary-files=TYPE       binary, text, or without-match
   -m, --max-count NUM       stop after NUM matches per file
   -A, --after-context NUM   print NUM lines after match
   -B, --before-context NUM  print NUM lines before match
@@ -28,6 +31,17 @@ Options:
   --include=GLOB            search only files matching GLOB
   --exclude=GLOB            skip files matching GLOB
   --exclude-dir=DIR         skip directories matching DIR";
+
+/// How to treat input that looks binary (NUL byte or invalid UTF-8).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BinaryFiles {
+    /// Report "binary file matches" instead of printing the lines.
+    Binary,
+    /// Print every line, decoding invalid bytes lossily (captured output must be UTF-8).
+    Text,
+    /// Treat files containing NUL as if they had no matches.
+    WithoutMatch,
+}
 
 struct Opts {
     patterns: Vec<String>,
@@ -46,6 +60,7 @@ struct Opts {
     with_filename: Option<bool>,
     only_matching: bool,
     max_count: Option<u64>,
+    binary_files: BinaryFiles,
     after_context: usize,
     before_context: usize,
     include: Vec<String>,
@@ -71,6 +86,7 @@ fn parse_args(args: &[String]) -> Result<Option<Opts>, Box<dyn std::error::Error
         with_filename: None,
         only_matching: false,
         max_count: None,
+        binary_files: BinaryFiles::Binary,
         after_context: 0,
         before_context: 0,
         include: Vec::new(),
@@ -97,6 +113,20 @@ fn parse_args(args: &[String]) -> Result<Option<Opts>, Box<dyn std::error::Error
             Short('h') | Long("no-filename") => opts.with_filename = Some(false),
             Short('o') | Long("only-matching") => opts.only_matching = true,
             Short('m') | Long("max-count") => opts.max_count = Some(parser.value()?.parse()?),
+            Short('a') | Long("text") => opts.binary_files = BinaryFiles::Text,
+            Short('I') => opts.binary_files = BinaryFiles::WithoutMatch,
+            Long("binary-files") => {
+                opts.binary_files = match parser.value()?.string()?.as_str() {
+                    "binary" => BinaryFiles::Binary,
+                    "text" => BinaryFiles::Text,
+                    "without-match" => BinaryFiles::WithoutMatch,
+                    other => {
+                        return Err(
+                            format!("invalid argument '{other}' for '--binary-files'").into()
+                        );
+                    }
+                };
+            }
             Short('A') | Long("after-context") => opts.after_context = parser.value()?.parse()?,
             Short('B') | Long("before-context") => opts.before_context = parser.value()?.parse()?,
             Short('C') | Long("context") => {
@@ -125,7 +155,9 @@ fn parse_args(args: &[String]) -> Result<Option<Opts>, Box<dyn std::error::Error
     Ok(Some(opts))
 }
 
-fn build_regex(opts: &Opts) -> Result<regex::Regex, Box<dyn std::error::Error + Send + Sync>> {
+fn build_regex(
+    opts: &Opts,
+) -> Result<regex::bytes::Regex, Box<dyn std::error::Error + Send + Sync>> {
     let combined = if opts.fixed {
         opts.patterns
             .iter()
@@ -142,7 +174,7 @@ fn build_regex(opts: &Opts) -> Result<regex::Regex, Box<dyn std::error::Error + 
     if opts.line_regexp {
         pat = format!("^(?:{})$", pat);
     }
-    let re = regex::RegexBuilder::new(&pat)
+    let re = regex::bytes::RegexBuilder::new(&pat)
         .case_insensitive(opts.ignore_case)
         .build()?;
     Ok(re)
@@ -211,87 +243,160 @@ async fn collect_files_recursive(os: &dyn Kernel, path: &str, opts: &Opts, out: 
     }
 }
 
+async fn write_context(
+    w: &mut os::FdWriter,
+    prefix: &str,
+    line_number: bool,
+    lineno: u64,
+    text: &[u8],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !prefix.is_empty() {
+        wprint!(w, "{}-", prefix)?;
+    }
+    if line_number {
+        wprint!(w, "{}-", lineno)?;
+    }
+    wprintln!(w, "{}", String::from_utf8_lossy(text))?;
+    Ok(())
+}
+
 async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
     reader: R,
-    re: &regex::Regex,
+    re: &regex::bytes::Regex,
     opts: &Opts,
     prefix: &str,
+    name: &str,
     w: &mut os::FdWriter,
+    ew: &mut os::FdWriter,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let mut buf_reader = BufReader::new(reader);
-    let mut line = String::new();
+    let mut buf_reader = BufReader::with_capacity(96 * 1024, reader);
+    let mut line: Vec<u8> = Vec::new();
     let mut lineno: u64 = 0;
     let mut match_count: u64 = 0;
     let mut found = false;
+    let detect_binary = opts.binary_files != BinaryFiles::Text;
+    // A NUL in the first 96 KiB (GNU's first buffer) marks the whole input binary; a later NUL
+    // does so from its line on (GNU decides per buffer there).
+    let mut file_binary = detect_binary && buf_reader.fill_buf().await?.contains(&0);
+    // A matched or context line was hidden as binary, so report it on stderr.
+    let mut binary_matched = false;
+    let summary_only = opts.quiet || opts.list || opts.list_non_matching || opts.count;
 
     let use_context = opts.before_context > 0 || opts.after_context > 0;
-    // Ring buffer for before-context
-    let mut before_buf: std::collections::VecDeque<(u64, String)> =
+    // Last B lines not yet written (hidden ones included), as (lineno, bytes, hidden).
+    let mut before_buf: std::collections::VecDeque<(u64, Vec<u8>, bool)> =
         std::collections::VecDeque::new();
-    // How many more after-context lines to print
-    let mut after_remaining: usize = 0;
-    // Whether we need a "--" separator before the next context group
-    let mut need_sep = false;
+    // Line number of the last line written (0 = none); GNU's lastout.
+    let mut last_printed: u64 = 0;
+    let mut used = false;
+    // After-context lines still owed.
+    let mut pending: usize = 0;
+
+    // A binary file is treated as non-matching under -I.
+    let skip_file = file_binary && opts.binary_files == BinaryFiles::WithoutMatch;
 
     loop {
+        if skip_file {
+            break;
+        }
         line.clear();
-        if buf_reader.read_line(&mut line).await? == 0 {
+        if buf_reader.read_until(b'\n', &mut line).await? == 0 {
             break;
         }
         lineno += 1;
-        let text = line.trim_end_matches('\n').trim_end_matches('\r');
-        let matched = re.is_match(text) ^ opts.invert;
+        let mut raw = line.as_slice();
+        raw = raw.strip_suffix(b"\n").unwrap_or(raw);
+        raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+        if detect_binary && !file_binary && raw.contains(&0) {
+            file_binary = true;
+            if opts.binary_files == BinaryFiles::WithoutMatch {
+                // GNU counts the whole file as non-matching; printed lines stay printed.
+                match_count = 0;
+                found = false;
+                break;
+            }
+        }
+        // Invalid UTF-8 is matched on raw bytes but never printed unless -a.
+        let invalid = detect_binary && std::str::from_utf8(raw).is_err();
+        let is_binary = file_binary || invalid;
+        // -o hides only matches that are themselves invalid UTF-8.
+        let per_match = opts.only_matching && !opts.invert && !file_binary;
+        let matched = re.is_match(raw) ^ opts.invert;
+        // Hidden lines are never written but otherwise behave like normal lines.
+        let hidden = is_binary && !per_match;
 
         if matched {
             found = true;
             match_count += 1;
 
-            if opts.quiet || opts.list || opts.list_non_matching || opts.count {
-                if let Some(max) = opts.max_count
-                    && match_count >= max
-                {
+            if summary_only {
+                // -q/-l/-L stop at the first match (GNU done_on_match).
+                let first_match_done = opts.quiet || opts.list || opts.list_non_matching;
+                if first_match_done || opts.max_count.is_some_and(|max| match_count >= max) {
                     break;
                 }
                 continue;
             }
 
-            if use_context {
-                // Print separator between context groups
-                if (opts.before_context == 0 || !before_buf.is_empty()) && need_sep {
-                    wprintln!(w, "--")?;
-                }
-                need_sep = false;
-                // Flush before-context buffer
-                for (bno, btext) in before_buf.drain(..) {
-                    if !prefix.is_empty() {
-                        wprint!(w, "{}-", prefix)?;
-                    }
-                    if opts.line_number {
-                        wprint!(w, "{}-", bno)?;
-                    }
-                    wprintln!(w, "{}", btext)?;
-                }
-                after_remaining = opts.after_context;
+            if hidden && file_binary {
+                binary_matched = true;
+                break;
             }
 
-            if opts.only_matching && !opts.invert {
-                for m in re.find_iter(text) {
+            // Region start; a gap from the last written line starts a new group.
+            let rs = (last_printed + 1).max(lineno.saturating_sub(opts.before_context as u64));
+            // GNU's `used` is set by any selected line, hidden or not. With nothing written
+            // and no -A, its lastout is still unset and never matches, so the group gets `--`.
+            let lastout_unset = last_printed == 0 && opts.after_context == 0;
+            if use_context && used && (lastout_unset || rs != last_printed + 1) {
+                wprintln!(w, "--")?;
+            }
+            used = true;
+            for (bno, btext, bhidden) in before_buf.drain(..) {
+                if bno < rs {
+                    continue;
+                }
+                if bhidden {
+                    binary_matched |= !opts.only_matching;
+                } else {
+                    if !opts.only_matching {
+                        write_context(w, prefix, opts.line_number, bno, &btext).await?;
+                    }
+                    last_printed = bno;
+                }
+            }
+
+            if hidden {
+                // A hidden match starts no after-context (GNU lastout does not advance).
+                binary_matched = true;
+                pending = 0;
+            } else {
+                if opts.only_matching && !opts.invert {
+                    for m in re.find_iter(raw) {
+                        // GNU drops the rest of the line once a match is suppressed.
+                        if invalid && std::str::from_utf8(m.as_bytes()).is_err() {
+                            binary_matched = true;
+                            break;
+                        }
+                        if !prefix.is_empty() {
+                            wprint!(w, "{}:", prefix)?;
+                        }
+                        if opts.line_number {
+                            wprint!(w, "{}:", lineno)?;
+                        }
+                        wprintln!(w, "{}", String::from_utf8_lossy(m.as_bytes()))?;
+                    }
+                } else {
                     if !prefix.is_empty() {
                         wprint!(w, "{}:", prefix)?;
                     }
                     if opts.line_number {
                         wprint!(w, "{}:", lineno)?;
                     }
-                    wprintln!(w, "{}", m.as_str())?;
+                    wprintln!(w, "{}", String::from_utf8_lossy(raw))?;
                 }
-            } else {
-                if !prefix.is_empty() {
-                    wprint!(w, "{}:", prefix)?;
-                }
-                if opts.line_number {
-                    wprint!(w, "{}:", lineno)?;
-                }
-                wprintln!(w, "{}", text)?;
+                last_printed = lineno;
+                pending = opts.after_context;
             }
 
             if let Some(max) = opts.max_count
@@ -299,25 +404,21 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
             {
                 break;
             }
-        } else if use_context && found && after_remaining > 0 {
-            // Print after-context line
-            after_remaining -= 1;
-            if !prefix.is_empty() {
-                wprint!(w, "{}-", prefix)?;
+        } else if pending > 0 {
+            if hidden {
+                // GNU lastout never passes a hidden line, so it spends the rest of the context.
+                pending = 0;
+                binary_matched |= !opts.only_matching;
+            } else {
+                pending -= 1;
+                // -o prints no context, but the line still counts as written.
+                if !opts.only_matching {
+                    write_context(w, prefix, opts.line_number, lineno, raw).await?;
+                }
+                last_printed = lineno;
             }
-            if opts.line_number {
-                wprint!(w, "{}-", lineno)?;
-            }
-            wprintln!(w, "{}", text)?;
-            if after_remaining == 0 {
-                need_sep = true;
-            }
-        } else if use_context {
-            // Buffer for before-context
-            if after_remaining == 0 && found && !need_sep {
-                need_sep = true;
-            }
-            before_buf.push_back((lineno, text.to_string()));
+        } else if opts.before_context > 0 {
+            before_buf.push_back((lineno, raw.to_vec(), hidden));
             while before_buf.len() > opts.before_context {
                 before_buf.pop_front();
             }
@@ -335,6 +436,9 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
     }
     if opts.list_non_matching && !found {
         wprintln!(w, "{}", prefix)?;
+    }
+    if binary_matched && !summary_only && opts.binary_files == BinaryFiles::Binary {
+        wprintln!(ew, "grep: {}: binary file matches", name)?;
     }
 
     Ok(found)
@@ -377,12 +481,14 @@ async fn cmd_grep(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let show_name = opts.with_filename.unwrap_or(multi);
 
     let mut w = io::stdout()?;
+    // stderr can only be taken once per process, so share one writer across files.
+    let mut ew = io::stderr()?;
     let mut any_match = false;
 
     if files.is_empty() {
         // Read from stdin
         let reader = io::stdin()?;
-        if grep_reader(reader, &re, &opts, "", &mut w).await? {
+        if grep_reader(reader, &re, &opts, "", "(standard input)", &mut w, &mut ew).await? {
             any_match = true;
         }
     } else {
@@ -391,7 +497,6 @@ async fn cmd_grep(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 Ok(fd) => fd,
                 Err(e) => {
                     if !opts.quiet {
-                        let mut ew = io::stderr()?;
                         wprintln!(ew, "grep: {}: {}", path, e)?;
                     }
                     continue;
@@ -399,10 +504,24 @@ async fn cmd_grep(os: &dyn Kernel, args: &[String]) -> CommandResult {
             };
             let reader = io::take_reader(fd)?;
             let prefix = if show_name { path.as_str() } else { "" };
-            if grep_reader(reader, &re, &opts, prefix, &mut w).await? {
-                any_match = true;
-                if opts.quiet {
-                    return Ok(0);
+            match grep_reader(reader, &re, &opts, prefix, path, &mut w, &mut ew).await {
+                Ok(true) => {
+                    any_match = true;
+                    if opts.quiet {
+                        return Ok(0);
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    // A closed stdout must stop grep, not repeat per file.
+                    if e.downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+                    {
+                        return Err(e);
+                    }
+                    if !opts.quiet {
+                        wprintln!(ew, "grep: {}: {}", path, e)?;
+                    }
                 }
             }
         }

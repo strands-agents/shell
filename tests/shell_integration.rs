@@ -1982,6 +1982,347 @@ expect!(
     "/tmp/gi.txt:yes"
 );
 
+// ── grep binary / non-UTF-8 input ───────────────────────────────────
+
+/// Runs `cmd` in a shell with a host dir of raw-byte fixtures bound at /g.
+fn grep_binary_run(tag: &str, cmd: &str) -> strands_shell::Output {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = std::env::temp_dir().join(format!("lsh_grep_bin_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"needle\n").unwrap();
+        std::fs::write(dir.join("b.txt"), b"needle b\n").unwrap();
+        std::fs::write(dir.join("bin.dat"), b"\0\xffneedle\n").unwrap();
+        std::fs::write(dir.join("c.txt"), b"needle c\n").unwrap();
+        std::fs::write(
+            dir.join("mid.txt"),
+            b"x\nneedle ok\n\xffneedle bad\nneedle after\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ctx.txt"),
+            b"before\n\xffbad ctx\nneedle hit\n\xffafter bad\nplain after\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ctxc.txt"),
+            b"needle a\n\xffneedle b\nafter1\nneedle c\nafter2\nafter3\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("far.txt"), b"\xffbad\nl2\nl3\nneedle\n").unwrap();
+        std::fs::write(
+            dir.join("sep.txt"),
+            b"needle A\nl2\nl3\n\xffbin\nneedle B\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("hidm.txt"), b"l1\nl2\n\xffneedle\nneedle vis\n").unwrap();
+        std::fs::write(
+            dir.join("sep4.txt"),
+            b"needle A\nl2\n\xffbin\nl4\nneedle B\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("c7.txt"),
+            b"MATCH\n\xffc2\nc3\nc4\nc5\n\xffMATCH\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("adj.txt"), b"needle A\nl2\nl3\nl4\nneedle B\n").unwrap();
+        std::fs::write(dir.join("foo.txt"), b"foo\nbar\n").unwrap();
+        std::fs::write(dir.join("ha3.txt"), b"needle\n\xffa\nb\nc\nd\ne\nneedle2\n").unwrap();
+        std::fs::write(dir.join("hidstart.txt"), b"\xffneedle\nc1\nc2\nneedle\n").unwrap();
+        std::fs::write(dir.join("e14.txt"), b"\xffneedle\nx\ny\nneedle\n").unwrap();
+        for n in 1..=3 {
+            let big: String = (0..5000).map(|i| format!("needle {i}\n")).collect();
+            std::fs::write(dir.join(format!("big{n}.txt")), big).unwrap();
+        }
+        std::fs::write(dir.join("bin2.dat"), b"\xffneedle\nneedle\n").unwrap();
+        std::fs::write(dir.join("nomatch.dat"), b"\0\xffzzz\n").unwrap();
+        std::fs::write(dir.join("dot.txt"), b"a\xffb\naxb\n").unwrap();
+        std::fs::write(dir.join("o.txt"), b"\xff foo\n").unwrap();
+        let filler: String = (0..20000).map(|i| format!("text {i}\n")).collect();
+        std::fs::write(
+            dir.join("late.txt"),
+            format!("needle early\n{filler}needle \0 nul\nneedle after\n"),
+        )
+        .unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/g")
+            .build()
+            .unwrap();
+        let out = shell.run(cmd).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }))
+}
+
+#[test]
+fn grep_binary_file_note() {
+    let out = grep_binary_run("note", "grep needle /g/bin.dat");
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.stderr, "grep: /g/bin.dat: binary file matches\n");
+    assert_eq!(out.status, 0);
+}
+
+#[test]
+fn grep_recursive_continues_past_binary() {
+    let out = grep_binary_run("rec", "cd /g; grep -rn needle .");
+    assert!(out.stdout.contains("a.txt:1:needle"), "{:?}", out.stdout);
+    assert!(out.stdout.contains("b.txt:1:needle b"), "{:?}", out.stdout);
+    assert!(out.stdout.contains("c.txt:1:needle c"), "{:?}", out.stdout);
+    assert!(
+        out.stdout.contains("mid.txt:2:needle ok"),
+        "{:?}",
+        out.stdout
+    );
+    assert!(!out.stdout.contains("bin.dat"), "{:?}", out.stdout);
+    assert!(
+        out.stderr.contains("grep: bin.dat: binary file matches"),
+        "{:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("grep: mid.txt: binary file matches"),
+        "{:?}",
+        out.stderr
+    );
+    assert_eq!(out.status, 0);
+}
+
+#[test]
+fn grep_invalid_utf8_line_suppressed() {
+    let out = grep_binary_run("mid", "grep needle /g/mid.txt");
+    assert_eq!(out.stdout, "needle ok\nneedle after\n");
+    assert_eq!(out.stderr, "grep: /g/mid.txt: binary file matches\n");
+    assert_eq!(out.status, 0);
+}
+
+#[test]
+fn grep_only_matching_skips_binary_line() {
+    let out = grep_binary_run("o", "grep -o needle /g/mid.txt");
+    assert_eq!(out.stdout, "needle\nneedle\nneedle\n");
+}
+
+#[test]
+fn grep_i_skips_binary_file() {
+    let out = grep_binary_run("bi", "grep -I needle /g/bin.dat");
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.stderr, "");
+    assert_eq!(out.status, 1);
+}
+
+#[test]
+fn grep_text_flag_prints_binary_lines() {
+    let out = grep_binary_run("ba", "grep -a needle /g/mid.txt");
+    assert_eq!(out.stdout, "needle ok\n\u{FFFD}needle bad\nneedle after\n");
+    assert_eq!(out.stderr, "");
+    assert_eq!(out.status, 0);
+    // Matching still runs on raw bytes: `.` never matches the invalid byte.
+    let out = grep_binary_run("bal", "grep -a '^. foo' /g/o.txt");
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.status, 1);
+}
+
+#[test]
+fn grep_dot_does_not_match_invalid_byte() {
+    let out = grep_binary_run("dot", "grep -c 'a.b' /g/dot.txt");
+    assert_eq!(out.stdout, "1\n");
+}
+
+#[test]
+fn grep_only_matching_prints_valid_match_on_invalid_line() {
+    let out = grep_binary_run("ofoo", "grep -o foo /g/o.txt");
+    assert_eq!(out.stdout, "foo\n");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn grep_late_nul_hides_rest_of_file() {
+    let out = grep_binary_run("late", "grep needle /g/late.txt");
+    assert_eq!(out.stdout, "needle early\n");
+    assert_eq!(out.stderr, "grep: /g/late.txt: binary file matches\n");
+    let out = grep_binary_run("latei", "grep -I needle /g/late.txt");
+    assert_eq!(out.stdout, "needle early\n");
+    assert_eq!(out.stderr, "");
+    assert_eq!(out.status, 1);
+    let out = grep_binary_run("latec", "grep -c needle /g/late.txt");
+    assert_eq!(out.stdout, "3\n");
+    let out = grep_binary_run("lateci", "grep -cI needle /g/late.txt");
+    assert_eq!(out.stdout, "0\n");
+    assert_eq!(out.status, 1);
+    // -q/-l/-L stop at the first match, before the late NUL.
+    let out = grep_binary_run("lateqi", "grep -qI needle /g/late.txt");
+    assert_eq!(out.status, 0);
+    let out = grep_binary_run("lateli", "grep -lI needle /g/late.txt");
+    // The file is listed (single-file -l prints an empty name, a separate pre-existing quirk).
+    assert!(!out.stdout.is_empty(), "{:?}", out.stdout);
+    assert_eq!(out.status, 0);
+    let out = grep_binary_run("lateLi", "grep -LI needle /g/late.txt");
+    assert_eq!(out.stdout, "");
+}
+
+#[test]
+fn grep_binary_files_option() {
+    let out = grep_binary_run("bf1", "grep --binary-files=without-match needle /g/bin.dat");
+    assert_eq!(out.status, 1);
+    let out = grep_binary_run("bf2", "grep --binary-files=text needle /g/mid.txt");
+    assert!(out.stdout.contains("needle bad"), "{:?}", out.stdout);
+    let out = grep_binary_run("bf3", "grep --binary-files=bogus needle /g/a.txt");
+    assert_ne!(out.status, 0);
+    assert!(
+        out.stderr.contains("grep: invalid argument 'bogus'"),
+        "{:?}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("grep: grep:"), "{:?}", out.stderr);
+}
+
+#[test]
+fn grep_binary_line_occupies_context_slot() {
+    let out = grep_binary_run("ctxa", "grep -n -A1 needle /g/ctx.txt");
+    assert_eq!(out.stdout, "3:needle hit\n");
+    assert!(
+        out.stderr.contains("binary file matches"),
+        "{:?}",
+        out.stderr
+    );
+    let out = grep_binary_run("ctxb", "grep -n -B1 needle /g/ctx.txt");
+    assert_eq!(out.stdout, "3:needle hit\n");
+    assert!(
+        out.stderr.contains("binary file matches"),
+        "{:?}",
+        out.stderr
+    );
+}
+
+#[test]
+fn grep_matched_binary_line_resets_context() {
+    let out = grep_binary_run("ctxc1", "grep -n -A1 needle /g/ctxc.txt");
+    assert_eq!(out.stdout, "1:needle a\n--\n4:needle c\n5-after2\n");
+    let out = grep_binary_run("ctxc2", "grep -n -A2 needle /g/ctxc.txt");
+    assert_eq!(
+        out.stdout,
+        "1:needle a\n--\n4:needle c\n5-after2\n6-after3\n"
+    );
+}
+
+#[test]
+fn grep_distant_binary_line_gives_no_note() {
+    let out = grep_binary_run("far", "grep -n -B1 needle /g/far.txt");
+    assert_eq!(out.stdout, "3-l3\n4:needle\n");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn grep_dropped_binary_line_keeps_group_separator() {
+    let out = grep_binary_run("sepb", "grep -n -B1 needle /g/sep.txt");
+    assert_eq!(out.stdout, "1:needle A\n--\n5:needle B\n");
+    let out = grep_binary_run("sepc", "grep -n -C1 needle /g/sep.txt");
+    assert_eq!(out.stdout, "1:needle A\n2-l2\n--\n5:needle B\n");
+}
+
+#[test]
+fn grep_hidden_lines_keep_neighbouring_before_context() {
+    let note = "grep: /g/hidm.txt: binary file matches\n";
+    let out = grep_binary_run("hidm", "grep -B2 needle /g/hidm.txt");
+    assert_eq!(out.stdout, "l1\nl2\nneedle vis\n");
+    assert_eq!(out.stderr, note);
+    let out = grep_binary_run("sep4", "grep -B3 needle /g/sep4.txt");
+    assert_eq!(out.stdout, "needle A\nl2\nl4\nneedle B\n");
+    assert_eq!(out.stderr, "grep: /g/sep4.txt: binary file matches\n");
+    let out = grep_binary_run("c7", "grep -C1 MATCH /g/c7.txt");
+    assert_eq!(out.stdout, "MATCH\n--\nc5\n");
+    assert_eq!(out.stderr, "grep: /g/c7.txt: binary file matches\n");
+}
+
+#[test]
+fn grep_adjacent_context_groups_have_no_separator() {
+    let out = grep_binary_run("adj", "grep -B3 needle /g/adj.txt");
+    assert_eq!(out.stdout, "needle A\nl2\nl3\nl4\nneedle B\n");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn grep_only_matching_prints_no_context() {
+    let out = grep_binary_run("ofoo1", "grep -o -A1 foo /g/foo.txt");
+    assert_eq!(out.stdout, "foo\n");
+    assert_eq!(out.stderr, "");
+    let out = grep_binary_run("ohid", "grep -o -A1 needle /g/hidm.txt");
+    assert_eq!(out.stdout, "needle\nneedle\n");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn grep_without_match_is_silent_for_invalid_utf8() {
+    let out = grep_binary_run("iq", "grep -I needle /g/mid.txt");
+    assert_eq!(out.stdout, "needle ok\nneedle after\n");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn grep_count_and_list_on_binary() {
+    let out = grep_binary_run("cl", "grep -c needle /g/bin.dat /g/mid.txt");
+    assert_eq!(out.stdout, "/g/bin.dat:1\n/g/mid.txt:3\n");
+    assert_eq!(out.stderr, "");
+    let out = grep_binary_run("cl2", "grep -l needle /g/bin.dat /g/mid.txt");
+    assert_eq!(out.stdout, "/g/bin.dat\n/g/mid.txt\n");
+    assert_eq!(out.stderr, "");
+    let out = grep_binary_run("cl3", "grep -q needle /g/bin.dat");
+    assert_eq!(out.status, 0);
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn grep_stdin_binary_note() {
+    let out = grep_binary_run("stdin", "cat /g/bin.dat | grep needle");
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.stderr, "grep: (standard input): binary file matches\n");
+    assert_eq!(out.status, 0);
+}
+
+#[test]
+fn grep_broken_pipe_stops_after_first_file() {
+    let out = grep_binary_run(
+        "bp",
+        "grep needle /g/big1.txt /g/big2.txt /g/big3.txt | head -n 1",
+    );
+    assert_eq!(out.stdout, "/g/big1.txt:needle 0\n");
+    assert!(!out.stderr.contains("/g/big"), "stderr: {}", out.stderr);
+}
+
+#[test]
+fn grep_leading_separator_after_hidden_binary_match() {
+    // GNU's `used` flag is set by hidden selected lines too.
+    let out = grep_binary_run("sep0", "grep -A1 needle /g/bin2.dat");
+    assert_eq!(out.stdout, "--\nneedle\n");
+    let out = grep_binary_run("sep0b", "grep -n -A1 needle /g/hidstart.txt");
+    assert_eq!(out.stdout, "--\n4:needle\n");
+    let out = grep_binary_run("sep0c", "grep -n -C2 needle /g/hidstart.txt");
+    assert_eq!(out.stdout, "--\n2-c1\n3-c2\n4:needle\n");
+    let out = grep_binary_run("sep0d", "grep -B1 needle /g/e14.txt");
+    assert_eq!(out.stdout, "--\ny\nneedle\n");
+    // With -A pending, GNU's lastout starts at the first line: a contiguous group gets none.
+    let out = grep_binary_run("sep0e", "grep -n -C3 needle /g/hidstart.txt");
+    assert_eq!(out.stdout, "2-c1\n3-c2\n4:needle\n");
+}
+
+#[test]
+fn grep_hidden_line_ends_after_context() {
+    let out = grep_binary_run("ha3a", "grep -n -A3 needle /g/ha3.txt");
+    assert_eq!(out.stdout, "1:needle\n--\n7:needle2\n");
+    assert_eq!(out.stderr, "grep: /g/ha3.txt: binary file matches\n");
+    let out = grep_binary_run("ha3c", "grep -n -C3 needle /g/ha3.txt");
+    assert_eq!(out.stdout, "1:needle\n--\n4-c\n5-d\n6-e\n7:needle2\n");
+}
+
+#[test]
+fn grep_binary_no_match_quiet_exit_1() {
+    let out = grep_binary_run("nm", "grep needle /g/nomatch.dat");
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.stderr, "");
+    assert_eq!(out.status, 1);
+}
+
 // ── jq coverage ─────────────────────────────────────────────────────
 
 expect!(jq_identity, "echo '{\"a\":1}' | jq '.'", "{\n  \"a\": 1\n}");
