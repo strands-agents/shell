@@ -2026,6 +2026,22 @@ fn grep_binary_run(tag: &str, cmd: &str) -> strands_shell::Output {
             b"needle A\nl2\nl3\n\xffbin\nneedle B\n",
         )
         .unwrap();
+        std::fs::write(dir.join("hidm.txt"), b"l1\nl2\n\xffneedle\nneedle vis\n").unwrap();
+        std::fs::write(
+            dir.join("sep4.txt"),
+            b"needle A\nl2\n\xffbin\nl4\nneedle B\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("c7.txt"),
+            b"MATCH\n\xffc2\nc3\nc4\nc5\n\xffMATCH\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("adj.txt"), b"needle A\nl2\nl3\nl4\nneedle B\n").unwrap();
+        std::fs::write(dir.join("foo.txt"), b"foo\nbar\n").unwrap();
+        std::fs::write(dir.join("ha3.txt"), b"needle\n\xffa\nb\nc\nd\ne\nneedle2\n").unwrap();
+        std::fs::write(dir.join("hidstart.txt"), b"\xffneedle\nc1\nc2\nneedle\n").unwrap();
+        std::fs::write(dir.join("e14.txt"), b"\xffneedle\nx\ny\nneedle\n").unwrap();
         for n in 1..=3 {
             let big: String = (0..5000).map(|i| format!("needle {i}\n")).collect();
             std::fs::write(dir.join(format!("big{n}.txt")), big).unwrap();
@@ -2216,6 +2232,37 @@ fn grep_dropped_binary_line_keeps_group_separator() {
 }
 
 #[test]
+fn grep_hidden_lines_keep_neighbouring_before_context() {
+    let note = "grep: /g/hidm.txt: binary file matches\n";
+    let out = grep_binary_run("hidm", "grep -B2 needle /g/hidm.txt");
+    assert_eq!(out.stdout, "l1\nl2\nneedle vis\n");
+    assert_eq!(out.stderr, note);
+    let out = grep_binary_run("sep4", "grep -B3 needle /g/sep4.txt");
+    assert_eq!(out.stdout, "needle A\nl2\nl4\nneedle B\n");
+    assert_eq!(out.stderr, "grep: /g/sep4.txt: binary file matches\n");
+    let out = grep_binary_run("c7", "grep -C1 MATCH /g/c7.txt");
+    assert_eq!(out.stdout, "MATCH\n--\nc5\n");
+    assert_eq!(out.stderr, "grep: /g/c7.txt: binary file matches\n");
+}
+
+#[test]
+fn grep_adjacent_context_groups_have_no_separator() {
+    let out = grep_binary_run("adj", "grep -B3 needle /g/adj.txt");
+    assert_eq!(out.stdout, "needle A\nl2\nl3\nl4\nneedle B\n");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn grep_only_matching_prints_no_context() {
+    let out = grep_binary_run("ofoo1", "grep -o -A1 foo /g/foo.txt");
+    assert_eq!(out.stdout, "foo\n");
+    assert_eq!(out.stderr, "");
+    let out = grep_binary_run("ohid", "grep -o -A1 needle /g/hidm.txt");
+    assert_eq!(out.stdout, "needle\nneedle\n");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
 fn grep_without_match_is_silent_for_invalid_utf8() {
     let out = grep_binary_run("iq", "grep -I needle /g/mid.txt");
     assert_eq!(out.stdout, "needle ok\nneedle after\n");
@@ -2254,9 +2301,28 @@ fn grep_broken_pipe_stops_after_first_file() {
 }
 
 #[test]
-fn grep_no_leading_separator_before_hidden_binary_match() {
+fn grep_leading_separator_after_hidden_binary_match() {
+    // GNU's `used` flag is set by hidden selected lines too.
     let out = grep_binary_run("sep0", "grep -A1 needle /g/bin2.dat");
-    assert_eq!(out.stdout, "needle\n");
+    assert_eq!(out.stdout, "--\nneedle\n");
+    let out = grep_binary_run("sep0b", "grep -n -A1 needle /g/hidstart.txt");
+    assert_eq!(out.stdout, "--\n4:needle\n");
+    let out = grep_binary_run("sep0c", "grep -n -C2 needle /g/hidstart.txt");
+    assert_eq!(out.stdout, "--\n2-c1\n3-c2\n4:needle\n");
+    let out = grep_binary_run("sep0d", "grep -B1 needle /g/e14.txt");
+    assert_eq!(out.stdout, "--\ny\nneedle\n");
+    // With -A pending, GNU's lastout starts at the first line: a contiguous group gets none.
+    let out = grep_binary_run("sep0e", "grep -n -C3 needle /g/hidstart.txt");
+    assert_eq!(out.stdout, "2-c1\n3-c2\n4:needle\n");
+}
+
+#[test]
+fn grep_hidden_line_ends_after_context() {
+    let out = grep_binary_run("ha3a", "grep -n -A3 needle /g/ha3.txt");
+    assert_eq!(out.stdout, "1:needle\n--\n7:needle2\n");
+    assert_eq!(out.stderr, "grep: /g/ha3.txt: binary file matches\n");
+    let out = grep_binary_run("ha3c", "grep -n -C3 needle /g/ha3.txt");
+    assert_eq!(out.stdout, "1:needle\n--\n4-c\n5-d\n6-e\n7:needle2\n");
 }
 
 #[test]

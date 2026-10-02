@@ -243,6 +243,23 @@ async fn collect_files_recursive(os: &dyn Kernel, path: &str, opts: &Opts, out: 
     }
 }
 
+async fn write_context(
+    w: &mut os::FdWriter,
+    prefix: &str,
+    line_number: bool,
+    lineno: u64,
+    text: &[u8],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !prefix.is_empty() {
+        wprint!(w, "{}-", prefix)?;
+    }
+    if line_number {
+        wprint!(w, "{}-", lineno)?;
+    }
+    wprintln!(w, "{}", String::from_utf8_lossy(text))?;
+    Ok(())
+}
+
 async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
     reader: R,
     re: &regex::bytes::Regex,
@@ -266,20 +283,17 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
     let summary_only = opts.quiet || opts.list || opts.list_non_matching || opts.count;
 
     let use_context = opts.before_context > 0 || opts.after_context > 0;
-    // Ring buffer for before-context
-    let mut before_buf: std::collections::VecDeque<(u64, Vec<u8>)> =
+    // Last B lines not yet written (hidden ones included), as (lineno, bytes, hidden).
+    let mut before_buf: std::collections::VecDeque<(u64, Vec<u8>, bool)> =
         std::collections::VecDeque::new();
-    // How many more after-context lines to print
-    let mut after_remaining: usize = 0;
-    // Whether we need a "--" separator before the next context group
-    let mut need_sep = false;
-    // Whether any match or context line has been written yet.
-    let mut printed_any = false;
+    // Line number of the last line written (0 = none); GNU's lastout.
+    let mut last_printed: u64 = 0;
+    let mut used = false;
+    // After-context lines still owed.
+    let mut pending: usize = 0;
 
     // A binary file is treated as non-matching under -I.
     let skip_file = file_binary && opts.binary_files == BinaryFiles::WithoutMatch;
-    // Line number of the last binary line hidden from context (0 = none).
-    let mut last_binary_lineno: u64 = 0;
 
     loop {
         if skip_file {
@@ -308,6 +322,8 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
         // -o hides only matches that are themselves invalid UTF-8.
         let per_match = opts.only_matching && !opts.invert && !file_binary;
         let matched = re.is_match(raw) ^ opts.invert;
+        // Hidden lines are never written but otherwise behave like normal lines.
+        let hidden = is_binary && !per_match;
 
         if matched {
             found = true;
@@ -322,71 +338,65 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
                 continue;
             }
 
-            if is_binary && !per_match {
+            if hidden && file_binary {
                 binary_matched = true;
-                if use_context {
-                    // The hidden match ends any open context and breaks the group.
-                    after_remaining = 0;
-                    before_buf.clear();
-                    need_sep = printed_any;
-                    last_binary_lineno = lineno;
-                }
-                if file_binary || opts.max_count.is_some_and(|max| match_count >= max) {
-                    break;
-                }
-                continue;
+                break;
             }
 
-            if use_context {
-                // A hidden binary line still inside the before window.
-                let binary_in_window = last_binary_lineno > 0
-                    && lineno - last_binary_lineno <= opts.before_context as u64;
-                // Print separator between context groups
-                if (opts.before_context == 0 || !before_buf.is_empty() || binary_in_window)
-                    && need_sep
-                {
-                    wprintln!(w, "--")?;
+            // Region start; a gap from the last written line starts a new group.
+            let rs = (last_printed + 1).max(lineno.saturating_sub(opts.before_context as u64));
+            // GNU's `used` is set by any selected line, hidden or not. With nothing written
+            // and no -A, its lastout is still unset and never matches, so the group gets `--`.
+            let lastout_unset = last_printed == 0 && opts.after_context == 0;
+            if use_context && used && (lastout_unset || rs != last_printed + 1) {
+                wprintln!(w, "--")?;
+            }
+            used = true;
+            for (bno, btext, bhidden) in before_buf.drain(..) {
+                if bno < rs {
+                    continue;
                 }
-                need_sep = false;
-                binary_matched |= binary_in_window;
-                last_binary_lineno = 0;
-                // Flush before-context buffer
-                for (bno, btext) in before_buf.drain(..) {
-                    if !prefix.is_empty() {
-                        wprint!(w, "{}-", prefix)?;
+                if bhidden {
+                    binary_matched |= !opts.only_matching;
+                } else {
+                    if !opts.only_matching {
+                        write_context(w, prefix, opts.line_number, bno, &btext).await?;
                     }
-                    if opts.line_number {
-                        wprint!(w, "{}-", bno)?;
-                    }
-                    wprintln!(w, "{}", String::from_utf8_lossy(&btext))?;
+                    last_printed = bno;
                 }
-                after_remaining = opts.after_context;
             }
 
-            printed_any = true;
-            if opts.only_matching && !opts.invert {
-                for m in re.find_iter(raw) {
-                    // GNU drops the rest of the line once a match is suppressed.
-                    if invalid && std::str::from_utf8(m.as_bytes()).is_err() {
-                        binary_matched = true;
-                        break;
+            if hidden {
+                // A hidden match starts no after-context (GNU lastout does not advance).
+                binary_matched = true;
+                pending = 0;
+            } else {
+                if opts.only_matching && !opts.invert {
+                    for m in re.find_iter(raw) {
+                        // GNU drops the rest of the line once a match is suppressed.
+                        if invalid && std::str::from_utf8(m.as_bytes()).is_err() {
+                            binary_matched = true;
+                            break;
+                        }
+                        if !prefix.is_empty() {
+                            wprint!(w, "{}:", prefix)?;
+                        }
+                        if opts.line_number {
+                            wprint!(w, "{}:", lineno)?;
+                        }
+                        wprintln!(w, "{}", String::from_utf8_lossy(m.as_bytes()))?;
                     }
+                } else {
                     if !prefix.is_empty() {
                         wprint!(w, "{}:", prefix)?;
                     }
                     if opts.line_number {
                         wprint!(w, "{}:", lineno)?;
                     }
-                    wprintln!(w, "{}", String::from_utf8_lossy(m.as_bytes()))?;
+                    wprintln!(w, "{}", String::from_utf8_lossy(raw))?;
                 }
-            } else {
-                if !prefix.is_empty() {
-                    wprint!(w, "{}:", prefix)?;
-                }
-                if opts.line_number {
-                    wprint!(w, "{}:", lineno)?;
-                }
-                wprintln!(w, "{}", String::from_utf8_lossy(raw))?;
+                last_printed = lineno;
+                pending = opts.after_context;
             }
 
             if let Some(max) = opts.max_count
@@ -394,41 +404,21 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
             {
                 break;
             }
-        } else if is_binary {
-            // Binary lines are never shown, but they still occupy a context slot.
-            if use_context {
-                if found && after_remaining > 0 {
-                    after_remaining -= 1;
-                    // -o prints no context, so the hidden line is never in play.
-                    binary_matched |= !opts.only_matching;
-                    if after_remaining == 0 {
-                        need_sep = true;
-                    }
-                } else {
-                    before_buf.clear();
-                    last_binary_lineno = lineno;
+        } else if pending > 0 {
+            if hidden {
+                // GNU lastout never passes a hidden line, so it spends the rest of the context.
+                pending = 0;
+                binary_matched |= !opts.only_matching;
+            } else {
+                pending -= 1;
+                // -o prints no context, but the line still counts as written.
+                if !opts.only_matching {
+                    write_context(w, prefix, opts.line_number, lineno, raw).await?;
                 }
+                last_printed = lineno;
             }
-        } else if use_context && found && after_remaining > 0 {
-            // Print after-context line
-            after_remaining -= 1;
-            printed_any = true;
-            if !prefix.is_empty() {
-                wprint!(w, "{}-", prefix)?;
-            }
-            if opts.line_number {
-                wprint!(w, "{}-", lineno)?;
-            }
-            wprintln!(w, "{}", String::from_utf8_lossy(raw))?;
-            if after_remaining == 0 {
-                need_sep = true;
-            }
-        } else if use_context {
-            // Buffer for before-context
-            if after_remaining == 0 && found && !need_sep {
-                need_sep = true;
-            }
-            before_buf.push_back((lineno, raw.to_vec()));
+        } else if opts.before_context > 0 {
+            before_buf.push_back((lineno, raw.to_vec(), hidden));
             while before_buf.len() > opts.before_context {
                 before_buf.pop_front();
             }
