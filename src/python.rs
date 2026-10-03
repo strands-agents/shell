@@ -423,28 +423,29 @@ impl ShellBuilder {
     }
 }
 
-/// Lets a `!Send` value cross [`Python::detach`], which runs its closure on
-/// the calling thread, so the value never leaves this thread.
-struct SameThread<T>(T);
-// SAFETY: `Shell` is `unsendable`, so PyO3 rejects calls from any other
-// thread, and the `&mut self` borrow held across `detach` rules out re-entry
-// on this thread while the GIL is released.
-unsafe impl<T> Send for SameThread<T> {}
-
-impl<T> SameThread<T> {
-    /// Unwraps by value, so a closure captures the whole wrapper rather than its `!Send` field.
-    fn into_inner(self) -> T {
-        self.0
-    }
-}
-
 /// Drives `fut` to completion with the GIL released, so other Python threads
-/// and the asyncio event loop keep running while a command executes.
+/// (and an asyncio loop on another thread) keep running while a command executes.
 fn block_on_detached<F>(py: Python<'_>, runtime: &tokio::runtime::Runtime, fut: F) -> F::Output
 where
     F: std::future::Future,
     F::Output: Send,
 {
+    /// Lets a `!Send` value cross [`Python::detach`]. Scoped to this function
+    /// so it can't be reused somewhere the value would leave the thread.
+    struct SameThread<T>(T);
+    // SAFETY: `Python::detach` runs its closure synchronously on the calling
+    // thread, so the wrapped value never crosses a thread boundary. `T` must hold
+    // no Python references (`Py`, `Bound`, `Python`); the `Send` bound on `detach`
+    // is PyO3's stand-in for that check, and this impl bypasses it.
+    unsafe impl<T> Send for SameThread<T> {}
+
+    impl<T> SameThread<T> {
+        /// Unwraps by value, so a closure captures the whole wrapper rather than its `!Send` field.
+        fn into_inner(self) -> T {
+            self.0
+        }
+    }
+
     let job = SameThread(fut);
     py.detach(move || runtime.block_on(tokio::task::LocalSet::new().run_until(job.into_inner())))
 }
