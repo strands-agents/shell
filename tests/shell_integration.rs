@@ -2326,6 +2326,32 @@ expect!(
     "printf 'a\\nb\\nc\\nd\\ne\\n' > /tmp/hf; head -n 2 /tmp/hf",
     "a\nb"
 );
+shell_test!(
+    head_bytes_from_file,
+    "printf 'ab\\n\\ncd\\n' > /tmp/hb; head -c 4 /tmp/hb",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "ab\n\n");
+        assert_eq!(out.status, 0);
+    }
+);
+expect!(head_bytes_stdin, "printf 'abcdef' | head -c 3", "abc");
+expect!(head_bytes_long, "printf 'abcdef' | head --bytes=2", "ab");
+expect!(
+    head_bytes_exceeds_input,
+    "printf 'abc' | head -c 100",
+    "abc"
+);
+expect!(head_bytes_zero, "printf 'abc' | head -c 0", "");
+expect!(
+    head_bytes_last_option_wins,
+    "printf 'a\\nb\\nc\\n' | head -c 1 -n 2",
+    "a\nb"
+);
+expect!(
+    head_bytes_redirect,
+    "printf 'abcdef' > /tmp/hr; head -c 4 /tmp/hr > /tmp/hr.part && mv /tmp/hr.part /tmp/hr; cat /tmp/hr",
+    "abcd"
+);
 
 // ── ls single file long format ──────────────────────────────────────
 
