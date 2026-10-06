@@ -1813,6 +1813,16 @@ expect!(
     "hello"
 );
 expect!(
+    mv_force_overwrites,
+    "echo old > /tmp/mvf1; echo new > /tmp/mvf2; mv -f /tmp/mvf2 /tmp/mvf1; cat /tmp/mvf1",
+    "new"
+);
+expect!(
+    mv_long_force_overwrites,
+    "echo old > /tmp/mvlf1; echo new > /tmp/mvlf2; mv --force /tmp/mvlf2 /tmp/mvlf1; cat /tmp/mvlf1",
+    "new"
+);
+expect!(
     rm_basic,
     "echo hello > /tmp/rm1; rm /tmp/rm1; [ -f /tmp/rm1 ] && echo exists || echo gone",
     "gone"

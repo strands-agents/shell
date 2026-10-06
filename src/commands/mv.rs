@@ -1,7 +1,10 @@
 use crate::prelude::*;
 
-const HELP: &str = "Usage: mv SOURCE... DEST
-Move (rename) files and directories.";
+const HELP: &str = "Usage: mv [-f] SOURCE... DEST
+Move (rename) files and directories.
+
+Options:
+  -f, --force  do not prompt before overwriting (the default)";
 
 #[command("mv")]
 async fn cmd_mv(os: &dyn Kernel, args: &[String]) -> CommandResult {
@@ -9,6 +12,7 @@ async fn cmd_mv(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut paths = Vec::new();
     while let Some(arg) = parser.next()? {
         match arg {
+            Short('f') | Long("force") => {}
             Long("help") => {
                 let mut w = io::stdout()?;
                 wprintln!(w, "{}", HELP)?;
