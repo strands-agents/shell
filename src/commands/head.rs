@@ -1,19 +1,25 @@
 use crate::prelude::*;
 
-const HELP: &str = "Usage: head [-n LINES] [FILE]
+const HELP: &str = "Usage: head [-n LINES | -c BYTES] [FILE]
 Output the first part of files.
 
 Options:
-  -n, --lines LINES   number of lines to show (default: 10)";
+  -n, --lines LINES   number of lines to show (default: 10)
+  -c, --bytes BYTES   number of bytes to show";
 
 #[command("head")]
 async fn cmd_head(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut parser = lexopt::Parser::from_args(args);
     let mut n: usize = 10;
+    let mut bytes: Option<u64> = None;
     let mut file = None;
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('n') | Long("lines") => n = parser.value()?.parse()?,
+            Short('n') | Long("lines") => {
+                n = parser.value()?.parse()?;
+                bytes = None;
+            }
+            Short('c') | Long("bytes") => bytes = Some(parser.value()?.parse()?),
             Short('h') | Long("help") => {
                 let mut w = io::stdout()?;
                 wprintln!(w, "{}", HELP)?;
@@ -30,6 +36,10 @@ async fn cmd_head(os: &dyn Kernel, args: &[String]) -> CommandResult {
     } else {
         Box::new(io::stdin()?)
     };
+    if let Some(c) = bytes {
+        tokio::io::copy(&mut reader.take(c), &mut w).await?;
+        return Ok(0);
+    }
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     for _ in 0..n {
