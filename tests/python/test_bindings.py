@@ -12,6 +12,8 @@ import math
 import os
 import shutil
 import tempfile
+import threading
+import time
 
 import pytest
 
@@ -266,3 +268,27 @@ def test_omitted_and_positive_timeout_allowed():
     # Omitted timeout => no limit; a positive value => bounded. Both build.
     assert strands_shell.Shell().run("echo ok").stdout.strip() == "ok"
     assert strands_shell.Shell(timeout=5.0).run("echo ok").stdout.strip() == "ok"
+
+
+def test_run_releases_the_gil(shell):
+    """Other Python threads keep running while a command executes (#119)."""
+    ticks = 0
+    stop = threading.Event()
+
+    def tick():
+        nonlocal ticks
+        while not stop.is_set():
+            ticks += 1
+            time.sleep(0.001)
+
+    worker = threading.Thread(target=tick)
+    worker.start()
+    try:
+        before = ticks
+        shell.run("sleep 0.5")
+        during = ticks - before
+    finally:
+        stop.set()
+        worker.join()
+
+    assert during > 50
