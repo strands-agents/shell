@@ -151,6 +151,8 @@ pub mod mcp;
 pub mod mcp_client;
 pub mod os;
 pub mod parser;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod policy;
 pub mod prelude;
 pub mod shell;
 pub mod vfs;
