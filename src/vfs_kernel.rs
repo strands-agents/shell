@@ -862,7 +862,7 @@ impl Kernel for VfsKernel {
             })
         }
 
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", target_env = "p2"))]
         {
             use wasi::http::outgoing_handler;
             use wasi::http::types::{
@@ -1035,6 +1035,16 @@ impl Kernel for VfsKernel {
                 version: "1.1".to_string(),
                 reason,
             })
+        }
+
+        // WASI p1 has no HTTP interface; the URL check still runs first.
+        #[cfg(all(target_arch = "wasm32", not(target_env = "p2")))]
+        {
+            self.check_url(&req.url)?;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "network access is not available on this target",
+            ))
         }
     }
 }

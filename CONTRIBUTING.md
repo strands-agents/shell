@@ -59,13 +59,15 @@ Strands Shell is a Rust core that compiles to several targets: a native binary, 
 | Python bindings | `maturin` + `pytest` | `pyproject.toml` (`python` feature) |
 | Node.js bindings | `npm` + `@napi-rs/cli` | `package.json` (`node` feature) |
 | WASM module | `scripts/build-wasm.sh` | `wasm` feature |
+| WASM reactor + Go/Java suites | `scripts/build-wasm.sh --reactor`, `go test`, `mvn test` | `wasm-api` feature |
 
 ### Prerequisites
 
 - **Rust** 1.85+ (stable; required by Rust edition 2024). Install via [rustup](https://rustup.rs/). `cargo fmt` and `cargo clippy` require the `rustfmt` and `clippy` components (included with the default profile).
 - **Python** 3.10+ (only for the Python bindings).
 - **Node.js** 18+ (only for the Node.js bindings).
-- **wasi-sdk** 32+ (only for the WASM target).
+- **wasi-sdk** 32+ (only for the WASM targets).
+- **Go** 1.25+ and **Java** 17+ with Maven (only for the WASM reactor test suites).
 
 ### One command to check everything
 
@@ -147,8 +149,34 @@ echo 'echo hello from wasm' | wasmtime -W exceptions=y -S http strands-shell-was
 
 The WASM build is a reduced surface: it reads commands from stdin and writes to
 stdout/stderr, with no PyO3/Node bindings, no built-in MCP server, and no
-`--config` file. `curl` requires the WASI host to grant outbound HTTP (the
+`--config` flag (the reactor below takes the same TOML through `shell_new`).
+`curl` requires the WASI host to grant outbound HTTP (the
 `-S http` flag above). It is a build target, not a published release artifact.
+
+#### Reactor module (`wasm-api`)
+
+The same crate also builds as a `wasm32-wasip1` *reactor*: a core module that
+stays alive and exposes a small C ABI (`src/wasm_api.rs`) so any WASI preview1
+host can embed the shell and keep state across `run()` calls, like the Python
+and Node bindings do.
+
+```bash
+./scripts/build-wasm.sh --reactor --release   # target/wasm32-wasip1/release/strands_shell.wasm
+
+# Integration suites (both expect the module above; override with STRANDS_SHELL_WASM
+# for Go or -Dstrands.shell.wasm=... for Maven)
+(cd tests/go && go test ./...)                # wazero
+(cd tests/java && mvn test)                   # Endive, compiled to bytecode at build time
+```
+
+Exports: `_initialize` (call once after instantiation), `shell_buf_alloc` /
+`shell_buf_free` for argument and result buffers, `shell_new(toml_ptr, toml_len) -> handle` (same TOML schema as
+`--config`; `0` on error), `shell_run(handle, ptr, len) -> ptr<<32|len` of a
+buffer holding `i32 status`, `u32 stdout_len`, `u32 stderr_len` (little-endian)
+followed by the stdout and stderr bytes, `shell_last_error() -> ptr<<32|len`,
+and `shell_free(handle)`. The host must support the exception-handling proposal
+(Lua's `setjmp`/`longjmp` compiles to it). `curl` reports network access as
+unavailable on this target because WASI preview1 has no HTTP interface.
 
 ### Code Formatting and Style Guidelines
 

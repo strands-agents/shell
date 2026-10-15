@@ -26,6 +26,7 @@ required-features = ["wasm"]
 python = ["pyo3"]
 node = ["napi", "napi-derive", "napi-build"]
 wasm = []
+wasm-api = []
 
 # ----- Cross-platform dependencies (pure Rust, WASM-safe) -----
 [dependencies]
@@ -56,6 +57,9 @@ tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "io-std"
 # ----- WASM dependencies -----
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", features = ["rt", "macros", "sync", "io-util"] }
+
+# wasi:http bindings exist only on WASI p2; the p1 reactor reports curl as unsupported.
+[target.'cfg(all(target_arch = "wasm32", target_env = "p2"))'.dependencies]
 wasi = "0.14"
 
 # ----- Cross-platform (native + WASM) -----

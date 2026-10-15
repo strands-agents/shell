@@ -192,6 +192,60 @@ jobs:
       - name: npm test
         run: npm test
 
+  # wasm32-wasip1 reactor build plus the Go (wazero) and Java (Endive) suites.
+  wasm:
+    name: WASM reactor (Go + Java)
+    runs-on: ubuntu-latest
+    env:
+      WASI_SDK_VERSION: "34"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      - name: Install wasi-sdk
+        run: |
+          curl -sSfL -o wasi-sdk.tar.gz \
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz"
+          mkdir -p "$HOME/wasi-sdk"
+          tar -xzf wasi-sdk.tar.gz -C "$HOME/wasi-sdk" --strip-components=1
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk" >> "$GITHUB_ENV"
+
+      - name: Build reactor module
+        run: ./scripts/build-wasm.sh --reactor --release
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tests/go/go.mod
+          cache-dependency-path: tests/go/go.sum
+
+      - name: go test
+        working-directory: tests/go
+        run: go test ./...
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: tests/java/pom.xml
+
+      - name: mvn test
+        working-directory: tests/java
+        run: mvn -B -q test
+
   # Single required status check. Branch protection can require just this one
   # context ("CI Gate") instead of every matrix leg (Rust/Python/Node/audit),
   # whose names change whenever the matrix changes. This job fails if any
@@ -199,7 +253,7 @@ jobs:
   gate:
     name: CI Gate
     if: always()
-    needs: [rust, python, audit, node]
+    needs: [rust, python, audit, node, wasm]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all required jobs succeeded
