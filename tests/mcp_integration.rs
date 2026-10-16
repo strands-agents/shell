@@ -574,15 +574,7 @@ fn mcp_read_file_exceeds_max_output_is_error() {
 // ── McpClient (tests mcp_client.rs via out-of-process) ──────────────
 
 fn shell_bin() -> String {
-    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("target");
-    path.push(if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    });
-    path.push("strands-shell");
-    path.to_string_lossy().to_string()
+    env!("CARGO_BIN_EXE_strands-shell").to_string()
 }
 
 #[test]
