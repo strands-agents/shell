@@ -79,6 +79,25 @@ async fn shell_with_server() -> (Shell, String) {
     (shell, base)
 }
 
+async fn start_redirect_server(location: String) -> String {
+    let app = Router::new()
+        .route(
+            "/redirect",
+            get(move || {
+                let location = location.clone();
+                async move { Redirect::temporary(&location) }
+            }),
+        )
+        .route("/chain", get(|| async { Redirect::temporary("/redirect") }))
+        .route("/echo", any(echo_handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::task::spawn_local(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
 async fn echo_handler(
     method: Method,
     headers: HeaderMap,
@@ -299,6 +318,84 @@ fn curl_follow_redirect() {
         let (mut shell, base) = shell_with_server().await;
         let out = shell.run(&format!("curl -L {base}/redirect")).await;
         assert_eq!(out.stdout, "Hello, World!");
+    }));
+}
+
+#[test]
+fn curl_protocol_relative_redirect_preserves_target_and_strips_credentials() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let target = start_server().await;
+        let location = format!(
+            "{}/echo?from=redirect",
+            target.strip_prefix("http:").unwrap()
+        );
+        let source = start_redirect_server(location).await;
+        let mut shell = Shell::builder()
+            .allow_url(&source)
+            .allow_url(&target)
+            .credential(
+                format!("{source}/"),
+                strands_shell::CredKind::Bearer,
+                "redirect-test-token",
+            )
+            .build()
+            .unwrap();
+        let initial = shell.run(&format!("curl {source}/echo")).await;
+        assert!(
+            initial
+                .stdout
+                .contains("authorization=Bearer redirect-test-token")
+        );
+
+        for path in ["redirect", "chain"] {
+            let out = shell.run(&format!("curl -sSL {source}/{path}")).await;
+            assert_eq!(out.status, 0, "{path}: {}", out.stderr);
+            assert_eq!(
+                out.stdout, "method=GET\naccept=*/*\nquery_from=redirect",
+                "{path}"
+            );
+        }
+    }));
+}
+
+#[test]
+fn curl_protocol_relative_redirect_checks_target_allowlist() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let target = start_server().await;
+        let location = format!("{}/hello", target.strip_prefix("http:").unwrap());
+        let source = start_redirect_server(location).await;
+        let mut shell = Shell::builder().allow_url(&source).build().unwrap();
+
+        for path in ["redirect", "chain"] {
+            let out = shell.run(&format!("curl -sSL {source}/{path}")).await;
+            assert_eq!(out.status, 1, "{path}: {}", out.stderr);
+            assert!(out.stderr.contains("denied"), "{path}: {}", out.stderr);
+        }
+    }));
+}
+
+#[test]
+fn curl_protocol_relative_redirect_respects_proto_redir() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let target = start_server().await;
+        let location = format!("{}/hello", target.strip_prefix("http:").unwrap());
+        let source = start_redirect_server(location).await;
+        let mut shell = Shell::builder()
+            .allow_url(&source)
+            .allow_url(&target)
+            .build()
+            .unwrap();
+
+        for path in ["redirect", "chain"] {
+            let out = shell
+                .run(&format!("curl -sSL --proto-redir '=https' {source}/{path}"))
+                .await;
+            assert_eq!(out.status, 1, "{path}: {}", out.stderr);
+            assert!(out.stderr.contains("Protocol \"http\" disabled"));
+        }
     }));
 }
 
