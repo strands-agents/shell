@@ -147,9 +147,43 @@ fn mcp_shell_missing_command() {
 
 #[test]
 fn mcp_shell_timeout() {
-    let r = mcp_tool("shell", json!({"command": "echo fast", "timeout_ms": 5000}));
-    let text = r["result"]["content"][0]["text"].as_str().unwrap();
-    assert_eq!(text.trim(), "fast");
+    // A call that outlives its timeout_ms is cut off, and the next call on
+    // the same connection runs normally.
+    let start = std::time::Instant::now();
+    let responses = mcp_session(&[
+        init_msg(1),
+        initialized_msg(),
+        tool_call(
+            2,
+            "shell",
+            json!({"command": "sleep 5; echo after", "timeout_ms": 200}),
+        ),
+        tool_call(
+            3,
+            "shell",
+            json!({"command": "echo fast", "timeout_ms": 5000}),
+        ),
+    ]);
+    let elapsed = start.elapsed();
+    assert_eq!(responses.len(), 3, "responses: {responses:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(4),
+        "took {elapsed:?}"
+    );
+
+    let timed_out = &responses[1];
+    assert_eq!(timed_out["id"], 2);
+    assert_eq!(timed_out["result"]["content"][0]["text"], "");
+    assert_eq!(
+        timed_out["result"]["content"][1]["text"],
+        "strands-shell: execution timeout exceeded\n"
+    );
+    assert_eq!(timed_out["result"]["metadata"]["exit_code"], 1);
+
+    let recovered = &responses[2];
+    assert_eq!(recovered["id"], 3);
+    assert_eq!(recovered["result"]["content"][0]["text"], "fast\n");
+    assert_eq!(recovered["result"]["metadata"]["exit_code"], 0);
 }
 
 #[test]
