@@ -45,6 +45,14 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-targets
 
+      # --all-targets skips doc tests, so run them on their own.
+      - name: cargo test (doc tests)
+        run: cargo test --workspace --doc
+
+      # The js worker unit tests sit behind the `node` feature.
+      - name: cargo test (node feature)
+        run: cargo test --lib --features node
+
       - name: cargo doc
         env:
           RUSTDOCFLAGS: -D warnings
