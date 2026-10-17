@@ -5582,16 +5582,21 @@ fn bind_direct_write_back() {
             .build()
             .unwrap();
         shell.run("echo written_data > /mnt/wr/output.txt").await;
-        // Run another command to ensure the write-back task completes
-        shell.run("true").await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let content = std::fs::read_to_string(dir.join("output.txt")).unwrap_or_default();
-        assert!(
-            content.contains("written_data"),
-            "host file content: {:?}",
-            content
-        );
+        let content = wait_for_host_content(&dir.join("output.txt"), "written_data\n").await;
+        assert_eq!(content, "written_data\n");
     }));
+}
+
+/// Polls a host file until it holds `expected` or five seconds pass, then returns its content.
+async fn wait_for_host_content(path: &std::path::Path, expected: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let content = std::fs::read_to_string(path);
+        if matches!(&content, Ok(c) if c == expected) || std::time::Instant::now() >= deadline {
+            return content.unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 // ── VFS glob matching ───────────────────────────────────────────────
