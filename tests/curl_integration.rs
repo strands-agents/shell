@@ -75,8 +75,18 @@ async fn start_server() -> String {
             }),
         )
         .route(
-            "/redirect-slow",
-            get(|| async { Redirect::temporary("/slow") }),
+            "/slow-hop",
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Redirect::temporary("/slow-hop-end")
+            }),
+        )
+        .route(
+            "/slow-hop-end",
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                "late"
+            }),
         )
         .route(
             "/tricky-content-type",
@@ -538,38 +548,56 @@ fn curl_blocked_scheme() {
     }));
 }
 
-// Verify SafeResolver blocks DNS resolution to loopback at connect time.
-// This test starts a server on 127.0.0.1 and tries to reach it via a
-// hostname. The SafeResolver filters the resolved IP, preventing the
-// connection even though check_url_safe passes the hostname.
+// `localhost.` passes `check_url_safe`, so only the SafeResolver refuses it.
 #[test]
 fn curl_safe_resolver_blocks_loopback_dns() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
+        let base = start_server().await;
+        let port = base.rsplit(':').next().unwrap();
+        tokio::net::TcpStream::connect(format!("localhost.:{port}"))
+            .await
+            .expect("localhost. must resolve to the loopback server");
         let mut shell = Shell::builder().build().unwrap();
-        // "localhost" is caught by check_url_safe's string check, so use
-        // a direct IP-based URL to verify the resolver path works.
-        // 127.0.0.1 is caught by check_url_safe as an IP literal.
-        // Both paths should block — this confirms defense in depth.
-        let out = shell.run("curl http://127.0.0.1:19999/").await;
-        assert_ne!(out.status, 0);
-        assert!(out.stderr.contains("denied"));
+        let out = shell
+            .run(&format!("curl http://localhost.:{port}/hello"))
+            .await;
+        assert_eq!(out.status, 6, "{}", out.stderr);
+        assert_eq!(out.stdout, "");
     }));
 }
 
-// Verify that the SafeResolver is used for non-allowed URLs by confirming
-// that a redirect from an allowed server to a blocked IP is caught.
 #[test]
 fn curl_redirect_to_blocked_ip_denied() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let base = start_server().await;
+        // `base` is allowlisted and redirects to `target`, which deliberately is not.
+        let target = start_server().await;
+        let location = format!("{target}/hello");
+        let app = Router::new().route(
+            "/away",
+            get(move || async move { Redirect::temporary(&location) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::task::spawn_local(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         let mut shell = Shell::builder().allow_url(&base).build().unwrap();
-        // The server redirects to /hello, but if we craft a redirect to
-        // a blocked IP, it should be caught. Test that a direct attempt
-        // to curl a blocked IP after allowing the server still fails.
-        let out = shell.run("curl http://10.0.0.1:12345/").await;
-        assert_ne!(out.status, 0);
+        let out = shell.run(&format!("curl -v -L {base}/away")).await;
+        assert_eq!(out.status, 1);
+        assert_eq!(out.stdout, "");
+        assert!(
+            out.stderr
+                .contains(&format!("Redirecting to {target}/hello")),
+            "{}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("access denied: 127.0.0.1"),
+            "{}",
+            out.stderr
+        );
     }));
 }
 
@@ -1019,10 +1047,19 @@ fn curl_max_time_spans_redirect_hops() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
         let (mut shell, base) = shell_with_server().await;
+        let started = std::time::Instant::now();
         let out = shell
-            .run(&format!("curl -sL -m 0.3 {base}/redirect-slow"))
+            .run(&format!(
+                "curl -sL -m 0.8 -w '%{{url_effective}}' {base}/slow-hop"
+            ))
             .await;
         assert_eq!(out.status, 28);
+        assert_eq!(out.stdout, format!("{base}/slow-hop-end"));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(800),
+            "the deadline spans both hops, so it must be >= 800ms, got {elapsed:?}"
+        );
     }));
 }
 

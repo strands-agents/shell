@@ -4111,11 +4111,28 @@ fn builder_max_inodes() {
 fn builder_max_fds() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let mut shell = Shell::builder().max_fds(3).build().unwrap();
-        let out = shell.run("echo ok").await;
-        // With very few fds, basic commands may still work or fail
-        // Just verify the builder method works
-        assert!(out.status == 0 || out.stderr.contains("file descriptor"));
+        let mut shell = Shell::builder().max_fds(4).build().unwrap();
+        shell.run("echo data > /tmp/fds_in").await;
+        let under = "cat /tmp/fds_in 3>/tmp/fds_a 4>/tmp/fds_b";
+        let out = shell.run(under).await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "data\n", "")
+        );
+        let out = shell
+            .run("cat /tmp/fds_in 3>/tmp/fds_a 4>/tmp/fds_b 5>/tmp/fds_c")
+            .await;
+        assert_eq!(out.status, 1);
+        assert_eq!(out.stdout, "");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: /tmp/fds_c: too many open file descriptors\n"
+        );
+        let out = shell.run(under).await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "data\n", "")
+        );
     }));
 }
 
@@ -4233,10 +4250,19 @@ fn max_output_truncates_subst() {
 fn max_input_in_subst() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let mut shell = Shell::builder().max_input(5).build().unwrap();
-        // Short command should work
-        let out = shell.run("true").await;
-        assert_eq!(out.status, 0);
+        // The top-level command is `cat <<EOF`, which is under the limit.
+        // The heredoc body reaches capture_output, which checks the limit again.
+        let mut shell = Shell::builder().max_input(12).build().unwrap();
+        let out = shell.run("cat <<EOF\n$(echo short)\nEOF").await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "short\n", "")
+        );
+        let out = shell
+            .run("cat <<EOF\n$(echo aaaaaaaaaaaaaaaaaaaa)\nEOF")
+            .await;
+        assert_eq!(out.stdout, "\n");
+        assert_eq!(out.stderr, "strands-shell: input too large\n");
     }));
 }
 
@@ -5582,16 +5608,21 @@ fn bind_direct_write_back() {
             .build()
             .unwrap();
         shell.run("echo written_data > /mnt/wr/output.txt").await;
-        // Run another command to ensure the write-back task completes
-        shell.run("true").await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let content = std::fs::read_to_string(dir.join("output.txt")).unwrap_or_default();
-        assert!(
-            content.contains("written_data"),
-            "host file content: {:?}",
-            content
-        );
+        let content = wait_for_host_content(&dir.join("output.txt"), "written_data\n").await;
+        assert_eq!(content, "written_data\n");
     }));
+}
+
+/// Polls a host file until it holds `expected` or five seconds pass, then returns its content.
+async fn wait_for_host_content(path: &std::path::Path, expected: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let content = std::fs::read_to_string(path);
+        if matches!(&content, Ok(c) if c == expected) || std::time::Instant::now() >= deadline {
+            return content.unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 // ── VFS glob matching ───────────────────────────────────────────────
@@ -6791,13 +6822,32 @@ shell_test!(
 
 // ── credential resolution (vfs_kernel.rs resolve_credential) ────────
 
-shell_test!(
-    cred_no_match,
-    "true",
-    |_shell: &mut Shell, out: strands_shell::Output| {
-        assert_eq!(out.status, 0);
+#[test]
+fn cred_no_match() {
+    let shell = Shell::builder()
+        .credential(
+            "https://api.example.com",
+            strands_shell::CredKind::Bearer,
+            "test-token",
+        )
+        .build()
+        .unwrap();
+    let kernel = shell.kernel();
+    assert_eq!(
+        kernel.resolve_credential("https://api.example.com/v1", "GET"),
+        vec![("Authorization".to_string(), "Bearer test-token".to_string())]
+    );
+    for url in [
+        "https://api.example.org/v1",
+        "http://api.example.com/v1",
+        "https://api.example.com.evil.com/v1",
+    ] {
+        assert!(
+            kernel.resolve_credential(url, "GET").is_empty(),
+            "no credential expected for {url}"
+        );
     }
-);
+}
 
 // ── config parsing (vfs_config.rs) ──────────────────────────────────
 
