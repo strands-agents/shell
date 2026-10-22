@@ -448,6 +448,11 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
             {
                 let next = if is_absolute(&loc) {
                     loc
+                } else if loc.starts_with("//") {
+                    let scheme = current_url
+                        .split_once("://")
+                        .map_or("http", |(scheme, _)| scheme);
+                    format!("{scheme}:{loc}")
                 } else if loc.starts_with('/') {
                     let scheme_end = current_url.find("://").map(|i| i + 3).unwrap_or(0);
                     let host_end = current_url[scheme_end..]
@@ -527,6 +532,11 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
             {
                 let next = if is_absolute(&loc) {
                     loc
+                } else if loc.starts_with("//") {
+                    let scheme = current_url
+                        .split_once("://")
+                        .map_or("http", |(scheme, _)| scheme);
+                    format!("{scheme}:{loc}")
                 } else if loc.starts_with('/') {
                     let scheme_end = current_url.find("://").map(|i| i + 3).unwrap_or(0);
                     let host_end = current_url[scheme_end..]
