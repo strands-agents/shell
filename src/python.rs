@@ -410,6 +410,24 @@ impl ShellBuilder {
         Ok(slf)
     }
 
+    /// Load a Cedar authorization policy from a file.
+    fn policy_file<'py>(mut slf: PyRefMut<'py, Self>, path: &str) -> PyResult<PyRefMut<'py, Self>> {
+        let b = slf
+            .inner
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("builder consumed"))?;
+        let updated = b
+            .policy_file(path)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        slf.inner = Some(updated);
+        Ok(slf)
+    }
+
+    /// Set a Cedar authorization policy from a string.
+    fn policy_str<'py>(slf: PyRefMut<'py, Self>, text: &str) -> PyResult<PyRefMut<'py, Self>> {
+        chain(slf, |b| b.policy_str(text))
+    }
+
     /// Build the Shell.
     fn build(&mut self) -> PyResult<Shell> {
         let builder = self

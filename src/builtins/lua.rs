@@ -995,8 +995,10 @@ fn setup_sandbox(
     if let Some(clients) = sio::mcp_clients() {
         for client in clients.iter() {
             let mod_table = lua.create_table()?;
+            let server_name = client.module_name.clone();
             for tool in &client.client.tools {
                 let tool_name = tool.name.clone();
+                let server_name = server_name.clone();
                 let clients_ref = clients.clone();
                 let mod_idx = clients
                     .iter()
@@ -1006,8 +1008,18 @@ fn setup_sandbox(
                     tool.name.as_str(),
                     lua.create_async_function(move |lua, args: Option<LuaTable>| {
                         let tool_name = tool_name.clone();
+                        let server_name = server_name.clone();
                         let clients_ref = clients_ref.clone();
                         async move {
+                            // Policy gate: mcp:call with the server (module) name
+                            // and tool name. `server` is the de-hyphenated entry
+                            // name (e.g. `my-server` -> `my_server`).
+                            sio::kernel()
+                                .check_policy(
+                                    "mcp:call",
+                                    &[("server", &server_name), ("tool", &tool_name)],
+                                )
+                                .map_err(|e| LuaError::external(e.to_string()))?;
                             let json_args = match args {
                                 Some(t) => lua_table_to_json(&lua, &t)?,
                                 None => serde_json::Value::Object(serde_json::Map::new()),

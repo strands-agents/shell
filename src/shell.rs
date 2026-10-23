@@ -767,6 +767,10 @@ pub struct ShellBuilder {
     max_inodes: usize,
     timeout: Option<Duration>,
     allowed_url_prefixes: Vec<String>,
+    /// Cedar policy source text, if any. Compiled into a `PolicyEngine` at
+    /// [`build`](Self::build).
+    #[cfg(not(target_arch = "wasm32"))]
+    policy_text: Option<String>,
 }
 
 impl Default for ShellBuilder {
@@ -787,6 +791,8 @@ impl Default for ShellBuilder {
             max_inodes: 10_000,
             timeout: Some(std::time::Duration::from_secs(30)),
             allowed_url_prefixes: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            policy_text: None,
         }
     }
 }
@@ -1030,6 +1036,34 @@ impl ShellBuilder {
         self
     }
 
+    /// Load a Cedar authorization policy from a file.
+    ///
+    /// The policy is an *additional* restriction layer: with no policy, every
+    /// operation is allowed (unchanged behavior); with a policy, gated actions
+    /// (filesystem, network, env, MCP) must be permitted by the policy or they
+    /// are denied. It never weakens the built-in SSRF / VFS-permission checks.
+    /// The policy is parsed and schema-validated at [`build`](Self::build).
+    ///
+    /// See `schemas/agent.cedarschema` for the action vocabulary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read. (Parse/validation errors
+    /// surface from [`build`](Self::build).)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn policy_file(mut self, path: impl AsRef<Path>) -> io::Result<Self> {
+        self.policy_text = Some(std::fs::read_to_string(path)?);
+        Ok(self)
+    }
+
+    /// Set the Cedar authorization policy from a string. See
+    /// [`policy_file`](Self::policy_file) for semantics.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn policy_str(mut self, text: impl Into<String>) -> Self {
+        self.policy_text = Some(text.into());
+        self
+    }
+
     /// Load additional configuration from a TOML file.
     ///
     /// Bind mounts, credentials, and `allowed_urls` from the file are
@@ -1049,6 +1083,7 @@ impl ShellBuilder {
     /// or contains an unknown key (typos fail the parse rather than being
     /// silently ignored).
     pub fn config_file(mut self, path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
         let content = std::fs::read_to_string(path)?;
         let config: VfsConfig = crate::vfs_config::parse_config(&content)?;
         self.config.bind.extend(config.bind);
@@ -1057,6 +1092,16 @@ impl ShellBuilder {
         self.mcp.extend(config.mcp);
         self.config.umask = config.umask;
         self.allowed_url_prefixes.extend(config.allowed_urls);
+        // A `policy = "file.cedar"` key points at a Cedar file resolved relative
+        // to this config file's directory. Compiled/validated at build().
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(rel) = config.policy {
+            let policy_path = match path.parent() {
+                Some(dir) if !rel.starts_with('/') => dir.join(&rel),
+                _ => std::path::PathBuf::from(&rel),
+            };
+            self.policy_text = Some(std::fs::read_to_string(&policy_path)?);
+        }
         // Env: an explicitly-passed `.env()` value always wins over the file,
         // regardless of whether `.env()` or `.config_file()` was called first
         // (matches the "code wins" rule for umask/timeout). Only take a TOML
@@ -1170,6 +1215,13 @@ impl ShellBuilder {
         };
 
         let resolved_creds = resolve_creds(&self.creds)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let policy = match self.policy_text {
+            Some(text) => Some(std::sync::Arc::new(crate::policy::PolicyEngine::from_str(
+                &text,
+            )?)),
+            None => None,
+        };
         let mut vfs = build_vfs(&self.config)?;
         vfs.max_file_size = self.max_file_size;
         vfs.max_inodes = self.max_inodes;
@@ -1177,6 +1229,8 @@ impl ShellBuilder {
             vfs: std::sync::Arc::new(tokio::sync::Mutex::new(vfs)),
             creds: resolved_creds,
             allowed_url_prefixes: self.allowed_url_prefixes,
+            #[cfg(not(target_arch = "wasm32"))]
+            policy,
         });
         let mut proc = kernel.new_process();
 
