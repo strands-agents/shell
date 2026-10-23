@@ -149,7 +149,10 @@ async fn run_script(
 /// Execute a full input line. `proc` is the shell's process — cd modifies it.
 /// Returns (exit_code, should_exit).
 pub async fn execute(os: Arc<dyn Kernel>, proc: &mut Process, input: &str) -> (i32, bool) {
-    let result = if input.contains('\n') {
+    let result = if proc.max_input > 0 && input.len() > proc.max_input {
+        proc.err_msg("strands-shell: input too large");
+        (1, false)
+    } else if input.contains('\n') {
         execute_sourced(os.clone(), proc, input).await
     } else {
         execute_with_reader(os.clone(), proc, input, &mut |_| None).await

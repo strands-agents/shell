@@ -4253,6 +4253,26 @@ fn builder_max_input() {
 }
 
 #[test]
+fn max_input_applies_to_whole_multiline_input() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().max_input(16).build().unwrap();
+        // Each line is under the limit, but the whole input is not
+        let out = shell.run("echo aaaa\necho bbbb\necho cccc").await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (1, "", "strands-shell: input too large\n")
+        );
+        // Multiline input within the limit still runs
+        let out = shell.run("echo a\necho b").await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "a\nb\n", "")
+        );
+    }));
+}
+
+#[test]
 fn builder_max_file_size() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
@@ -4427,17 +4447,24 @@ fn max_output_truncates_subst() {
 fn max_input_in_subst() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        // The top-level command is `cat <<EOF`, which is under the limit.
-        // The heredoc body reaches capture_output, which checks the limit again.
+        // The sourced script's first command is `cat <<EOF`, which is under
+        // the limit. The heredoc body reaches capture_output, which checks
+        // the limit again.
         let mut shell = Shell::builder().max_input(12).build().unwrap();
-        let out = shell.run("cat <<EOF\n$(echo short)\nEOF").await;
+        shell
+            .write_file("/tmp/s", b"cat <<EOF\n$(echo short)\nEOF\n")
+            .await
+            .unwrap();
+        shell
+            .write_file("/tmp/l", b"cat <<EOF\n$(echo aaaaaaaaaaaaaaaaaaaa)\nEOF\n")
+            .await
+            .unwrap();
+        let out = shell.run(". /tmp/s").await;
         assert_eq!(
             (out.status, out.stdout.as_str(), out.stderr.as_str()),
             (0, "short\n", "")
         );
-        let out = shell
-            .run("cat <<EOF\n$(echo aaaaaaaaaaaaaaaaaaaa)\nEOF")
-            .await;
+        let out = shell.run(". /tmp/l").await;
         assert_eq!(out.stdout, "\n");
         assert_eq!(out.stderr, "strands-shell: input too large\n");
     }));
