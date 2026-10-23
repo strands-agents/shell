@@ -8076,6 +8076,32 @@ fn empty_pipeline_stage_no_panic() {
     }));
 }
 
+// ── function depth is tracked through pipeline stages ─────────────
+
+#[test]
+fn pipeline_function_depth_limited() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .max_depth(4)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        // Two nested function calls through pipelines — within limit
+        let out = shell
+            .run("g() { echo ok | cat; }; f() { g | cat; }; f | cat")
+            .await;
+        assert_eq!((out.stdout.as_str(), out.stderr.as_str()), ("ok\n", ""));
+        // Unbounded recursion through a pipeline stage stops at the depth
+        // limit; each call appends one line before it recurses
+        let out = shell
+            .run("r() { echo x >> /tmp/calls; r | cat; }; r; wc -l < /tmp/calls")
+            .await;
+        let calls: u32 = out.stdout.trim().parse().unwrap_or(u32::MAX);
+        assert!(calls < 4, "calls: {calls}, stderr: {}", out.stderr);
+    }));
+}
+
 // ── subshell depth is tracked by max_depth ────────────────────────
 
 #[test]

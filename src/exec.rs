@@ -2834,6 +2834,7 @@ async fn run_pipeline(
                     if let Some(body) = func_body {
                         state_proc.args = args;
                         state_proc.push_local_scope();
+                        state_proc.depth += 1;
                         state_proc.capture = true;
                         // Transfer stdin from child (CURRENT_PROCESS) so the
                         // function body's commands can read pipeline input.
