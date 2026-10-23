@@ -6225,6 +6225,92 @@ expect!(
     "1"
 );
 expect!(rm_help, "rm --help | head -n 1", "Usage: rm [-rf] FILE...");
+expect!(
+    rm_force_absent_is_silent,
+    "rm -f /tmp/rm_absent 2>&1; echo status=$?",
+    "status=0"
+);
+shell_test!(
+    rm_denied_fails_with_and_without_force,
+    "rm /bin/cat 2>&1; echo status=$?; rm -f /bin/cat 2>&1; echo status=$?; test -e /bin/cat && echo kept",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        let lines: Vec<&str> = out.stdout.lines().collect();
+        assert_eq!(lines.len(), 5, "stdout: {}", out.stdout);
+        assert!(lines[0].contains("/bin/cat"), "stdout: {}", out.stdout);
+        assert_eq!(lines[1], "status=1");
+        assert!(lines[2].contains("/bin/cat"), "stdout: {}", out.stdout);
+        assert_eq!(lines[3], "status=1");
+        assert_eq!(lines[4], "kept");
+    }
+);
+shell_test!(
+    rm_recursive_names_denied_children_and_removes_siblings,
+    "mkdir -p /tmp/rrn/locked /tmp/rrn/open && touch /tmp/rrn/locked/x /tmp/rrn/locked/y /tmp/rrn/open/z /tmp/rrn/a && chmod 555 /tmp/rrn/locked; \
+     rm -r /tmp/rrn 2>&1; echo status=$?; rm -rf /tmp/rrn 2>&1; echo status=$?; ls -R /tmp/rrn",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        let s = &out.stdout;
+        for denied in ["/tmp/rrn/locked/x", "/tmp/rrn/locked/y"] {
+            assert_eq!(s.matches(denied).count(), 2, "stdout: {s}");
+        }
+        assert!(!s.contains("rm: /tmp/rrn:"), "parent reported: {s}");
+        assert!(!s.contains("rm: /tmp/rrn/locked:"), "parent reported: {s}");
+        assert_eq!(s.matches("status=1").count(), 2, "stdout: {s}");
+        assert!(
+            !s.contains("open") && !s.contains("\na\n"),
+            "sibling kept: {s}"
+        );
+    }
+);
+#[test]
+fn rm_readonly_bind_fails_with_force() {
+    let dir = TestDir::new("lsh_rm_ro_bind");
+    std::fs::write(dir.join("keep.txt"), "x").unwrap();
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct_readonly(dir.to_str().unwrap(), "/mnt/ro")
+            .build()
+            .unwrap();
+        let out = shell.run("rm -f /mnt/ro/keep.txt 2>&1").await;
+        assert_eq!(out.status, 1);
+        assert!(out.stdout.contains("/mnt/ro/keep.txt"), "{}", out.stdout);
+    }));
+    assert!(dir.join("keep.txt").exists());
+}
+#[cfg(unix)]
+#[test]
+fn rm_recursive_names_unlistable_nested_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestDir::new("lsh_rm_unlistable");
+    std::fs::create_dir_all(dir.join("top/hidden")).unwrap();
+    std::fs::write(dir.join("top/hidden/f"), "x").unwrap();
+    std::fs::write(dir.join("top/sibling"), "x").unwrap();
+    std::fs::set_permissions(
+        dir.join("top/hidden"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let (rt, local) = rt();
+    let out = rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/rw")
+            .build()
+            .unwrap();
+        shell.run("rm -r /mnt/rw/top 2>&1").await
+    }));
+    std::fs::set_permissions(
+        dir.join("top/hidden"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(out.status, 1);
+    assert!(
+        out.stdout.contains("rm: /mnt/rw/top/hidden:"),
+        "{}",
+        out.stdout
+    );
+    assert!(!dir.join("top/sibling").exists());
+}
 
 // ── chmod coverage ──────────────────────────────────────────────────
 
