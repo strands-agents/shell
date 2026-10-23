@@ -665,6 +665,18 @@ pub async fn read_to_string_limited<R: tokio::io::AsyncRead + Unpin>(
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Return the largest char boundary in `s` at or below `index`.
+pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Read from an async reader into a byte vector, enforcing an optional size
 /// limit. Returns Err if the limit is exceeded. A `limit` of 0 means no cap.
 pub async fn read_to_end_limited<R: tokio::io::AsyncRead + Unpin>(

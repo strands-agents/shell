@@ -1739,7 +1739,7 @@ async fn run_capturing(
             output.push_str(&out);
             if proc.max_output > 0 && output.len() > proc.max_output {
                 proc.err_msg("strands-shell: output size limit exceeded");
-                output.truncate(proc.max_output);
+                output.truncate(os::floor_char_boundary(&output, proc.max_output));
                 proc.last_exit = 1;
                 break;
             }
@@ -2456,7 +2456,8 @@ async fn execute_pipeline(
             let remaining = shell_proc
                 .max_output
                 .saturating_sub(shell_proc.captured_output.len());
-            shell_proc.captured_output.push_str(&output[..remaining]);
+            let end = os::floor_char_boundary(&output, remaining);
+            shell_proc.captured_output.push_str(&output[..end]);
             shell_proc.err_msg("strands-shell: output size limit exceeded");
             return 1;
         }

@@ -4640,6 +4640,41 @@ fn subst_max_output_truncate() {
     }));
 }
 
+// ── max_output truncation keeps multibyte characters whole ─────────
+
+async fn run_with_max_output(max: usize, script: &str) -> strands_shell::Output {
+    let mut shell = Shell::builder().max_output(max).build().unwrap();
+    shell.run(script).await
+}
+
+#[test]
+fn subst_max_output_truncate_multibyte() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_max_output(4, "X=$(printf abc; printf é); printf %s \"$X\"").await;
+        assert_eq!(out.stdout, "abc");
+        let out = run_with_max_output(4, "X=$(printf ab; printf é); printf %s \"$X\"").await;
+        assert_eq!(out.stdout, "abé");
+        let out = run_with_max_output(4, "X=$(printf abc; printf de); printf %s \"$X\"").await;
+        assert_eq!(out.stdout, "abcd");
+    }));
+}
+
+#[test]
+fn stdout_max_output_truncate_multibyte() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_max_output(4, "printf abc; printf é").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abc", 1));
+        let out = run_with_max_output(4, "printf ab; printf cé").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abc", 1));
+        let out = run_with_max_output(4, "printf abé").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abé", 0));
+        let out = run_with_max_output(4, "printf ab; printf cde").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abcd", 1));
+    }));
+}
+
 // ── exec.rs coverage: exit inside function ─────────────────────────
 
 expect_status!(func_exit_code, "f() { exit 42; }; f", 42);
