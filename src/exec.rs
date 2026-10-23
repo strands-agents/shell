@@ -1554,6 +1554,15 @@ async fn run_capturing(
     proc: &mut Process,
     command_line: &parser::CommandLine,
 ) -> String {
+    run_capturing_status(os, proc, command_line).await.0
+}
+
+/// [`run_capturing`], also returning the exit status of the last item it ran.
+async fn run_capturing_status(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    command_line: &parser::CommandLine,
+) -> (String, i32) {
     let mut output = String::new();
     let mut last_exit = 0;
     let mut skip = false;
@@ -1576,8 +1585,8 @@ async fn run_capturing(
                     (exit, out)
                 }
                 Item::Group(cl) => {
-                    let s = Box::pin(run_capturing(os.clone(), proc, cl)).await;
-                    (0, s)
+                    let (s, exit) = Box::pin(run_capturing_status(os.clone(), proc, cl)).await;
+                    (exit, s)
                 }
                 Item::Subshell(cl) => {
                     let mut sub = proc.fork();
@@ -1586,8 +1595,9 @@ async fn run_capturing(
                         sub.err_msg(msg);
                         (1, String::new())
                     } else {
-                        let s = Box::pin(run_capturing(os.clone(), &mut sub, cl)).await;
-                        (0, s)
+                        let (s, exit) =
+                            Box::pin(run_capturing_status(os.clone(), &mut sub, cl)).await;
+                        (exit, s)
                     }
                 }
                 Item::If {
@@ -1599,43 +1609,54 @@ async fn run_capturing(
                     for (cond, body) in branches {
                         let exit = Box::pin(execute_command_line(os.clone(), proc, cond)).await;
                         if exit == 0 {
-                            let s = Box::pin(run_capturing(os.clone(), proc, body)).await;
-                            result = (0, s);
+                            let (s, exit) =
+                                Box::pin(run_capturing_status(os.clone(), proc, body)).await;
+                            result = (exit, s);
                             matched = true;
                             break;
                         }
                     }
                     if !matched && let Some(body) = else_body {
-                        let s = Box::pin(run_capturing(os.clone(), proc, body)).await;
-                        result = (0, s);
+                        let (s, exit) =
+                            Box::pin(run_capturing_status(os.clone(), proc, body)).await;
+                        result = (exit, s);
                     }
                     result
                 }
                 Item::While { condition, body } | Item::Until { condition, body } => {
                     let is_until = matches!(item, Item::Until { .. });
                     let mut s = String::new();
+                    let mut exit = 0;
                     loop {
                         let cond_exit =
                             Box::pin(execute_command_line(os.clone(), proc, condition)).await;
                         if (is_until && cond_exit == 0) || (!is_until && cond_exit != 0) {
                             break;
                         }
-                        s.push_str(&Box::pin(run_capturing(os.clone(), proc, body)).await);
+                        let (out, body_exit) =
+                            Box::pin(run_capturing_status(os.clone(), proc, body)).await;
+                        s.push_str(&out);
+                        exit = body_exit;
                     }
-                    (0, s)
+                    (exit, s)
                 }
                 Item::For { var, words, body } => {
                     let expanded = expand_words(os.clone(), proc, words).await;
                     let mut s = String::new();
+                    let mut exit = 0;
                     for val in &expanded {
                         proc.set_env(var, val);
-                        s.push_str(&Box::pin(run_capturing(os.clone(), proc, body)).await);
+                        let (out, body_exit) =
+                            Box::pin(run_capturing_status(os.clone(), proc, body)).await;
+                        s.push_str(&out);
+                        exit = body_exit;
                     }
-                    (0, s)
+                    (exit, s)
                 }
                 Item::Case { word, arms } => {
                     let value = expand_word(os.clone(), proc, word).await;
                     let mut s = String::new();
+                    let mut exit = 0;
                     for arm in arms {
                         let mut matched = false;
                         for pat in &arm.patterns {
@@ -1646,11 +1667,12 @@ async fn run_capturing(
                             }
                         }
                         if matched {
-                            s = Box::pin(run_capturing(os.clone(), proc, &arm.body)).await;
+                            (s, exit) =
+                                Box::pin(run_capturing_status(os.clone(), proc, &arm.body)).await;
                             break;
                         }
                     }
-                    (0, s)
+                    (exit, s)
                 }
                 Item::CompoundPipeline {
                     compound,
@@ -1736,6 +1758,7 @@ async fn run_capturing(
                 }
             };
             last_exit = exit;
+            proc.last_exit = exit;
             output.push_str(&out);
             if proc.max_output > 0 && output.len() > proc.max_output {
                 proc.err_msg("strands-shell: output size limit exceeded");
@@ -1745,7 +1768,7 @@ async fn run_capturing(
             }
         }
     }
-    output
+    (output, last_exit)
 }
 
 /// Public-facing execute_command_line that swallows break/continue.

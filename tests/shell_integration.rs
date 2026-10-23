@@ -3960,6 +3960,208 @@ expect!(
     "x y z"
 );
 
+// ── exec: compound status in command substitution ──────────────────
+expect!(
+    cmd_subst_group_false_and,
+    "X=$({ false; } && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_group_false_or,
+    "X=$({ false; } || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_group_false_status,
+    "X=$({ false; }; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_group_true_and,
+    "X=$({ true; } && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_group_true_or,
+    "X=$({ true; } || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_subshell_false_and,
+    "X=$( (false) && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_subshell_false_or,
+    "X=$( (false) || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_subshell_false_status,
+    "X=$( (false); echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_subshell_true_and,
+    "X=$( (true) && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_subshell_true_or,
+    "X=$( (true) || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_if_false_and,
+    "X=$(if true; then false; fi && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_if_false_or,
+    "X=$(if true; then false; fi || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_if_false_status,
+    "X=$(if true; then false; fi; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_if_true_and,
+    "X=$(if true; then true; fi && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_if_true_or,
+    "X=$(if true; then true; fi || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_for_false_and,
+    "X=$(for i in 1; do false; done && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_for_false_or,
+    "X=$(for i in 1; do false; done || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_for_false_status,
+    "X=$(for i in 1; do false; done; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_for_true_and,
+    "X=$(for i in 1; do true; done && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_for_true_or,
+    "X=$(for i in 1; do true; done || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_while_false_and,
+    "X=$(n=0; while [ $n -lt 1 ]; do n=1; false; done && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_while_false_or,
+    "X=$(n=0; while [ $n -lt 1 ]; do n=1; false; done || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_while_false_status,
+    "X=$(n=0; while [ $n -lt 1 ]; do n=1; false; done; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_while_true_and,
+    "X=$(n=0; while [ $n -lt 1 ]; do n=1; true; done && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_while_true_or,
+    "X=$(n=0; while [ $n -lt 1 ]; do n=1; true; done || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_until_false_and,
+    "X=$(n=0; until [ $n -ge 1 ]; do n=1; false; done && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_until_false_or,
+    "X=$(n=0; until [ $n -ge 1 ]; do n=1; false; done || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_until_false_status,
+    "X=$(n=0; until [ $n -ge 1 ]; do n=1; false; done; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_until_true_and,
+    "X=$(n=0; until [ $n -ge 1 ]; do n=1; true; done && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_until_true_or,
+    "X=$(n=0; until [ $n -ge 1 ]; do n=1; true; done || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_case_false_and,
+    "X=$(case a in (a) false;; esac && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_case_false_or,
+    "X=$(case a in (a) false;; esac || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_case_false_status,
+    "X=$(case a in (a) false;; esac; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_case_true_and,
+    "X=$(case a in (a) true;; esac && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_case_true_or,
+    "X=$(case a in (a) true;; esac || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_group_last_status_wins,
+    "X=$({ false; true; } && echo yes; { true; false; } || echo no); echo \"[$X]\"",
+    "[yes\nno]"
+);
+expect!(
+    cmd_subst_if_unmatched_is_success,
+    "X=$(if false; then false; fi && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_empty_loop_is_success,
+    "X=$(false; for i in; do false; done && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_case_unmatched_is_success,
+    "X=$(false; case a in (b) false;; esac && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_pipeline_status,
+    "X=$(false; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+
 // ── exec: shebang / script execution ──────────────────────────────
 expect!(
     script_shebang_source,
