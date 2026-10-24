@@ -16,6 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 name = "strands-shell"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "strands-shell-wasm"
@@ -23,7 +24,9 @@ path = "src/wasm_main.rs"
 required-features = ["wasm"]
 
 [features]
-python = ["pyo3"]
+default = ["cli"]
+cli = ["dep:clap", "dep:rustyline"]
+python = ["pyo3", "cli"]
 node = ["napi", "napi-derive", "napi-build"]
 wasm = []
 
@@ -31,7 +34,7 @@ wasm = []
 [dependencies]
 async-trait = "0.1"
 bytes = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 lexopt = "0.3"
 strands-shell-macros = { path = "strands-shell-macros", version = "0.1.0" }
 regex = "1"
@@ -50,7 +53,7 @@ napi = { version = "3", features = ["napi9", "tokio_rt"], optional = true }
 napi-derive = { version = "3", optional = true }
 pyo3 = { version = "0.30", features = ["extension-module"], optional = true }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
-rustyline = "19"
+rustyline = { version = "19", optional = true }
 tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "io-std", "fs", "time", "process"] }
 
 # ----- WASM dependencies -----
@@ -68,6 +71,10 @@ members = [".", "strands-shell-macros", "xtask"]
 
 [dev-dependencies]
 axum = "0.8"
+
+[[test]]
+name = "mcp_integration"
+required-features = ["cli"]
 
 # napi-build stays on 2.x — the build-script helper is versioned
 # independently of the napi/napi-derive runtime crates and has no 3.x release
