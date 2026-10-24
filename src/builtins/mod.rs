@@ -1,4 +1,5 @@
 mod alias;
+mod builtin;
 mod cd;
 mod colon;
 mod echo;
@@ -37,6 +38,7 @@ pub fn lookup(name: &str) -> Option<BuiltinFn> {
     match name {
         ":" | "true" => Some(colon::builtin_colon),
         "alias" => Some(alias::builtin_alias),
+        "builtin" => Some(builtin::builtin_builtin),
         "cd" => Some(cd::builtin_cd),
         "echo" => Some(echo::builtin_echo),
         "export" => Some(export::builtin_export),

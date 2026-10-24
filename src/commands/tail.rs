@@ -1,3 +1,4 @@
+use super::head::legacy_line_count;
 use crate::prelude::*;
 use std::collections::VecDeque;
 
@@ -9,7 +10,7 @@ Options:
 
 #[command("tail")]
 async fn cmd_tail(os: &dyn Kernel, args: &[String]) -> CommandResult {
-    let mut parser = lexopt::Parser::from_args(args);
+    let mut parser = lexopt::Parser::from_args(legacy_line_count(args));
     let mut count: usize = 10;
     let mut from_start = false;
     let mut file = None;

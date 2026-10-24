@@ -781,6 +781,43 @@ fn redir_stderr_to_file() {
     }));
 }
 
+// A redirect that cannot open reports why, for a builtin and for a command alike.
+#[test]
+fn redir_open_failure_reports_on_stderr() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, written) in [
+            ("echo hi", "hi\n"),
+            ("printf x", "x"),
+            ("cat /dev/null", ""),
+        ] {
+            let out = shell.run(&format!("{cmd} > /nonexistent/x")).await;
+            assert_eq!(out.status, 1, "{cmd}: status");
+            assert!(out.stdout.is_empty(), "{cmd}: stdout {:?}", out.stdout);
+            assert!(
+                out.stderr.contains("/nonexistent/x")
+                    && out.stderr.to_lowercase().contains("no such file"),
+                "{cmd}: stderr {:?}",
+                out.stderr
+            );
+
+            let out = shell.run(&format!("{cmd} > /tmp/redir_ok")).await;
+            assert_eq!(out.status, 0, "{cmd}: control status");
+            assert!(
+                out.stderr.is_empty(),
+                "{cmd}: control stderr {:?}",
+                out.stderr
+            );
+            let out = shell
+                .run("test -f /tmp/redir_ok && cat /tmp/redir_ok")
+                .await;
+            assert_eq!(out.status, 0, "{cmd}: control file missing");
+            assert_eq!(out.stdout, written, "{cmd}: control file");
+        }
+    }));
+}
+
 // Clobber redirect >|
 expect!(redir_clobber, "echo hello >| /tmp/r; cat /tmp/r", "hello");
 
@@ -1512,6 +1549,53 @@ expect!(
     "1"
 );
 
+// ── builtin builtin ─────────────────────────────────────────────────
+
+expect!(builtin_runs_echo, "builtin echo hello", "hello");
+expect!(builtin_passes_args, "builtin printf '%s-%s\\n' a b", "a-b");
+expect!(builtin_keeps_status, "builtin false; echo $?", "1");
+expect!(builtin_no_args, "builtin", "");
+expect!(
+    builtin_bypasses_function,
+    "echo() { printf 'shadowed\\n'; }; builtin echo real",
+    "real"
+);
+expect!(
+    builtin_in_wrapper_function,
+    "go() { builtin cd \"$@\"; }; go /tmp; pwd",
+    "/tmp"
+);
+expect!(
+    builtin_special_return,
+    "f() { builtin return 4; echo unreachable; }; f; echo $?",
+    "4"
+);
+expect_status!(builtin_special_exit, "builtin exit 3; echo unreachable", 3);
+
+shell_test!(
+    builtin_rejects_command,
+    "builtin cat /dev/null",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert_eq!(
+            out.stderr.trim(),
+            "strands-shell: builtin: cat: not a shell builtin"
+        );
+    }
+);
+
+shell_test!(
+    builtin_rejects_unknown,
+    "builtin nosuch_xyz",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert_eq!(
+            out.stderr.trim(),
+            "strands-shell: builtin: nosuch_xyz: not a shell builtin"
+        );
+    }
+);
+
 // ── Redirections: read-write, dup, close ────────────────────────────
 
 expect!(
@@ -1713,6 +1797,16 @@ fn readonly_var() {
 // ── unset ───────────────────────────────────────────────────────────
 
 expect!(unset_var, "X=hello; unset X; echo \"${X:-gone}\"", "gone");
+expect!(
+    unset_option_terminator_treats_dash_f_as_name,
+    "X=hello; unset -- -f X; echo \"${X:-gone}\"",
+    "gone"
+);
+expect!(
+    unset_func_option_terminator,
+    "f() { echo hi; }; unset -f -- f; f 2>/dev/null; echo $?",
+    "127"
+);
 #[test]
 fn unset_func() {
     let (rt, local) = rt();
@@ -2656,6 +2750,21 @@ expect!(
     "printf 'a\\nb\\nc\\nd\\ne\\n' | tail -n +3",
     "c\nd\ne"
 );
+expect!(
+    tail_legacy_count_stdin,
+    "printf 'a\\nb\\nc\\n' | tail -1",
+    "c"
+);
+expect!(
+    tail_legacy_count_from_file,
+    "printf 'a\\nb\\nc\\nd\\n' > /tmp/tl; tail -2 /tmp/tl",
+    "c\nd"
+);
+expect!(
+    tail_dash_operand_after_terminator,
+    "printf 'a\\nb\\n' > /tmp/-2; cd /tmp; tail -n1 -- -2",
+    "b"
+);
 
 // ── uniq coverage ───────────────────────────────────────────────────
 
@@ -2710,6 +2819,31 @@ shell_test!(
         assert_eq!(out.stdout, "ab\n\n");
         assert_eq!(out.status, 0);
     }
+);
+expect!(
+    head_legacy_count_stdin,
+    "printf 'a\\nb\\nc\\n' | head -2",
+    "a\nb"
+);
+expect!(
+    head_legacy_count_from_file,
+    "printf 'a\\nb\\nc\\nd\\n' > /tmp/hl; head -3 /tmp/hl",
+    "a\nb\nc"
+);
+expect!(
+    head_legacy_count_then_lines_last_wins,
+    "printf 'a\\nb\\nc\\n' | head -2 -n1",
+    "a"
+);
+expect!(
+    head_dash_operand_after_terminator,
+    "printf 'a\\nb\\n' > /tmp/-3; cd /tmp; head -n1 -- -3",
+    "a"
+);
+expect!(
+    head_bytes_after_legacy_count,
+    "printf 'abcdef' | head -3 -c 2",
+    "ab"
 );
 expect!(head_bytes_stdin, "printf 'abcdef' | head -c 3", "abc");
 expect!(head_bytes_long, "printf 'abcdef' | head --bytes=2", "ab");
@@ -2915,6 +3049,16 @@ expect!(
     unalias_all,
     "alias a=1; alias b=2; unalias -a; alias; echo done",
     "done"
+);
+expect!(
+    unalias_option_terminator,
+    "alias ll=ls; unalias -- ll; echo $?; alias ll 2>/dev/null; echo $?",
+    "0\n1"
+);
+expect!(
+    unalias_option_terminator_keeps_dash_a_as_name,
+    "alias a=1; unalias -- -a 2>/dev/null; echo $?; alias a",
+    "1\na='1'"
 );
 
 // ── hash builtin ────────────────────────────────────────────────────
@@ -3404,8 +3548,6 @@ fn timeout_is_per_command_not_cumulative() {
 
 // And the deadline must still actually fire mid-command for slow
 // commands — refreshing on entry shouldn't disable enforcement.
-// Uses a busy `while true` loop because the `sleep` builtin races
-// the deadline silently and exits 0.
 #[test]
 fn timeout_still_fires_within_a_command() {
     let (rt, local) = rt();
@@ -3421,6 +3563,41 @@ fn timeout_still_fires_within_a_command() {
             "expected timeout error, got: {:?}",
             out.stderr
         );
+    }));
+}
+
+// A sleep cut short by the deadline did not happen, so it must fail
+// with the timeout error rather than exit 0.
+#[test]
+fn timeout_interrupts_sleep_with_failure() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let out = shell.run("sleep 5").await;
+        assert_ne!(out.status, 0, "sleep past the deadline must fail");
+        assert_eq!(
+            out.stderr.trim(),
+            "strands-shell: execution timeout exceeded",
+            "stderr={:?}",
+            out.stderr
+        );
+    }));
+}
+
+#[test]
+fn sleep_within_timeout_succeeds() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = shell.run("sleep 0.05").await;
+        assert_eq!(out.status, 0, "stderr={:?}", out.stderr);
+        assert!(out.stderr.is_empty(), "stderr={:?}", out.stderr);
     }));
 }
 

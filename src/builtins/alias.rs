@@ -43,12 +43,25 @@ pub fn builtin_unalias<'a>(
     args: &'a [String],
 ) -> Pin<Box<dyn Future<Output = CommandResult> + 'a>> {
     Box::pin(async move {
-        if args.first().map(|s| s.as_str()) == Some("-a") {
+        let mut names = args;
+        let mut all = false;
+        while let Some(first) = names.first() {
+            match first.as_str() {
+                "-a" => all = true,
+                "--" => {
+                    names = &names[1..];
+                    break;
+                }
+                _ => break,
+            }
+            names = &names[1..];
+        }
+        if all {
             proc.clear_aliases();
             return Ok(0);
         }
         let mut ret = 0;
-        for arg in args {
+        for arg in names {
             if !proc.unset_alias(arg) {
                 proc.err_msg(&format!("strands-shell: unalias: {}: not found", arg));
                 ret = 1;
