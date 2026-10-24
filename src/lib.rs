@@ -163,6 +163,9 @@ pub mod python;
 #[cfg(feature = "node")]
 pub mod js;
 
+#[cfg(all(feature = "wasm-api", target_arch = "wasm32"))]
+pub mod wasm_api;
+
 // Primary public API
 pub use shell::{
     BindInfo, CredInfo, FileInfo, FileOpErrorKind, LimitsInfo, Output, Shell, ShellBuilder,
