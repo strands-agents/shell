@@ -1045,12 +1045,24 @@ impl ShellBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be read, contains invalid TOML,
-    /// or contains an unknown key (typos fail the parse rather than being
-    /// silently ignored).
-    pub fn config_file(mut self, path: impl AsRef<Path>) -> io::Result<Self> {
+    /// Returns an error if the file cannot be read, or for any reason
+    /// [`config_toml`](Self::config_toml) rejects its contents.
+    pub fn config_file(self, path: impl AsRef<Path>) -> io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: VfsConfig = crate::vfs_config::parse_config(&content)?;
+        self.config_toml(&content)
+    }
+
+    /// Merge a TOML configuration string into the builder.
+    ///
+    /// Same schema and precedence rules as [`config_file`](Self::config_file);
+    /// an empty string is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the string is not valid TOML or contains an
+    /// unknown key (typos fail the parse rather than being silently ignored).
+    pub fn config_toml(mut self, content: &str) -> io::Result<Self> {
+        let config: VfsConfig = crate::vfs_config::parse_config(content)?;
         self.config.bind.extend(config.bind);
         self.creds.extend(config.cred);
         #[cfg(not(target_arch = "wasm32"))]
