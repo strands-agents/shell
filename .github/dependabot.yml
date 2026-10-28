@@ -41,6 +41,7 @@ updates:
       semver-patch-days: 3
     ignore:
       # jaq-core 3 needs jaq-std 3 and jaq-json 2 plus a port of src/commands/jq.rs.
+      # Lift criteria: https://github.com/strands-agents/shell/pull/185#issuecomment-6473377476
       - dependency-name: 'jaq-*'
         update-types: ['version-update:semver-major']
     groups:
