@@ -39,6 +39,10 @@ updates:
       semver-major-days: 30
       semver-minor-days: 7
       semver-patch-days: 3
+    ignore:
+      # jaq-core 3 needs jaq-std 3 and jaq-json 2 plus a port of src/commands/jq.rs.
+      - dependency-name: 'jaq-*'
+        update-types: ['version-update:semver-major']
     groups:
       # Minor + patch bumps in one PR. Majors aren't matched by any group, so
       # they get individual PRs, gated by the 30-day semver-major cooldown
