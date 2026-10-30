@@ -358,7 +358,11 @@ class Shell:
 
     def run(self, command: str) -> Output:
         """Run a command and capture its output. Never raises for command-level
-        failures — check :attr:`Output.status`."""
+        failures — check :attr:`Output.status`.
+
+        Blocking; releases the GIL while the command runs. A ``Shell`` must be
+        created, used and dropped on one thread, so from async code run it in a
+        single-worker executor rather than ``asyncio.to_thread``."""
         return self._shell.run(command)
 
     # ---- Environment ----
