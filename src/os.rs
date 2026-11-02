@@ -128,6 +128,8 @@ impl FdKind {
     }
 }
 
+const OUTPUT_LIMIT_MESSAGE: &str = "strands-shell: output size limit exceeded\n";
+
 /// Per-process state. Each shell/subshell gets its own.
 pub struct Process {
     /// Virtual PID (not the real OS PID).
@@ -534,14 +536,20 @@ impl Process {
         }
     }
 
+    /// Whether the last captured stderr line already reports the output limit.
+    pub(crate) fn output_limit_reported(&self) -> bool {
+        self.capture && self.captured_stderr.ends_with(OUTPUT_LIMIT_MESSAGE)
+    }
+
     /// Write a message to stdout (fd 1 channel if available, else real stdout).
     pub fn out_msg(&mut self, msg: &str) {
         if let Some(FdKind::ChannelWriter { tx, .. }) = self.fds.get(&STDOUT) {
             let _ = tx.try_send(Bytes::from(format!("{msg}\n")));
         } else if self.capture {
             if self.max_output > 0 && self.captured_output.len() + msg.len() > self.max_output {
-                self.captured_stderr
-                    .push_str("strands-shell: output size limit exceeded\n");
+                if !self.output_limit_reported() {
+                    self.captured_stderr.push_str(OUTPUT_LIMIT_MESSAGE);
+                }
                 self.last_exit = 1;
                 return;
             }

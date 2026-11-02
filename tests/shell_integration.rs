@@ -6041,6 +6041,124 @@ fn script_exit_code() {
     }));
 }
 
+/// Runs `cmd` after writing a script that prints `out` to stdout and `err` to stderr.
+async fn run_with_two_stream_script(cmd: &str) -> strands_shell::Output {
+    let mut shell = Shell::builder().build().unwrap();
+    shell
+        .run("printf '#!/bin/sh\\necho out\\necho err >&2\\n' > /tmp/streams.sh; chmod +x /tmp/streams.sh")
+        .await;
+    shell.run(cmd).await
+}
+
+#[test]
+fn script_stderr_reaches_caller() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script("sh /tmp/streams.sh").await;
+        assert_eq!(out.stdout, "out\n");
+        assert_eq!(out.stderr, "err\n");
+    }));
+}
+
+#[test]
+fn script_streams_follow_redirects() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script(
+            "sh /tmp/streams.sh > /tmp/o 2> /tmp/e; echo \"o=$(cat /tmp/o) e=$(cat /tmp/e)\"",
+        )
+        .await;
+        assert_eq!(out.stdout, "o=out e=err\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn script_stderr_dup_into_pipe() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out =
+            run_with_two_stream_script("sh /tmp/streams.sh 2>&1 > /tmp/o | tr a-z A-Z; cat /tmp/o")
+                .await;
+        assert_eq!(out.stdout, "ERR\nout\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn script_stderr_in_substitution() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script("x=$(sh /tmp/streams.sh 2>&1); echo \"[$x]\"").await;
+        assert_eq!(out.stdout, "[out\nerr]\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn shebang_script_stderr_follows_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out =
+            run_with_two_stream_script("/tmp/streams.sh 2> /tmp/e; echo \"e=$(cat /tmp/e)\"").await;
+        assert_eq!(out.stdout, "out\ne=err\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn script_open_error_follows_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("sh /tmp/missing.sh 2> /tmp/e; grep -c missing.sh /tmp/e")
+            .await;
+        assert_eq!(out.stdout, "1\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn nested_script_keeps_its_own_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script(
+            "printf 'sh /tmp/streams.sh 2>/dev/null\\necho outer >&2\\n' > /tmp/outer.sh; sh /tmp/outer.sh",
+        )
+        .await;
+        assert_eq!(out.stdout, "out\n");
+        assert_eq!(out.stderr, "outer\n");
+    }));
+}
+
+#[test]
+fn script_reports_output_limit_once() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().max_output(64).build().unwrap();
+        shell
+            .run("printf 'for i in 1 2 3 4 5 6 7 8 9 10; do echo 0123456789abcdef; done\\n' > /tmp/loud.sh")
+            .await;
+        let out = shell.run("sh /tmp/loud.sh > /tmp/o").await;
+        assert_eq!(out.stderr, "strands-shell: output size limit exceeded\n");
+    }));
+}
+
+#[test]
+fn script_streams_follow_redirects_in_cli() {
+    let dir = TestDir::new("script_streams_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("printf 'echo out\\necho err >&2\\n' > /tmp/s.sh; sh /tmp/s.sh > /tmp/o 2> /tmp/e; sh /tmp/s.sh | tr a-z A-Z; cat /tmp/o /tmp/e")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "OUT\nout\nerr\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "err\n");
+    assert!(out.status.success());
+}
+
 // ── Shebang resolution ─────────────────────────────────────────────
 
 #[test]
