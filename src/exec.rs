@@ -2822,6 +2822,10 @@ async fn run_pipeline(
                 shell_proc.err_msg(&format!("strands-shell: {e}"));
                 return (1, String::new());
             }
+            // Builtin diagnostics follow the command's own stderr redirection.
+            if let Some(tx) = io_proc.stderr_channel() {
+                shell_proc.set_err_tx(tx);
+            }
 
             // Drain stdout/stderr concurrently with the builtin to avoid
             // deadlock when the builtin produces more output than the channel
@@ -2896,6 +2900,9 @@ async fn run_pipeline(
                     }),
                 )
                 .await;
+            if let Err(e) = &result {
+                shell_proc.err_msg(&format!("strands-shell: {name}: {e}"));
+            }
             shell_proc.clear_err_tx();
 
             let stdout_str = match stdout_drain {
@@ -2918,10 +2925,7 @@ async fn run_pipeline(
 
             return match result {
                 Ok(code) => (code, stdout_str),
-                Err(e) => {
-                    shell_proc.err_msg(&format!("strands-shell: {name}: {e}"));
-                    (1, stdout_str)
-                }
+                Err(_) => (1, stdout_str),
             };
         }
 
@@ -2998,6 +3002,9 @@ async fn run_pipeline(
         if let Err(e) = apply_redirects(&os, &mut procs[i], redirs).await {
             shell_proc.err_msg(&format!("strands-shell: {e}"));
             return (1, String::new());
+        }
+        if let Some(tx) = procs[i].stderr_channel() {
+            procs[i].set_err_tx(tx);
         }
     }
 

@@ -499,6 +499,16 @@ impl Process {
         self.err_tx = Some(tx);
     }
 
+    /// The channel behind fd 2, or a closed channel when fd 2 cannot be written.
+    pub(crate) fn stderr_channel(&self) -> Option<mpsc::Sender<Bytes>> {
+        match self.fds.get(&STDERR) {
+            Some(FdKind::ChannelWriter { tx, .. }) => Some(tx.clone()),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(FdKind::File(_)) => None,
+            Some(FdKind::ChannelReader { .. }) | None => Some(mpsc::channel(1).0),
+        }
+    }
+
     /// Check execution limits (deadline and recursion depth).
     /// Returns an error message if a limit is exceeded.
     pub fn check_limits(&self) -> Option<&'static str> {

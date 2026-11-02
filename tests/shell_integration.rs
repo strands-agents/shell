@@ -583,7 +583,7 @@ fn readonly_prevents_unset() {
     rt.block_on(local.run_until(async {
         let mut shell = Shell::builder().build().unwrap();
         shell.run("readonly X=1").await;
-        let out = shell.run("unset X 2>&1; echo $X").await;
+        let out = shell.run("unset X 2>/dev/null; echo $X").await;
         assert_eq!(out.stdout.trim(), "1");
     }));
 }
@@ -1602,6 +1602,84 @@ expect!(
     redir_readwrite,
     "echo hello > /tmp/rw; cat <> /tmp/rw",
     "hello"
+);
+
+// ── Builtin diagnostics follow stderr redirections ──────────────────
+
+macro_rules! expect_streams {
+    ($name:ident, $cmd:expr, $stdout:expr, $stderr:expr) => {
+        shell_test!(
+            $name,
+            $cmd,
+            |_shell: &mut Shell, out: strands_shell::Output| {
+                assert_eq!(out.stdout, $stdout, "stdout mismatch");
+                assert_eq!(out.stderr, $stderr, "stderr mismatch");
+            }
+        );
+    };
+}
+
+const CD_NOPE: &str = "strands-shell: cd: /nope: no such file or directory: /nope\n";
+
+expect_streams!(
+    builtin_diagnostic_captured_by_substitution,
+    "x=$(cd /nope 2>&1); echo \"[$x]\"",
+    format!("[{}]\n", CD_NOPE.trim_end()),
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_to_dev_null,
+    "cd /nope 2>/dev/null; echo \"status=$?\"",
+    "status=1\n",
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_to_file,
+    "cd /nope 2>/tmp/err; cat /tmp/err",
+    CD_NOPE,
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_dup_order,
+    "x=$(cd /nope 2>&1 >/dev/null); echo \"[$x]\"",
+    format!("[{}]\n", CD_NOPE.trim_end()),
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_into_pipe,
+    "cd /nope 2>&1 | grep -c nope",
+    "1\n",
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_closed_stderr,
+    "cd /nope 2>&-; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_in_pipeline_stage,
+    "echo x | cd /nope 2>/dev/null; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    builtin_usage_error_follows_redirect,
+    "x=$(printf 2>&1); echo \"[${x%%:*}]\"; printf 2>/dev/null; echo done",
+    "[strands-shell]\ndone\n",
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_keeps_order_with_stdout,
+    "x=$(echo a; cd /nope 2>&1; echo b); echo \"$x\"",
+    format!("a\n{CD_NOPE}b\n"),
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_without_redirect,
+    "x=$(cd /nope); echo \"[$x]\"",
+    "[]\n",
+    CD_NOPE
 );
 
 // ── Heredoc expansion ───────────────────────────────────────────────
