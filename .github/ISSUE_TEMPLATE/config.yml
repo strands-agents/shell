@@ -9,6 +9,9 @@ contact_links:
   - name: Strands Agents SDK Support
     url: https://github.com/strands-agents/harness-sdk/discussions
     about: Ask and answer questions about the Strands Agents SDK
+  - name: Strands Agents SDK
+    url: https://github.com/strands-agents/harness-sdk
+    about: Report bugs and request features for the Strands Agents SDK
   - name: Strands Agents Community
     url: https://discord.gg/strands
     about: Chat with the Strands team and community on Discord
