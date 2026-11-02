@@ -1144,6 +1144,191 @@ expect!(
     "from_eval"
 );
 
+// ── eval and source redirections ────────────────────────────────────
+
+macro_rules! expect_output {
+    ($name:ident, $cmd:expr, $stdout:expr, $stderr:expr, $status:expr) => {
+        shell_test!(
+            $name,
+            $cmd,
+            |_shell: &mut Shell, out: strands_shell::Output| {
+                assert_eq!(out.stdout, $stdout, "stdout mismatch");
+                assert_eq!(out.stderr, $stderr, "stderr mismatch");
+                assert_eq!(out.status, $status, "exit status mismatch");
+            }
+        );
+    };
+}
+
+expect_output!(
+    eval_stdout_redirect,
+    "eval 'echo hi' > /tmp/f; echo \"[$(cat /tmp/f)]\"",
+    "[hi]\n",
+    "",
+    0
+);
+expect_output!(
+    eval_append_redirect,
+    "echo a > /tmp/f; eval 'echo b' >> /tmp/f; cat /tmp/f",
+    "a\nb\n",
+    "",
+    0
+);
+expect_output!(
+    eval_stderr_redirect,
+    "eval 'echo e >&2; echo o' 2> /tmp/g; echo \"[$(cat /tmp/g)]\"",
+    "o\n[e]\n",
+    "",
+    0
+);
+expect_output!(
+    eval_stdin_redirect,
+    "printf 'line1\\n' > /tmp/in; eval 'read x; echo \"x=$x\"' < /tmp/in",
+    "x=line1\n",
+    "",
+    0
+);
+expect_output!(
+    eval_stdin_dev_null,
+    "eval 'read y; echo \"y=$y\"' < /dev/null",
+    "y=\n",
+    "",
+    0
+);
+expect_output!(
+    eval_heredoc_redirect,
+    "eval cat <<EOF\nfrom heredoc\nEOF",
+    "from heredoc\n",
+    "",
+    0
+);
+expect_output!(
+    eval_redirect_order,
+    "eval 'echo a; echo b >&2' 2>&1 > /tmp/h; echo \"[$(cat /tmp/h)]\"",
+    "b\n[a]\n",
+    "",
+    0
+);
+expect_output!(
+    eval_redirect_both_to_file,
+    "eval 'echo a; echo b >&2' > /tmp/h 2>&1; cat /tmp/h",
+    "a\nb\n",
+    "",
+    0
+);
+expect_output!(
+    eval_redirect_keeps_state,
+    "eval 'V=set; cd /tmp' > /dev/null; echo \"$V $PWD\"",
+    "set /tmp\n",
+    "",
+    0
+);
+expect_output!(
+    eval_parse_error_redirected,
+    "eval 'if' 2> /dev/null; echo done",
+    "done\n",
+    "",
+    0
+);
+expect_output!(
+    builtin_eval_redirect,
+    "builtin eval 'echo hi' > /tmp/f; cat /tmp/f",
+    "hi\n",
+    "",
+    0
+);
+
+#[test]
+fn eval_redirect_failure_skips_body() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("eval 'echo ran' > /nonexistent/z; echo \"status=$?\"")
+            .await;
+        assert_eq!(out.stdout, "status=1\n");
+        assert!(out.stderr.contains("/nonexistent/z"), "{}", out.stderr);
+    }));
+}
+
+#[test]
+fn eval_exit_flushes_redirected_output() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("eval 'echo bye; exit 4' > /tmp/f; echo no").await;
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 4);
+        let out = shell.run("cat /tmp/f").await;
+        assert_eq!(out.stdout, "bye\n");
+    }));
+}
+
+#[test]
+fn source_redirects() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .run("printf 'echo out\\nread l\\necho \"got:$l\"\\necho err >&2\\nS=sourced\\n' > /tmp/s.sh; printf 'line1\\n' > /tmp/in")
+            .await;
+        let out = shell
+            .run("source /tmp/s.sh > /tmp/o 2> /tmp/e < /tmp/in; echo \"$S\"; cat /tmp/o /tmp/e")
+            .await;
+        assert_eq!(out.stdout, "sourced\nout\ngot:line1\nerr\n");
+        assert_eq!(out.stderr, "");
+        let out = shell
+            .run(". /tmp/s.sh > /tmp/o 2>&1 < /tmp/in; cat /tmp/o")
+            .await;
+        assert_eq!(out.stdout, "out\ngot:line1\nerr\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+expect_output!(
+    eval_self_dup_keeps_caller_stdin,
+    "printf '1\\n2\\n3\\n4\\n' > /tmp/q; while read l; do eval 'read m' <&0; echo \"$l$m\"; done < /tmp/q",
+    "12\n34\n",
+    "",
+    0
+);
+expect_output!(
+    nested_eval_redirects,
+    "eval \"eval 'echo inner; echo e >&2' 2> /tmp/e\" > /tmp/o; echo \"o=$(cat /tmp/o) e=$(cat /tmp/e)\"",
+    "o=inner e=e\n",
+    "",
+    0
+);
+expect_output!(
+    source_args_with_redirect,
+    "printf 'echo \"$1 $#\"\\n' > /tmp/a.sh; set -- x; . /tmp/a.sh a b > /tmp/o; cat /tmp/o; echo \"$1 $#\"",
+    "a 2\nx 1\n",
+    "",
+    0
+);
+
+#[test]
+fn eval_redirect_from_cli() {
+    let dir = TestDir::new("eval_redirect_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("eval 'echo out; echo err >&2' > /tmp/o 2> /tmp/e; eval 'echo terminal'; cat /tmp/o /tmp/e")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "terminal\nout\nerr\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert!(out.status.success());
+}
+
+expect_output!(
+    source_missing_file_stderr_redirect,
+    ". /nonexistent/file.sh 2> /dev/null; echo $?",
+    "1\n",
+    "",
+    0
+);
+
 // ── find builtin ────────────────────────────────────────────────────
 
 #[test]
