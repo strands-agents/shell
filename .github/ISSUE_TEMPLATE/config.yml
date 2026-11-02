@@ -1,8 +1,14 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Strands Agents Support
+  - name: Strands Box Support
+    url: https://github.com/strands-agents/box/discussions
+    about: Ask and answer questions about Strands Box
+  - name: Strands Box
+    url: https://github.com/strands-agents/box
+    about: Report bugs and request features for Strands Box itself
+  - name: Strands Agents SDK Support
     url: https://github.com/strands-agents/harness-sdk/discussions
-    about: Please ask and answer questions here
+    about: Ask and answer questions about the Strands Agents SDK
   - name: Strands Agents Community
     url: https://discord.gg/strands
     about: Chat with the Strands team and community on Discord
