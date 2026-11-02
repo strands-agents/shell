@@ -4805,7 +4805,7 @@ fn builder_max_file_size() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
         let mut shell = Shell::builder().max_file_size(5).build().unwrap();
-        // Writing more than 5 bytes — the write-back task truncates
+        // Writing more than 5 bytes is refused
         shell.run("echo 'hello world' > /tmp/big").await;
         let out = shell.run("wc -c < /tmp/big").await;
         let size: usize = out.stdout.trim().parse().unwrap_or(999);
@@ -5677,8 +5677,7 @@ max_file_size = 16
             .unwrap();
 
         // Writing past the 16-byte cap is bounded: the over-cap content does
-        // not land in full. (Shell redirection truncates at the cap rather
-        // than failing the command, unlike the binding's write_file.)
+        // not land in full.
         shell
             .run("printf '%s' 0123456789abcdefXYZ > /tmp/big.txt")
             .await;
@@ -8756,6 +8755,118 @@ fn max_file_size_append_loop_blocked() {
         let out = shell.run("for i in 1 2 3 4 5 6 7 8 9 10; do echo 'padding padding' >> /tmp/apptest; done; cat /tmp/apptest | wc -c").await;
         let size: usize = out.stdout.trim().parse().unwrap_or(999);
         assert!(size <= 50, "appended file should be capped; size: {}", size);
+    }));
+}
+
+/// A shell with `max_file_size(4)` and `/mnt/d` bound direct to `dir`.
+fn shell_with_max_file_size_4(dir: &std::path::Path) -> Shell {
+    Shell::builder()
+        .bind_direct(dir.to_str().unwrap(), "/mnt/d")
+        .max_file_size(4)
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap()
+}
+
+/// Puts `seed` in `{mount}/f` before a case runs, on the host with an old mtime for the direct bind.
+async fn seed_file(shell: &mut Shell, dir: &std::path::Path, mount: &str, seed: &str) {
+    if mount == "/tmp" {
+        shell.write_file("/tmp/f", seed.as_bytes()).await.unwrap();
+    } else {
+        std::fs::write(dir.join("f"), seed).unwrap();
+        let file = std::fs::File::options()
+            .write(true)
+            .open(dir.join("f"))
+            .unwrap();
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+    }
+}
+
+/// The modification time of the host copy of `f`, if it exists.
+fn host_mtime(dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(dir.join("f"))
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+/// The content of `{mount}/f` once its drain task has rewritten it, removing the host copy.
+async fn written_file(
+    shell: &mut Shell,
+    dir: &std::path::Path,
+    mount: &str,
+    expected: &str,
+    seeded: Option<std::time::SystemTime>,
+) -> String {
+    if mount == "/tmp" {
+        return shell.run("cat /tmp/f").await.stdout;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while seeded.is_some() && host_mtime(dir) == seeded && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let content = wait_for_host_content(&dir.join("f"), expected).await;
+    std::fs::remove_file(dir.join("f")).unwrap();
+    content
+}
+
+#[test]
+fn max_file_size_overflow_fails_the_write() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_file_size_overflow");
+        for (seed, script, kept) in [
+            (None, "printf abcdefgh > MOUNT/f", ""),
+            (Some("ab"), "printf cde >> MOUNT/f", "ab"),
+            (None, "{ printf ab; printf cde; } > MOUNT/f", ""),
+        ] {
+            for mount in ["/tmp", "/mnt/d"] {
+                let script = script.replace("MOUNT", mount);
+                let mut shell = shell_with_max_file_size_4(&dir);
+                let mut seeded = None;
+                if let Some(seed) = seed {
+                    seed_file(&mut shell, &dir, mount, seed).await;
+                    seeded = host_mtime(&dir);
+                }
+                let out = shell.run(&script).await;
+                assert_eq!(out.status, 1, "{script}: stderr {:?}", out.stderr);
+                assert!(
+                    out.stderr.contains("file size limit exceeded"),
+                    "{script}: stderr {:?}",
+                    out.stderr
+                );
+                let content = written_file(&mut shell, &dir, mount, kept, seeded).await;
+                assert_eq!(content, kept, "{script}");
+            }
+        }
+    }));
+}
+
+#[test]
+fn max_file_size_write_up_to_the_limit_succeeds() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_file_size_exact");
+        for (seed, script) in [
+            (None, "printf abcd > MOUNT/f"),
+            (Some("ab"), "printf cd >> MOUNT/f"),
+            (None, "{ printf ab; printf cd; } > MOUNT/f"),
+        ] {
+            for mount in ["/tmp", "/mnt/d"] {
+                let script = script.replace("MOUNT", mount);
+                let mut shell = shell_with_max_file_size_4(&dir);
+                let mut seeded = None;
+                if let Some(seed) = seed {
+                    seed_file(&mut shell, &dir, mount, seed).await;
+                    seeded = host_mtime(&dir);
+                }
+                let out = shell.run(&script).await;
+                assert_eq!(out.status, 0, "{script}: stderr {:?}", out.stderr);
+                assert_eq!(out.stderr, "", "{script}");
+                let content = written_file(&mut shell, &dir, mount, "abcd", seeded).await;
+                assert_eq!(content, "abcd", "{script}");
+            }
+        }
     }));
 }
 
