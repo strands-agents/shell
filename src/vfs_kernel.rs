@@ -716,6 +716,16 @@ impl Kernel for VfsKernel {
     async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()> {
         let abs = Self::abs(proc, path);
         let mut vfs = self.vfs.lock().await;
+        if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
+            drop(vfs);
+            if ro {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "read-only bind mount",
+                ));
+            }
+            return host_set_permissions(&host_path, mode);
+        }
         let ino = vfs.resolve(&abs, true)?;
         let inode = vfs.get_mut(ino)?;
         // Only the file owner can chmod
@@ -1053,6 +1063,20 @@ impl Kernel for VfsKernel {
 }
 
 // --- host stat helper ---
+
+#[cfg(unix)]
+fn host_set_permissions(path: &std::path::Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777))
+}
+
+#[cfg(not(unix))]
+fn host_set_permissions(_path: &std::path::Path, _mode: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "chmod is not supported on this host",
+    ))
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn host_stat(path: &std::path::Path) -> FileStat {

@@ -6961,6 +6961,86 @@ expect!(
     "Usage: chmod MODE FILE..."
 );
 
+#[cfg(unix)]
+fn host_mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+#[cfg(unix)]
+#[test]
+fn chmod_changes_the_host_mode_on_a_direct_bind() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestDir::new("lsh_chmod_direct");
+    std::fs::write(dir.join("f"), "x").unwrap();
+    std::fs::set_permissions(dir.join("f"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink("f", dir.join("link")).unwrap();
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/rw")
+            .build()
+            .unwrap();
+        let out = shell.run("chmod 600 /mnt/rw/f").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(host_mode(&dir.join("f")), 0o600);
+        let out = shell.run("chmod u+x,g+r /mnt/rw/f").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(host_mode(&dir.join("f")), 0o740);
+        let out = shell
+            .run("chmod 000 /mnt/rw/f && chmod 644 /mnt/rw/f")
+            .await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(host_mode(&dir.join("f")), 0o644);
+        let out = shell.run("chmod 640 /mnt/rw/link").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(host_mode(&dir.join("f")), 0o640);
+        let out = shell.run("chmod 600 /mnt/rw/missing").await;
+        assert_eq!(out.status, 1);
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn chmod_on_a_direct_bind_stays_inside_the_bind() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestDir::new("lsh_chmod_direct_escape");
+    std::fs::create_dir(dir.join("mount")).unwrap();
+    std::fs::write(dir.join("outside"), "x").unwrap();
+    std::fs::set_permissions(dir.join("outside"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(dir.join("outside"), dir.join("mount/escape")).unwrap();
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.join("mount").to_str().unwrap(), "/mnt/rw")
+            .build()
+            .unwrap();
+        let out = shell.run("chmod 777 /mnt/rw/escape").await;
+        assert_ne!(out.status, 0);
+    }));
+    assert_eq!(host_mode(&dir.join("outside")), 0o644);
+}
+
+#[cfg(unix)]
+#[test]
+fn chmod_on_a_readonly_direct_bind_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestDir::new("lsh_chmod_direct_ro");
+    std::fs::write(dir.join("f"), "x").unwrap();
+    std::fs::set_permissions(dir.join("f"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct_readonly(dir.to_str().unwrap(), "/mnt/ro")
+            .build()
+            .unwrap();
+        let out = shell.run("chmod 600 /mnt/ro/f").await;
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("read-only"), "stderr: {}", out.stderr);
+    }));
+    assert_eq!(host_mode(&dir.join("f")), 0o644);
+}
+
 // ── wc coverage ─────────────────────────────────────────────────────
 
 expect!(
