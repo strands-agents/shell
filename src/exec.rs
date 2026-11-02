@@ -4,10 +4,38 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 use crate::builtins;
+use crate::command_fallback;
 use crate::commands;
 use crate::io::{CURRENT_KERNEL, CURRENT_PROCESS};
 use crate::os::{self, FdReader, Kernel, OpenFlags, Process, STDERR, STDIN, STDOUT};
 use crate::parser::{self, Connector, Item, Redirect, Word, WordPart};
+
+/// Foreground tasks that abort on drop when the kernel has a command fallback.
+struct ForegroundTasks(Option<Vec<tokio::task::AbortHandle>>);
+
+impl ForegroundTasks {
+    fn new(os: &dyn Kernel) -> Self {
+        Self(os.command_fallback().map(|_| Vec::new()))
+    }
+
+    fn concurrent_stderr(&self) -> bool {
+        self.0.is_some()
+    }
+
+    fn own<T>(&mut self, handle: &tokio::task::JoinHandle<T>) {
+        if let Some(handles) = &mut self.0 {
+            handles.push(handle.abort_handle());
+        }
+    }
+}
+
+impl Drop for ForegroundTasks {
+    fn drop(&mut self) {
+        for handle in self.0.iter().flatten() {
+            handle.abort();
+        }
+    }
+}
 
 /// Signals for break/continue/exit control flow.
 #[derive(Debug)]
@@ -1836,12 +1864,14 @@ async fn run_capturing_status(
                     let compound_cl = vec![(*compound.clone(), None)];
                     let captured = Box::pin(run_capturing(os.clone(), proc, &compound_cl)).await;
                     let (tx, rx) = os::pipe(64);
+                    let mut tasks = ForegroundTasks::new(os.as_ref());
                     let handle = tokio::task::spawn_local(async move {
                         use bytes::Bytes;
                         if !captured.is_empty() {
                             let _ = tx.send(Bytes::from(captured.into_bytes())).await;
                         }
                     });
+                    tasks.own(&handle);
                     proc.set_channel_reader(0, rx);
                     let (mut exit, out) = execute_pipeline_capture(os.clone(), proc, tail).await;
                     let _ = handle.await;
@@ -2074,6 +2104,7 @@ async fn execute_item(
             let os2 = os.clone();
 
             let (tx, rx) = os::pipe(64);
+            let mut tasks = ForegroundTasks::new(os.as_ref());
             let handle = tokio::task::spawn_local(async move {
                 let output = Box::pin(run_capturing(os2, &mut sub, &compound_cl)).await;
                 use bytes::Bytes;
@@ -2081,6 +2112,7 @@ async fn execute_item(
                     let _ = tx.send(Bytes::from(output.into_bytes())).await;
                 }
             });
+            tasks.own(&handle);
 
             // Set stdin on proc so the tail pipeline inherits it.
             proc.set_channel_reader(0, rx);
@@ -2662,6 +2694,7 @@ async fn run_pipeline(
     capture: bool,
 ) -> (i32, String) {
     let len = pipeline.len();
+    let mut tasks = ForegroundTasks::new(os.as_ref());
 
     if shell_proc.max_pipeline > 0 && len > shell_proc.max_pipeline {
         shell_proc.err_msg("strands-shell: pipeline too long");
@@ -2844,6 +2877,12 @@ async fn run_pipeline(
                     }
                 }))
             };
+            for drain in [&stdout_drain, &stderr_drain] {
+                match drain {
+                    Drain::Capture(h) => tasks.own(h),
+                    Drain::Copy(h) => tasks.own(h),
+                }
+            }
 
             let io_cell = RefCell::new(io_proc);
             let result = CURRENT_KERNEL
@@ -2982,7 +3021,7 @@ async fn run_pipeline(
             // Builtins/functions: child has pipe fds (for I/O via CURRENT_PROCESS),
             // state_proc is a fork with env/functions but no fds (for builtin &mut Process)
             let mut state_proc = child.fork();
-            handles.push(tokio::task::spawn_local(CURRENT_KERNEL.scope(
+            let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
                 CURRENT_PROCESS.scope(RefCell::new(child), async move {
                     if is_script {
@@ -3047,10 +3086,12 @@ async fn run_pipeline(
                     }
                     unreachable!()
                 }),
-            )));
+            ));
+            tasks.own(&handle);
+            handles.push(handle);
         } else {
             // External commands
-            handles.push(tokio::task::spawn_local(CURRENT_KERNEL.scope(
+            let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
                 CURRENT_PROCESS.scope(RefCell::new(child), async move {
                     match commands::lookup(&name) {
@@ -3068,6 +3109,16 @@ async fn run_pipeline(
                             }
                         },
                         None => {
+                            if let Some(fallback) = os.command_fallback() {
+                                let context = CURRENT_PROCESS.with(|p| {
+                                    command_fallback::CommandContext::new(
+                                        &mut p.borrow_mut(),
+                                        name,
+                                        args,
+                                    )
+                                });
+                                return command_fallback::run(fallback, context).await;
+                            }
                             if let Ok(mut w) = crate::io::stderr() {
                                 let _ = w
                                     .write_all(
@@ -3080,7 +3131,9 @@ async fn run_pipeline(
                         }
                     }
                 }),
-            )));
+            ));
+            tasks.own(&handle);
+            handles.push(handle);
         }
     }
 
@@ -3093,6 +3146,7 @@ async fn run_pipeline(
                 .await
                 .unwrap_or_default()
         });
+        tasks.own(&handle);
         Some(handle)
     } else {
         let handle = tokio::spawn(async move {
@@ -3111,28 +3165,30 @@ async fn run_pipeline(
             }
             String::new()
         });
+        tasks.own(&handle);
         Some(handle)
     };
 
-    // Drain all stderr
-    let stderr_drain = if capture {
+    // Drain stderr in stage order, or one task per stage with a fallback.
+    let stderr_groups = if tasks.concurrent_stderr() {
+        stderr_rxs.into_iter().map(|rx| vec![rx]).collect()
+    } else {
+        vec![stderr_rxs]
+    };
+    let mut stderr_drains = Vec::with_capacity(len);
+    for group in stderr_groups {
         let handle = tokio::spawn(async move {
             let mut all = String::new();
-            for rx in stderr_rxs {
+            for rx in group {
                 let mut reader = FdReader::from_receiver(rx);
-                all.push_str(
-                    &os::read_to_string_limited(&mut reader, max_output)
-                        .await
-                        .unwrap_or_default(),
-                );
-            }
-            all
-        });
-        Some(handle)
-    } else {
-        let handle = tokio::spawn(async move {
-            for rx in stderr_rxs {
-                let mut reader = FdReader::from_receiver(rx);
+                if capture {
+                    all.push_str(
+                        &os::read_to_string_limited(&mut reader, max_output)
+                            .await
+                            .unwrap_or_default(),
+                    );
+                    continue;
+                }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let mut stderr = tokio::io::stderr();
@@ -3146,10 +3202,11 @@ async fn run_pipeline(
                     let _ = std::io::Write::write_all(&mut std::io::stderr(), &buf);
                 }
             }
-            String::new()
+            all
         });
-        Some(handle)
-    };
+        tasks.own(&handle);
+        stderr_drains.push(handle);
+    }
 
     // Wait for all command tasks
     let mut last_exit = 0;
@@ -3164,11 +3221,10 @@ async fn run_pipeline(
     } else {
         String::new()
     };
-    let stderr_str = if let Some(h) = stderr_drain {
-        h.await.unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let mut stderr_str = String::new();
+    for handle in stderr_drains {
+        stderr_str.push_str(&handle.await.unwrap_or_default());
+    }
     if capture && !stderr_str.is_empty() {
         shell_proc.captured_stderr.push_str(&stderr_str);
     }

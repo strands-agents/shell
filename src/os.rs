@@ -12,6 +12,8 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 
+pub use crate::command_fallback::{CommandContext, CommandFallback, CommandInput, CommandOutput};
+
 /// Monotonic counter for virtual PIDs.
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 
@@ -939,5 +941,14 @@ pub trait Kernel: Send + Sync {
             io::ErrorKind::Unsupported,
             "HTTP not available",
         ))
+    }
+    /// Return the handler for commands that Shell does not implement.
+    ///
+    /// The default is `None`, which keeps `command not found` and status 127.
+    /// Keep the answer stable for the kernel's lifetime. A handler also makes
+    /// pipelines drain stderr concurrently and abort foreground tasks when
+    /// their execution is dropped.
+    fn command_fallback(&self) -> Option<&dyn CommandFallback> {
+        None
     }
 }
