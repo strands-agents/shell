@@ -125,6 +125,16 @@ impl VfsKernel {
         None
     }
 
+    /// Resolve the host path of `abs_path` without following its last component.
+    fn resolve_host_nofollow(vfs: &Vfs, abs_path: &str) -> Option<(PathBuf, bool)> {
+        let (parent, name) = match abs_path.rfind('/') {
+            Some(i) if i + 1 < abs_path.len() => (&abs_path[..i.max(1)], &abs_path[i + 1..]),
+            _ => return None,
+        };
+        let (host_parent, ro, _) = Self::resolve_host(vfs, parent)?;
+        Some((host_parent.join(name), ro))
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     async fn open_host(
         &self,
@@ -703,6 +713,12 @@ impl Kernel for VfsKernel {
     async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String> {
         let abs = Self::abs(proc, path);
         let vfs = self.vfs.lock().await;
+        if let Some((host_path, _ro)) = Self::resolve_host_nofollow(&vfs, &abs) {
+            drop(vfs);
+            return Ok(std::fs::read_link(host_path)?
+                .to_string_lossy()
+                .into_owned());
+        }
         let ino = vfs.resolve(&abs, false)?;
         match &vfs.get(ino)?.data {
             InodeData::Symlink(target) => Ok(target.clone()),
