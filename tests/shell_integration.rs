@@ -561,6 +561,90 @@ fn source_script() {
     }));
 }
 
+#[test]
+fn multiline_reports_first_parse_error_with_line() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("echo one\n)\necho \"two").await;
+        assert_eq!(out.stdout, "one\n");
+        assert_eq!(out.stderr, "strands-shell: line 2: unexpected ')'\n");
+        assert_eq!(out.status, 1);
+    }));
+}
+
+#[test]
+fn multiline_stops_at_parse_error() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("echo a\nfi\necho b\necho c").await;
+        assert_eq!(out.stdout, "a\n");
+        assert_eq!(out.stderr, "strands-shell: line 2: unexpected 'fi'\n");
+        assert_eq!(out.status, 1);
+    }));
+}
+
+#[test]
+fn sourced_parse_error_stops_file_and_names_line() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .run("printf 'echo one\\necho two\\n)\\necho \"three\\n' > /tmp/bad.sh")
+            .await;
+        let out = shell.run(". /tmp/bad.sh; echo \"after $?\"").await;
+        assert_eq!(out.stdout, "one\ntwo\nafter 1\n");
+        assert_eq!(out.stderr, "strands-shell: line 3: unexpected ')'\n");
+    }));
+}
+
+#[test]
+fn multiline_incomplete_input_at_end_keeps_its_error() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("echo a\necho \"b\nc").await;
+        assert_eq!(out.stdout, "a\n");
+        assert_eq!(out.stderr, "strands-shell: unterminated double quote\n");
+        assert_eq!(out.status, 1);
+    }));
+}
+
+#[test]
+fn multiline_line_continuation_before_keyword() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("for i in a; \\\ndo echo $i; done\nf() \\\n{ echo f; }\nf")
+            .await;
+        assert_eq!(out.stdout, "a\nf\n");
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.status, 0);
+    }));
+}
+
+#[test]
+fn multiline_constructs_still_continue() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run(concat!(
+                "case x in\nx)\necho case\n;;\nesac\n",
+                "echo pipe |\ntr a-z A-Z\n",
+                "if true\nthen\necho if\nfi\n",
+                "cat <<EOF\nbody )\nEOF\n",
+                "echo \"multi\nline\"",
+            ))
+            .await;
+        assert_eq!(out.stdout, "case\nPIPE\nif\nbody )\nmulti\nline\n");
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.status, 0);
+    }));
+}
+
 // Compound commands can now be piped
 #[test]
 fn for_loop_glob() {

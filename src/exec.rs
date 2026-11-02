@@ -258,6 +258,11 @@ pub async fn execute_with_reader(
     }
 }
 
+/// Whether `line` ends in a backslash that joins it to the next line.
+fn continues_line(line: &str) -> bool {
+    line.bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1
+}
+
 /// Execute sourced file content incrementally, so aliases defined by earlier
 /// commands are visible when parsing later commands.
 pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &str) -> (i32, bool) {
@@ -312,6 +317,10 @@ pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &st
                         last_code = proc.last_exit;
                     }
                 }
+            }
+            Err(e) if parser::is_definite_error(&e) && !continues_line(lines[i - 1]) => {
+                proc.err_msg(&format!("strands-shell: line {i}: {e}"));
+                return (1, false);
             }
             Err(e) => {
                 last_err = e;
