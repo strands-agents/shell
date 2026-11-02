@@ -5464,6 +5464,104 @@ fn builder_bind_direct_readonly_host() {
     }));
 }
 
+#[test]
+fn bind_direct_write_lands_before_the_status() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_direct_settle");
+        std::fs::write(dir.join("src"), "hello world\n").unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/w")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("cat /mnt/w/src > /mnt/w/d; cat /mnt/w/d; echo hi > /mnt/w/e; cat /mnt/w/e")
+            .await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "hello world\nhi\n", "")
+        );
+        let out = shell
+            .run("{ echo g; } > /mnt/w/g; echo a >> /mnt/w/e")
+            .await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(std::fs::read_to_string(dir.join("g")).unwrap(), "g\n");
+        assert_eq!(std::fs::read_to_string(dir.join("e")).unwrap(), "hi\na\n");
+    }));
+}
+
+#[test]
+fn bind_direct_write_waits_only_for_closed_writers() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_direct_live");
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/w")
+            .build()
+            .unwrap();
+        let run = shell.run(
+            "{ while [ ! -e /mnt/w/go ]; do sleep 0.01; done; echo late; } > /mnt/w/live & \
+                 echo fg > /mnt/w/fg; cat /mnt/w/fg; echo > /mnt/w/go; wait; cat /mnt/w/live",
+        );
+        let out = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+            .await
+            .expect("a live background writer blocked the foreground");
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "fg\nlate\n", "")
+        );
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_write_error_fails_the_command() {
+    use std::os::unix::fs::PermissionsExt;
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_direct_write_error");
+        let ro = dir.join("ro");
+        std::fs::write(&ro, "x\n").unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o444)).unwrap();
+        if std::fs::OpenOptions::new().write(true).open(&ro).is_ok() {
+            eprintln!("skipping: a 0444 file is writable for this user");
+            return;
+        }
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/w")
+            .build()
+            .unwrap();
+        for cmd in [
+            "echo hi > /mnt/w/ro",
+            "echo hi >> /mnt/w/ro",
+            "{ echo g; } > /mnt/w/ro",
+            "echo hi | tee /mnt/w/ro",
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.status, 1, "{cmd}: stderr: {}", out.stderr);
+            assert!(
+                out.stderr.contains("/mnt/w/ro: Permission denied"),
+                "{cmd}: stderr: {}",
+                out.stderr
+            );
+        }
+        let out = shell.run("echo hi > /mnt/w/ro | true; echo $?").await;
+        assert_eq!(out.stdout, "0\n");
+        assert!(
+            out.stderr.contains("/mnt/w/ro: Permission denied"),
+            "stderr: {}",
+            out.stderr
+        );
+        let out = shell
+            .run("{ echo x; } > /mnt/w/ro & true || echo stolen; wait")
+            .await;
+        assert_eq!(out.stdout, "");
+        let out = shell.run("echo hi > /mnt/w/ok; echo $?").await;
+        assert_eq!((out.stdout.as_str(), out.stderr.as_str()), ("0\n", ""));
+        assert_eq!(std::fs::read_to_string(&ro).unwrap(), "x\n");
+    }));
+}
+
 // Uses std::os::unix::fs::symlink — symlink creation differs on Windows
 // (requires elevated privileges), so this escape test is Unix-only.
 #[cfg(unix)]
@@ -6375,21 +6473,9 @@ fn bind_direct_write_back() {
             .build()
             .unwrap();
         shell.run("echo written_data > /mnt/wr/output.txt").await;
-        let content = wait_for_host_content(&dir.join("output.txt"), "written_data\n").await;
+        let content = std::fs::read_to_string(dir.join("output.txt")).unwrap();
         assert_eq!(content, "written_data\n");
     }));
-}
-
-/// Polls a host file until it holds `expected` or five seconds pass, then returns its content.
-async fn wait_for_host_content(path: &std::path::Path, expected: &str) -> String {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let content = std::fs::read_to_string(path);
-        if matches!(&content, Ok(c) if c == expected) || std::time::Instant::now() >= deadline {
-            return content.unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
 }
 
 // ── VFS glob matching ───────────────────────────────────────────────
