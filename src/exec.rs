@@ -2188,7 +2188,7 @@ async fn execute_item(
                             _ => OpenFlags::write(),
                         };
                         match os.open(proc, target, flags).await {
-                            Ok(fd) => writers.extend(proc.take_writer(fd)),
+                            Ok(fd) => writers.extend(proc.take_writer(fd).map(|w| (target, w))),
                             Err(e) => {
                                 if !stdin_expanded.is_empty() {
                                     proc.close(STDIN);
@@ -2207,8 +2207,11 @@ async fn execute_item(
                     proc.close(STDIN);
                     saved_stdin.transfer_fd(STDIN, proc);
                 }
-                for mut w in writers {
-                    let _ = w.write_all(captured.as_bytes()).await;
+                for (target, mut w) in writers {
+                    if let Err(e) = w.write_all(captured.as_bytes()).await {
+                        proc.err_msg(&format!("strands-shell: {target}: {e}"));
+                        proc.last_exit = 1;
+                    }
                 }
                 // Yield to let write-back tasks flush
                 tokio::task::yield_now().await;
