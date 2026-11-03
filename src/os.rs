@@ -105,6 +105,7 @@ pub enum FdKind {
     },
     ChannelWriter {
         tx: mpsc::Sender<Bytes>,
+        /// Set by the receiver to refuse the chunk it just took; with a flag, each write waits for that verdict.
         error_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
@@ -474,7 +475,10 @@ impl Process {
     /// Take the writer half out of an fd, removing it from the table.
     pub fn take_writer(&mut self, fd: Fd) -> io::Result<FdWriter> {
         match self.fds.remove(&fd) {
-            Some(kind) => Ok(FdWriter { kind }),
+            Some(kind) => Ok(FdWriter {
+                kind,
+                unconfirmed: None,
+            }),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("bad fd {fd}"),
@@ -814,6 +818,8 @@ impl AsyncRead for FdReader {
 /// Owned async writer extracted from a Process fd.
 pub struct FdWriter {
     kind: FdKind,
+    /// Length of a chunk sent on a flagged channel that its receiver has not yet taken.
+    unconfirmed: Option<usize>,
 }
 
 impl AsyncWrite for FdWriter {
@@ -822,9 +828,23 @@ impl AsyncWrite for FdWriter {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        match &mut this.kind {
+        let FdWriter { kind, unconfirmed } = self.get_mut();
+        match kind {
             FdKind::ChannelWriter { tx, error_flag } => {
+                if let Some(len) = *unconfirmed {
+                    if tx.capacity() < tx.max_capacity() && !tx.is_closed() {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                    *unconfirmed = None;
+                    if error_flag
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+                    {
+                        return Poll::Ready(Err(io::Error::other("file size limit exceeded")));
+                    }
+                    return Poll::Ready(Ok(len.min(buf.len())));
+                }
                 if let Some(flag) = error_flag
                     && flag.load(std::sync::atomic::Ordering::Relaxed)
                 {
@@ -833,6 +853,12 @@ impl AsyncWrite for FdWriter {
                 let bytes = Bytes::copy_from_slice(buf);
                 let len = bytes.len();
                 match tx.try_send(bytes) {
+                    Ok(()) if error_flag.is_some() => {
+                        // Wait for the receiver to take the chunk, so its verdict decides this write.
+                        *unconfirmed = Some(len);
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
                     Ok(()) => Poll::Ready(Ok(len)),
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         // Channel full — we need to wait. Store bytes and poll again.
