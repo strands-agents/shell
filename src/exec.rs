@@ -2007,6 +2007,7 @@ async fn execute_command_line_inner(
                 }
                 let os2 = os.clone();
                 let mut sub = proc.fork();
+                sub.isolate_host_writes();
                 let item = item.clone();
                 proc.bg_counter += 1;
                 let pid = proc.bg_counter;
@@ -2215,7 +2216,8 @@ async fn execute_item(
                 }
                 // Yield to let write-back tasks flush
                 tokio::task::yield_now().await;
-                result.map(|_| proc.last_exit)
+                let exit = settle_host_writes(proc, proc.last_exit).await;
+                result.map(|_| exit)
             } else {
                 let result = Box::pin(execute_item(os, proc, item)).await;
                 if !stdin_expanded.is_empty() {
@@ -2674,6 +2676,7 @@ async fn execute_pipeline(
 ) -> i32 {
     let capture = shell_proc.capture;
     let (exit, output) = run_pipeline(os, shell_proc, pipeline, capture).await;
+    let exit = settle_host_writes(shell_proc, exit).await;
     if capture {
         if shell_proc.max_output > 0
             && shell_proc.captured_output.len() + output.len() > shell_proc.max_output
@@ -2696,7 +2699,21 @@ async fn execute_pipeline_capture(
     shell_proc: &mut Process,
     pipeline: &[parser::Command],
 ) -> (i32, String) {
-    run_pipeline(os, shell_proc, pipeline, true).await
+    let (exit, output) = run_pipeline(os, shell_proc, pipeline, true).await;
+    (settle_host_writes(shell_proc, exit).await, output)
+}
+
+/// Wait for the host writes that the finished command closed, and fail it if one failed.
+async fn settle_host_writes(proc: &mut Process, exit: i32) -> i32 {
+    let failures = proc.settle_host_writes().await;
+    for failure in &failures {
+        proc.err_msg(&format!("strands-shell: {failure}"));
+    }
+    if failures.is_empty() || exit != 0 {
+        exit
+    } else {
+        1
+    }
 }
 
 async fn run_pipeline(
@@ -2978,6 +2995,11 @@ async fn run_pipeline(
 
     // Build a process for each stage
     let mut procs: Vec<Process> = (0..len).map(|_| shell_proc.fork()).collect();
+    // Only the last stage's host writes decide the status.
+    let early_host_writes: Vec<os::HostWrites> = procs[..len - 1]
+        .iter_mut()
+        .map(Process::isolate_host_writes)
+        .collect();
 
     // Inherit stdin from shell_proc if present (used by CompoundPipeline).
     shell_proc.transfer_fd(STDIN, &mut procs[0]);
@@ -3246,6 +3268,11 @@ async fn run_pipeline(
     }
     if capture && !stderr_str.is_empty() {
         shell_proc.captured_stderr.push_str(&stderr_str);
+    }
+    for writes in early_host_writes {
+        for failure in writes.settle().await {
+            shell_proc.err_msg(&format!("strands-shell: {failure}"));
+        }
     }
 
     (last_exit, stdout_str)

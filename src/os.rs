@@ -194,6 +194,40 @@ pub struct Process {
     pub traps: HashMap<String, String>,
     /// File creation mask.
     pub umask: u32,
+    /// Host writes that the shell waits for once their writers close.
+    host_writes: HostWrites,
+}
+
+/// A task that writes a host file after the last writer of its channel closes.
+struct HostWrite {
+    writers: mpsc::WeakSender<Bytes>,
+    path: String,
+    drain: tokio::task::JoinHandle<io::Result<()>>,
+}
+
+/// The host writes of one job, shared by the processes it forks.
+#[derive(Clone, Default)]
+pub(crate) struct HostWrites(Arc<std::sync::Mutex<Vec<HostWrite>>>);
+
+impl HostWrites {
+    /// Wait for each host write whose writers are closed, and return one message per failure.
+    pub(crate) async fn settle(&self) -> Vec<String> {
+        let closed: Vec<HostWrite> = {
+            let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let (closed, open) = std::mem::take(&mut *pending)
+                .into_iter()
+                .partition(|w| w.writers.strong_count() == 0);
+            *pending = open;
+            closed
+        };
+        let mut failures = Vec::new();
+        for write in closed {
+            if let Ok(Err(e)) = write.drain.await {
+                failures.push(format!("{}: {e}", write.path));
+            }
+        }
+        failures
+    }
 }
 
 /// Resource limits that can be extracted from a configured Process
@@ -313,6 +347,7 @@ impl Process {
             captured_stderr: String::new(),
             traps: HashMap::new(),
             umask: 0o022,
+            host_writes: Default::default(),
         }
     }
 
@@ -354,7 +389,38 @@ impl Process {
             captured_stderr: String::new(),
             traps: HashMap::new(),
             umask: 0o022,
+            host_writes: Default::default(),
         }
+    }
+
+    /// Track a host write so that [`Process::settle_host_writes`] waits for it.
+    pub(crate) fn track_host_write(
+        &self,
+        path: String,
+        writers: mpsc::WeakSender<Bytes>,
+        drain: tokio::task::JoinHandle<io::Result<()>>,
+    ) {
+        let write = HostWrite {
+            writers,
+            path,
+            drain,
+        };
+        self.host_writes
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(write);
+    }
+
+    /// Wait for each host write whose writers are closed, and return one message per failure.
+    pub(crate) async fn settle_host_writes(&self) -> Vec<String> {
+        self.host_writes.settle().await
+    }
+
+    /// Give this process and its forks their own host writes, and return them.
+    pub(crate) fn isolate_host_writes(&mut self) -> HostWrites {
+        self.host_writes = HostWrites::default();
+        self.host_writes.clone()
     }
 
     pub fn alloc_fd(&mut self, kind: FdKind) -> io::Result<Fd> {
@@ -405,6 +471,7 @@ impl Process {
             captured_stderr: String::new(),
             traps: self.traps.clone(),
             umask: self.umask,
+            host_writes: self.host_writes.clone(),
         }
     }
 
