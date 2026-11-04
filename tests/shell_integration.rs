@@ -8805,44 +8805,21 @@ fn shell_with_max_file_size_4(dir: &std::path::Path) -> Shell {
         .unwrap()
 }
 
-/// Puts `seed` in `{mount}/f` before a case runs, on the host with an old mtime for the direct bind.
+/// Puts `seed` in `{mount}/f` before a case runs.
 async fn seed_file(shell: &mut Shell, dir: &std::path::Path, mount: &str, seed: &str) {
     if mount == "/tmp" {
         shell.write_file("/tmp/f", seed.as_bytes()).await.unwrap();
     } else {
         std::fs::write(dir.join("f"), seed).unwrap();
-        let file = std::fs::File::options()
-            .write(true)
-            .open(dir.join("f"))
-            .unwrap();
-        file.set_modified(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap();
     }
 }
 
-/// The modification time of the host copy of `f`, if it exists.
-fn host_mtime(dir: &std::path::Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(dir.join("f"))
-        .and_then(|m| m.modified())
-        .ok()
-}
-
-/// The content of `{mount}/f` once its drain task has rewritten it, removing the host copy.
-async fn written_file(
-    shell: &mut Shell,
-    dir: &std::path::Path,
-    mount: &str,
-    expected: &str,
-    seeded: Option<std::time::SystemTime>,
-) -> String {
+/// The content of `{mount}/f`, removing the host copy.
+async fn written_file(shell: &mut Shell, dir: &std::path::Path, mount: &str) -> String {
     if mount == "/tmp" {
         return shell.run("cat /tmp/f").await.stdout;
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while seeded.is_some() && host_mtime(dir) == seeded && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let content = wait_for_host_content(&dir.join("f"), expected).await;
+    let content = std::fs::read_to_string(dir.join("f")).unwrap();
     std::fs::remove_file(dir.join("f")).unwrap();
     content
 }
@@ -8860,10 +8837,8 @@ fn max_file_size_overflow_fails_the_write() {
             for mount in ["/tmp", "/mnt/d"] {
                 let script = script.replace("MOUNT", mount);
                 let mut shell = shell_with_max_file_size_4(&dir);
-                let mut seeded = None;
                 if let Some(seed) = seed {
                     seed_file(&mut shell, &dir, mount, seed).await;
-                    seeded = host_mtime(&dir);
                 }
                 let out = shell.run(&script).await;
                 assert_eq!(out.status, 1, "{script}: stderr {:?}", out.stderr);
@@ -8872,7 +8847,7 @@ fn max_file_size_overflow_fails_the_write() {
                     "{script}: stderr {:?}",
                     out.stderr
                 );
-                let content = written_file(&mut shell, &dir, mount, kept, seeded).await;
+                let content = written_file(&mut shell, &dir, mount).await;
                 assert_eq!(content, kept, "{script}");
             }
         }
@@ -8892,15 +8867,13 @@ fn max_file_size_write_up_to_the_limit_succeeds() {
             for mount in ["/tmp", "/mnt/d"] {
                 let script = script.replace("MOUNT", mount);
                 let mut shell = shell_with_max_file_size_4(&dir);
-                let mut seeded = None;
                 if let Some(seed) = seed {
                     seed_file(&mut shell, &dir, mount, seed).await;
-                    seeded = host_mtime(&dir);
                 }
                 let out = shell.run(&script).await;
                 assert_eq!(out.status, 0, "{script}: stderr {:?}", out.stderr);
                 assert_eq!(out.stderr, "", "{script}");
-                let content = written_file(&mut shell, &dir, mount, "abcd", seeded).await;
+                let content = written_file(&mut shell, &dir, mount).await;
                 assert_eq!(content, "abcd", "{script}");
             }
         }
