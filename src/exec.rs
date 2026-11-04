@@ -2433,6 +2433,197 @@ fn glob_bracket(pat: &[u8], start: usize, ch: u8) -> Option<(bool, usize)> {
     None // no closing ]
 }
 
+/// A builtin that runs shell code in the current shell.
+#[derive(Clone, Copy)]
+enum Special {
+    Eval,
+    Source,
+}
+
+async fn run_special(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    special: Special,
+    args: Vec<String>,
+) -> Result<i32, ControlFlow> {
+    match special {
+        Special::Eval => {
+            let code = args.join(" ");
+            if code.is_empty() {
+                return Ok(0);
+            }
+            proc.depth += 1;
+            let (exit, should_exit) = Box::pin(execute(os, proc, &code)).await;
+            proc.depth -= 1;
+            if should_exit {
+                return Err(ControlFlow::Exit(exit));
+            }
+            Ok(exit)
+        }
+        Special::Source => {
+            if args.is_empty() {
+                proc.err_msg("strands-shell: .: filename argument required");
+                return Ok(2);
+            }
+            let fd = match os.open(proc, &args[0], OpenFlags::read()).await {
+                Ok(fd) => fd,
+                Err(e) => {
+                    proc.err_msg(&format!("strands-shell: .: {}: {e}", args[0]));
+                    return Ok(1);
+                }
+            };
+            let mut reader = proc.take_reader(fd).map_err(|e| {
+                proc.err_msg(&format!("strands-shell: .: {}: {e}", args[0]));
+                ControlFlow::Exit(1)
+            })?;
+            let content = match os::read_to_string_limited(&mut reader, proc.max_output).await {
+                Ok(s) => s,
+                Err(e) => {
+                    proc.err_msg(&format!("strands-shell: .: {}: {e}", args[0]));
+                    return Ok(1);
+                }
+            };
+            let saved_args = if args.len() > 1 {
+                Some(std::mem::replace(&mut proc.args, args[1..].to_vec()))
+            } else {
+                None
+            };
+            proc.depth += 1;
+            let (exit, should_exit) = Box::pin(execute_sourced(os.clone(), proc, &content)).await;
+            proc.depth -= 1;
+            if let Some(saved) = saved_args {
+                proc.args = saved;
+            }
+            if should_exit {
+                return Err(ControlFlow::Exit(exit));
+            }
+            Ok(exit)
+        }
+    }
+}
+
+/// Run `eval` or `source` in the current shell with the command's redirections.
+async fn run_special_redirected(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    command: &parser::Command,
+    special: Special,
+    args: Vec<String>,
+) -> Result<i32, ControlFlow> {
+    if command.redirects.is_empty() {
+        return run_special(os, proc, special, args).await;
+    }
+    let mut redirects = Vec::new();
+    for redir in &command.redirects {
+        let target = match redir {
+            Redirect::Write(_, word)
+            | Redirect::Append(_, word)
+            | Redirect::Read(_, word)
+            | Redirect::ReadWrite(_, word)
+            | Redirect::Clobber(_, word)
+            | Redirect::DupWrite(_, word)
+            | Redirect::DupRead(_, word) => expand_word(os.clone(), proc, word).await,
+            Redirect::HereDoc(..) => String::new(),
+        };
+        // `N<&N` and `N>&N` leave the caller's fd as it is.
+        if let Redirect::DupRead(fd, _) | Redirect::DupWrite(fd, _) = redir
+            && target == fd.to_string()
+        {
+            continue;
+        }
+        redirects.push((redir.clone(), target));
+    }
+    if proc.nounset_error {
+        proc.nounset_error = false;
+        return Err(ControlFlow::Exit(2));
+    }
+
+    // Channels stand for the caller's stdout and stderr, so the redirections apply in order.
+    let mut io_proc = proc.fork();
+    let (out_tx, mut out_rx) = os::pipe(64);
+    let (err_tx, mut err_rx) = os::pipe(64);
+    io_proc.set_channel_writer(STDOUT, out_tx);
+    io_proc.set_channel_writer(STDERR, err_tx);
+    if let Err(msg) = apply_redirects(&os, &mut io_proc, &redirects).await {
+        drop(io_proc);
+        tokio::task::yield_now().await;
+        proc.err_msg(&format!("strands-shell: {msg}"));
+        return Ok(1);
+    }
+
+    let mut saved_stdin = Process::empty();
+    let stdin_redirected = io_proc.has_fd(STDIN);
+    if stdin_redirected {
+        proc.transfer_fd(STDIN, &mut saved_stdin);
+        io_proc.transfer_fd(STDIN, proc);
+    }
+    let saved_capture = std::mem::replace(&mut proc.capture, true);
+    let saved_output = std::mem::take(&mut proc.captured_output);
+    let saved_stderr = std::mem::take(&mut proc.captured_stderr);
+    let saved_err_tx = proc.take_err_tx();
+
+    let mut result = Box::pin(run_special(os, proc, special, args)).await;
+
+    let stdout = std::mem::replace(&mut proc.captured_output, saved_output);
+    let stderr = std::mem::replace(&mut proc.captured_stderr, saved_stderr);
+    proc.capture = saved_capture;
+    if let Some(tx) = saved_err_tx {
+        proc.set_err_tx(tx);
+    }
+    if stdin_redirected {
+        proc.close(STDIN);
+        saved_stdin.transfer_fd(STDIN, proc);
+    }
+
+    for (fd, text) in [(STDOUT, &stdout), (STDERR, &stderr)] {
+        if !text.is_empty()
+            && let Ok(mut writer) = io_proc.take_writer(fd)
+        {
+            let _ = writer.write_all(text.as_bytes()).await;
+        }
+    }
+    drop(io_proc);
+    // Closing redirected writers lets the VFS finish any pending writes.
+    tokio::task::yield_now().await;
+
+    let mut to_stdout = String::new();
+    while let Ok(bytes) = out_rx.try_recv() {
+        to_stdout.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    let mut to_stderr = String::new();
+    while let Ok(bytes) = err_rx.try_recv() {
+        to_stderr.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    if !to_stdout.is_empty() {
+        if proc.capture {
+            let remaining = if proc.max_output > 0 {
+                proc.max_output.saturating_sub(proc.captured_output.len())
+            } else {
+                usize::MAX
+            };
+            if to_stdout.len() > remaining {
+                let end = os::floor_char_boundary(&to_stdout, remaining);
+                proc.captured_output.push_str(&to_stdout[..end]);
+                proc.err_msg("strands-shell: output size limit exceeded");
+                if result.is_ok() {
+                    result = Ok(1);
+                }
+            } else {
+                proc.captured_output.push_str(&to_stdout);
+            }
+        } else {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(to_stdout.as_bytes());
+            let _ = out.flush();
+        }
+    }
+    if !to_stderr.is_empty() {
+        proc.write_stderr(&to_stderr);
+    }
+    result
+}
+
 /// Print xtrace for a command about to execute.
 fn xtrace(proc: &mut Process, args: &[String]) {
     if !proc.opt_xtrace {
@@ -2517,60 +2708,14 @@ async fn execute_pipeline_checked(
                 "eval" => {
                     let args = expand_words(os.clone(), proc, &pipeline[0].args[1..]).await;
                     xtrace(proc, &[&["eval".into()], &args[..]].concat());
-                    let code = args.join(" ");
-                    if code.is_empty() {
-                        return Ok(0);
-                    }
-                    proc.depth += 1;
-                    let (exit, should_exit) = Box::pin(execute(os, proc, &code)).await;
-                    proc.depth -= 1;
-                    if should_exit {
-                        return Err(ControlFlow::Exit(exit));
-                    }
-                    return Ok(exit);
+                    return run_special_redirected(os, proc, &pipeline[0], Special::Eval, args)
+                        .await;
                 }
                 "." | "source" => {
                     let args = expand_words(os.clone(), proc, &pipeline[0].args[1..]).await;
                     xtrace(proc, &[&[".".into()], &args[..]].concat());
-                    if args.is_empty() {
-                        proc.err_msg("strands-shell: .: filename argument required");
-                        return Ok(2);
-                    }
-                    let fd = match os.open(proc, &args[0], OpenFlags::read()).await {
-                        Ok(fd) => fd,
-                        Err(e) => {
-                            proc.err_msg(&format!("strands-shell: .: {}: {e}", args[0]));
-                            return Ok(1);
-                        }
-                    };
-                    let mut reader = proc.take_reader(fd).map_err(|e| {
-                        proc.err_msg(&format!("strands-shell: .: {}: {e}", args[0]));
-                        ControlFlow::Exit(1)
-                    })?;
-                    let content =
-                        match os::read_to_string_limited(&mut reader, proc.max_output).await {
-                            Ok(s) => s,
-                            Err(e) => {
-                                proc.err_msg(&format!("strands-shell: .: {}: {e}", args[0]));
-                                return Ok(1);
-                            }
-                        };
-                    let saved_args = if args.len() > 1 {
-                        Some(std::mem::replace(&mut proc.args, args[1..].to_vec()))
-                    } else {
-                        None
-                    };
-                    proc.depth += 1;
-                    let (exit, should_exit) =
-                        Box::pin(execute_sourced(os.clone(), proc, &content)).await;
-                    proc.depth -= 1;
-                    if let Some(saved) = saved_args {
-                        proc.args = saved;
-                    }
-                    if should_exit {
-                        return Err(ControlFlow::Exit(exit));
-                    }
-                    return Ok(exit);
+                    return run_special_redirected(os, proc, &pipeline[0], Special::Source, args)
+                        .await;
                 }
                 "exec" => {
                     let args = expand_words(os.clone(), proc, &pipeline[0].args[1..]).await;

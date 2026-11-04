@@ -605,14 +605,23 @@ impl Process {
 
     /// Write an error message to the process stderr channel, or real stderr as fallback.
     pub fn err_msg(&mut self, msg: &str) {
+        self.write_stderr(&format!("{msg}\n"));
+    }
+
+    /// Write text to stderr as [`err_msg`](Self::err_msg) does, without adding a newline.
+    pub(crate) fn write_stderr(&mut self, text: &str) {
         if let Some(tx) = &self.err_tx {
-            let _ = tx.try_send(Bytes::from(format!("{msg}\n")));
+            let _ = tx.try_send(Bytes::from(text.to_string()));
         } else if self.capture {
-            self.captured_stderr.push_str(msg);
-            self.captured_stderr.push('\n');
+            self.captured_stderr.push_str(text);
         } else {
-            eprintln!("{msg}");
+            eprint!("{text}");
         }
+    }
+
+    /// Remove the stderr channel and return it.
+    pub(crate) fn take_err_tx(&mut self) -> Option<mpsc::Sender<Bytes>> {
+        self.err_tx.take()
     }
 
     /// Write a message to stdout (fd 1 channel if available, else real stdout).
