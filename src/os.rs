@@ -196,6 +196,40 @@ pub struct Process {
     pub traps: HashMap<String, String>,
     /// File creation mask.
     pub umask: u32,
+    /// Host writes that the shell waits for once their writers close.
+    host_writes: HostWrites,
+}
+
+/// A task that writes a host file after the last writer of its channel closes.
+struct HostWrite {
+    writers: mpsc::WeakSender<Bytes>,
+    path: String,
+    drain: tokio::task::JoinHandle<io::Result<()>>,
+}
+
+/// The host writes of one job, shared by the processes it forks.
+#[derive(Clone, Default)]
+pub(crate) struct HostWrites(Arc<std::sync::Mutex<Vec<HostWrite>>>);
+
+impl HostWrites {
+    /// Wait for each host write whose writers are closed, and return one message per failure.
+    pub(crate) async fn settle(&self) -> Vec<String> {
+        let closed: Vec<HostWrite> = {
+            let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let (closed, open) = std::mem::take(&mut *pending)
+                .into_iter()
+                .partition(|w| w.writers.strong_count() == 0);
+            *pending = open;
+            closed
+        };
+        let mut failures = Vec::new();
+        for write in closed {
+            if let Ok(Err(e)) = write.drain.await {
+                failures.push(format!("{}: {e}", write.path));
+            }
+        }
+        failures
+    }
 }
 
 /// Resource limits that can be extracted from a configured Process
@@ -315,6 +349,7 @@ impl Process {
             captured_stderr: String::new(),
             traps: HashMap::new(),
             umask: 0o022,
+            host_writes: Default::default(),
         }
     }
 
@@ -356,7 +391,38 @@ impl Process {
             captured_stderr: String::new(),
             traps: HashMap::new(),
             umask: 0o022,
+            host_writes: Default::default(),
         }
+    }
+
+    /// Track a host write so that [`Process::settle_host_writes`] waits for it.
+    pub(crate) fn track_host_write(
+        &self,
+        path: String,
+        writers: mpsc::WeakSender<Bytes>,
+        drain: tokio::task::JoinHandle<io::Result<()>>,
+    ) {
+        let write = HostWrite {
+            writers,
+            path,
+            drain,
+        };
+        self.host_writes
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(write);
+    }
+
+    /// Wait for each host write whose writers are closed, and return one message per failure.
+    pub(crate) async fn settle_host_writes(&self) -> Vec<String> {
+        self.host_writes.settle().await
+    }
+
+    /// Give this process and its forks their own host writes, and return them.
+    pub(crate) fn isolate_host_writes(&mut self) -> HostWrites {
+        self.host_writes = HostWrites::default();
+        self.host_writes.clone()
     }
 
     pub fn alloc_fd(&mut self, kind: FdKind) -> io::Result<Fd> {
@@ -407,6 +473,7 @@ impl Process {
             captured_stderr: String::new(),
             traps: self.traps.clone(),
             umask: self.umask,
+            host_writes: self.host_writes.clone(),
         }
     }
 
@@ -505,6 +572,16 @@ impl Process {
         self.err_tx = Some(tx);
     }
 
+    /// The channel behind fd 2, or a closed channel when fd 2 cannot be written.
+    pub(crate) fn stderr_channel(&self) -> Option<mpsc::Sender<Bytes>> {
+        match self.fds.get(&STDERR) {
+            Some(FdKind::ChannelWriter { tx, .. }) => Some(tx.clone()),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(FdKind::File(_)) => None,
+            Some(FdKind::ChannelReader { .. }) | None => Some(mpsc::channel(1).0),
+        }
+    }
+
     /// Check execution limits (deadline and recursion depth).
     /// Returns an error message if a limit is exceeded.
     pub fn check_limits(&self) -> Option<&'static str> {
@@ -530,19 +607,28 @@ impl Process {
 
     /// Write an error message to the process stderr channel, or real stderr as fallback.
     pub fn err_msg(&mut self, msg: &str) {
+        self.write_stderr(&format!("{msg}\n"));
+    }
+
+    /// Write text to stderr as [`err_msg`](Self::err_msg) does, without adding a newline.
+    pub(crate) fn write_stderr(&mut self, text: &str) {
         if let Some(tx) = &self.err_tx {
-            let _ = tx.try_send(Bytes::from(format!("{msg}\n")));
+            let _ = tx.try_send(Bytes::from(text.to_string()));
         } else if self.capture {
-            self.captured_stderr.push_str(msg);
-            self.captured_stderr.push('\n');
+            self.captured_stderr.push_str(text);
         } else {
-            eprintln!("{msg}");
+            eprint!("{text}");
         }
     }
 
     /// Whether the last captured stderr line already reports the output limit.
     pub(crate) fn output_limit_reported(&self) -> bool {
         self.capture && self.captured_stderr.ends_with(OUTPUT_LIMIT_MESSAGE)
+    }
+
+    /// Remove the stderr channel and return it.
+    pub(crate) fn take_err_tx(&mut self) -> Option<mpsc::Sender<Bytes>> {
+        self.err_tx.take()
     }
 
     /// Write a message to stdout (fd 1 channel if available, else real stdout).
