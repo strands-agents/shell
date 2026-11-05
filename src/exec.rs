@@ -466,16 +466,13 @@ fn expand_part_split<'a>(
                 }
             }
             WordPart::VarOp(name, op, word, colon) if op == "-" || op == "+" => {
-                let val = resolve_var(proc, name);
-                let is_unset_or_null = match &val {
-                    None => true,
-                    Some(v) => *colon && v.is_empty(),
-                };
-                if is_unset_or_null == (op == "-") {
+                if uses_alternate_word(proc, name, op, *colon) {
                     for p in word {
                         expand_part_split(os.clone(), proc, p, segments, ifs, quoted).await;
                     }
-                } else if let Some(v) = val.filter(|_| op == "-") {
+                } else if op == "-"
+                    && let Some(v) = resolve_var(proc, name)
+                {
                     segments.last_mut().unwrap().push(&v, !quoted, false);
                 }
             }
@@ -501,6 +498,27 @@ fn expand_part_split<'a>(
             WordPart::ArrayLiteral(_) => refuse_array(proc),
         }
     })
+}
+
+/// Whether `${name-word}` or `${name+word}` expands to `word` rather than to the value.
+fn uses_alternate_word(proc: &Process, name: &str, op: &str, colon: bool) -> bool {
+    let is_unset_or_null = match resolve_var(proc, name) {
+        None => true,
+        Some(v) => colon && v.is_empty(),
+    };
+    is_unset_or_null == (op == "-")
+}
+
+/// The variable and value that `key=value` sets, where `key+=value` appends.
+fn assignment(proc: &Process, key: String, value: String) -> (String, String) {
+    match key.strip_suffix('+') {
+        Some(base) => {
+            let mut joined = proc.env.get(base).cloned().unwrap_or_default();
+            joined.push_str(&value);
+            (base.to_string(), joined)
+        }
+        None => (key, value),
+    }
 }
 
 /// Arrays parse so that a function body holding one defines as in bash; running one is refused.
@@ -1944,24 +1962,14 @@ async fn run_capturing_status(
                     compound,
                     negated,
                 } => {
-                    let (_, input) = execute_pipeline_capture(os.clone(), proc, head).await;
-                    let mut sub = proc.fork();
-                    sub.depth += 1;
-                    if let Some(msg) = sub.check_limits() {
-                        sub.err_msg(msg);
-                        (1, String::new())
-                    } else {
-                        sub.set_channel_reader(STDIN, text_reader(input));
-                        let compound_cl = vec![(*compound.clone(), None)];
-                        let (s, result) =
-                            Box::pin(run_capturing_status(os.clone(), &mut sub, &compound_cl))
-                                .await;
-                        let mut exit = captured_status(result, sub.last_exit);
-                        if *negated {
-                            exit = if exit == 0 { 1 } else { 0 };
-                        }
-                        (exit, s)
-                    }
+                    Box::pin(capture_pipeline_into_compound(
+                        os.clone(),
+                        proc,
+                        head,
+                        compound,
+                        *negated,
+                    ))
+                    .await
                 }
                 Item::CompoundRedirect { item, redirects } => {
                     let mut expanded = Vec::new();
@@ -2046,6 +2054,62 @@ async fn run_capturing_status(
         }
     }
     (output, Ok(last_exit))
+}
+
+/// Run `head | compound` and capture the compound's stdout.
+async fn capture_pipeline_into_compound(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    head: &[parser::Command],
+    compound: &Item,
+    negated: bool,
+) -> (i32, String) {
+    let (_, input) = execute_pipeline_capture(os.clone(), proc, head).await;
+    let mut sub = proc.fork();
+    sub.depth += 1;
+    if let Some(msg) = sub.check_limits() {
+        sub.err_msg(msg);
+        return (1, String::new());
+    }
+    sub.set_channel_reader(STDIN, text_reader(input));
+    let compound_cl = vec![(compound.clone(), None)];
+    let (s, result) = run_capturing_status(os, &mut sub, &compound_cl).await;
+    let mut exit = captured_status(result, sub.last_exit);
+    if negated {
+        exit = if exit == 0 { 1 } else { 0 };
+    }
+    (exit, s)
+}
+
+/// Run `head | compound`: the head runs to its end, then the compound reads its output in a fork.
+async fn execute_pipeline_into_compound(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    head: &[parser::Command],
+    compound: &Item,
+    negated: bool,
+) -> Result<i32, ControlFlow> {
+    let (_, input) = execute_pipeline_capture(os.clone(), proc, head).await;
+    let mut sub = proc.fork();
+    sub.depth += 1;
+    if let Some(msg) = sub.check_limits() {
+        sub.err_msg(msg);
+        return Ok(1);
+    }
+    sub.set_channel_reader(STDIN, text_reader(input));
+    let r = execute_item(os, &mut sub, compound).await;
+    if proc.capture {
+        proc.captured_output.push_str(&sub.captured_output);
+        proc.captured_stderr.push_str(&sub.captured_stderr);
+    }
+    let mut exit = match r {
+        Ok(n) | Err(ControlFlow::Exit(n)) => n,
+        Err(e) => return Err(e),
+    };
+    if negated {
+        exit = if exit == 0 { 1 } else { 0 };
+    }
+    Ok(exit)
 }
 
 /// Inner execute that propagates ControlFlow.
@@ -2176,29 +2240,10 @@ async fn execute_item(
             compound,
             negated,
         } => {
-            // Capture the head's output, then run the compound in a fork
-            // with that output as its stdin.
-            let (_, input) = execute_pipeline_capture(os.clone(), proc, head).await;
-            let mut sub = proc.fork();
-            sub.depth += 1;
-            if let Some(msg) = sub.check_limits() {
-                sub.err_msg(msg);
-                return Ok(1);
-            }
-            sub.set_channel_reader(STDIN, text_reader(input));
-            let r = Box::pin(execute_item(os, &mut sub, compound)).await;
-            if proc.capture {
-                proc.captured_output.push_str(&sub.captured_output);
-                proc.captured_stderr.push_str(&sub.captured_stderr);
-            }
-            let mut exit = match r {
-                Ok(n) | Err(ControlFlow::Exit(n)) => n,
-                Err(e) => return Err(e),
-            };
-            if *negated {
-                exit = if exit == 0 { 1 } else { 0 };
-            }
-            Ok(exit)
+            Box::pin(execute_pipeline_into_compound(
+                os, proc, head, compound, *negated,
+            ))
+            .await
         }
         Item::CompoundPipeline {
             compound,
@@ -2984,14 +3029,7 @@ async fn run_pipeline(
         for (k, v) in &cmd.env {
             let key = expand_word(os.clone(), shell_proc, k).await;
             let value = expand_word(os.clone(), shell_proc, v).await;
-            match key.strip_suffix('+') {
-                Some(base) => {
-                    let mut joined = shell_proc.env.get(base).cloned().unwrap_or_default();
-                    joined.push_str(&value);
-                    env.push((base.to_string(), joined));
-                }
-                None => env.push((key, value)),
-            }
+            env.push(assignment(shell_proc, key, value));
         }
         expanded_env.push(env);
         let mut redirs = Vec::new();

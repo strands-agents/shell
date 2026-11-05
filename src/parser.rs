@@ -1266,16 +1266,7 @@ fn parse_command_line<'a>(
         // A pipeline feeding a compound command: `cmd | while read x; do ...; done`
         if pipeline_tokens.last() == Some(&&Token::Pipe) && opens_a_compound(&tokens[i]) {
             pipeline_tokens.pop();
-            let head = build_pipeline(&pipeline_tokens)?;
-            pipeline_tokens.clear();
-            let (compound, rest) = parse_compound(&tokens[i..])?;
-            i = tokens.len() - rest.len();
-            let item = Item::PipelineIntoCompound {
-                head,
-                compound: Box::new(compound),
-                negated,
-            };
-            let item = collect_compound_pipe(tokens, &mut i, &mut pipeline_tokens, item, false)?;
+            let item = parse_pipeline_into_compound(tokens, &mut i, &mut pipeline_tokens, negated)?;
             negated = false;
             result.push((item, None));
             continue;
@@ -1306,21 +1297,9 @@ fn parse_command_line<'a>(
                     && keyword == "function"
                     && matches!(tokens.get(i + 1), Some(tok @ Token::Word(_)) if !is_reserved(tok)) =>
             {
-                let Token::Word(fname) = &tokens[i + 1] else {
-                    unreachable!()
-                };
-                let fname = fname.clone();
-                i += 2;
-                if tokens.get(i) == Some(&Token::LParen)
-                    && tokens.get(i + 1) == Some(&Token::RParen)
-                {
-                    i += 2;
-                }
-                let rest = expect_word(&tokens[i..], "{")?;
-                let (body, rest) = parse_command_line(rest, &["}"])?;
-                let rest = expect_word(rest, "}")?;
+                let (item, rest) = parse_function_keyword(&tokens[i + 1..])?;
                 i = tokens.len() - rest.len();
-                result.push((Item::Function { name: fname, body }, None));
+                result.push((item, None));
                 continue;
             }
             // Function definition: name() { body; }
@@ -1432,6 +1411,44 @@ fn parse_command_line<'a>(
     }
 
     Ok((result, &tokens[i..]))
+}
+
+/// Parse `name { body; }` or `name() { body; }` after the `function` keyword.
+fn parse_function_keyword(tokens: &[Token]) -> Result<(Item, &[Token]), String> {
+    let Some(Token::Word(name)) = tokens.first() else {
+        return Err("expected function name".into());
+    };
+    let mut rest = &tokens[1..];
+    if rest.first() == Some(&Token::LParen) && rest.get(1) == Some(&Token::RParen) {
+        rest = &rest[2..];
+    }
+    let rest = expect_word(rest, "{")?;
+    let (body, rest) = parse_command_line(rest, &["}"])?;
+    let rest = expect_word(rest, "}")?;
+    let item = Item::Function {
+        name: name.clone(),
+        body,
+    };
+    Ok((item, rest))
+}
+
+/// Parse the compound at `tokens[*i]` as the stage after `pipeline_tokens`.
+fn parse_pipeline_into_compound<'a>(
+    tokens: &'a [Token],
+    i: &mut usize,
+    pipeline_tokens: &mut Vec<&'a Token>,
+    negated: bool,
+) -> Result<Item, String> {
+    let head = build_pipeline(pipeline_tokens)?;
+    pipeline_tokens.clear();
+    let (compound, rest) = parse_compound(&tokens[*i..])?;
+    *i = tokens.len() - rest.len();
+    let item = Item::PipelineIntoCompound {
+        head,
+        compound: Box::new(compound),
+        negated,
+    };
+    collect_compound_pipe(tokens, i, pipeline_tokens, item, false)
 }
 
 /// Whether `tok` begins a compound command.
