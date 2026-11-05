@@ -328,7 +328,7 @@ pub async fn repl_loop(
     0
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 async fn run_repl(_os: &dyn Kernel, proc: &mut Process) -> CommandResult {
     let stdout_buf: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(Vec::new()));
     let stderr_buf: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(Vec::new()));
@@ -361,14 +361,14 @@ async fn run_repl(_os: &dyn Kernel, proc: &mut Process) -> CommandResult {
     Ok(code)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", not(feature = "cli")))]
 async fn run_repl(_os: &dyn Kernel, proc: &mut Process) -> CommandResult {
     let stdout_buf: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(Vec::new()));
     let stderr_buf: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(Vec::new()));
 
     let lua = setup_lua_vm(proc, &[], "", &stdout_buf, &stderr_buf)?;
 
-    // Simple line-based REPL without rustyline (no terminal features on WASM)
+    // Simple line-based REPL without rustyline (WASM, or a build without the `cli` feature)
     let mut read_line = |prompt: &str| -> Option<String> {
         use std::io::Write;
         let _ = std::io::stdout().write_all(prompt.as_bytes());

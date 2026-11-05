@@ -140,8 +140,9 @@
 //! | **Commands** | [`commands`], [`builtins`] | Built-in command implementations |
 
 pub mod builtins;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod cli;
+mod command_fallback;
 pub mod commands;
 pub mod exec;
 pub mod io;

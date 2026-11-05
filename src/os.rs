@@ -12,6 +12,8 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 
+pub use crate::command_fallback::{CommandContext, CommandFallback, CommandInput, CommandOutput};
+
 /// Monotonic counter for virtual PIDs.
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 
@@ -103,6 +105,7 @@ pub enum FdKind {
     },
     ChannelWriter {
         tx: mpsc::Sender<Bytes>,
+        /// Set by the receiver to refuse the chunk it just took; with a flag, each write waits for that verdict.
         error_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
@@ -191,6 +194,40 @@ pub struct Process {
     pub traps: HashMap<String, String>,
     /// File creation mask.
     pub umask: u32,
+    /// Host writes that the shell waits for once their writers close.
+    host_writes: HostWrites,
+}
+
+/// A task that writes a host file after the last writer of its channel closes.
+struct HostWrite {
+    writers: mpsc::WeakSender<Bytes>,
+    path: String,
+    drain: tokio::task::JoinHandle<io::Result<()>>,
+}
+
+/// The host writes of one job, shared by the processes it forks.
+#[derive(Clone, Default)]
+pub(crate) struct HostWrites(Arc<std::sync::Mutex<Vec<HostWrite>>>);
+
+impl HostWrites {
+    /// Wait for each host write whose writers are closed, and return one message per failure.
+    pub(crate) async fn settle(&self) -> Vec<String> {
+        let closed: Vec<HostWrite> = {
+            let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let (closed, open) = std::mem::take(&mut *pending)
+                .into_iter()
+                .partition(|w| w.writers.strong_count() == 0);
+            *pending = open;
+            closed
+        };
+        let mut failures = Vec::new();
+        for write in closed {
+            if let Ok(Err(e)) = write.drain.await {
+                failures.push(format!("{}: {e}", write.path));
+            }
+        }
+        failures
+    }
 }
 
 /// Resource limits that can be extracted from a configured Process
@@ -310,6 +347,7 @@ impl Process {
             captured_stderr: String::new(),
             traps: HashMap::new(),
             umask: 0o022,
+            host_writes: Default::default(),
         }
     }
 
@@ -351,7 +389,38 @@ impl Process {
             captured_stderr: String::new(),
             traps: HashMap::new(),
             umask: 0o022,
+            host_writes: Default::default(),
         }
+    }
+
+    /// Track a host write so that [`Process::settle_host_writes`] waits for it.
+    pub(crate) fn track_host_write(
+        &self,
+        path: String,
+        writers: mpsc::WeakSender<Bytes>,
+        drain: tokio::task::JoinHandle<io::Result<()>>,
+    ) {
+        let write = HostWrite {
+            writers,
+            path,
+            drain,
+        };
+        self.host_writes
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(write);
+    }
+
+    /// Wait for each host write whose writers are closed, and return one message per failure.
+    pub(crate) async fn settle_host_writes(&self) -> Vec<String> {
+        self.host_writes.settle().await
+    }
+
+    /// Give this process and its forks their own host writes, and return them.
+    pub(crate) fn isolate_host_writes(&mut self) -> HostWrites {
+        self.host_writes = HostWrites::default();
+        self.host_writes.clone()
     }
 
     pub fn alloc_fd(&mut self, kind: FdKind) -> io::Result<Fd> {
@@ -402,6 +471,7 @@ impl Process {
             captured_stderr: String::new(),
             traps: self.traps.clone(),
             umask: self.umask,
+            host_writes: self.host_writes.clone(),
         }
     }
 
@@ -470,7 +540,10 @@ impl Process {
     /// Take the writer half out of an fd, removing it from the table.
     pub fn take_writer(&mut self, fd: Fd) -> io::Result<FdWriter> {
         match self.fds.remove(&fd) {
-            Some(kind) => Ok(FdWriter { kind }),
+            Some(kind) => Ok(FdWriter {
+                kind,
+                unconfirmed: None,
+            }),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("bad fd {fd}"),
@@ -495,6 +568,16 @@ impl Process {
     /// Set the stderr channel for sandboxed error output.
     pub fn set_err_tx(&mut self, tx: mpsc::Sender<Bytes>) {
         self.err_tx = Some(tx);
+    }
+
+    /// The channel behind fd 2, or a closed channel when fd 2 cannot be written.
+    pub(crate) fn stderr_channel(&self) -> Option<mpsc::Sender<Bytes>> {
+        match self.fds.get(&STDERR) {
+            Some(FdKind::ChannelWriter { tx, .. }) => Some(tx.clone()),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(FdKind::File(_)) => None,
+            Some(FdKind::ChannelReader { .. }) | None => Some(mpsc::channel(1).0),
+        }
     }
 
     /// Check execution limits (deadline and recursion depth).
@@ -522,14 +605,23 @@ impl Process {
 
     /// Write an error message to the process stderr channel, or real stderr as fallback.
     pub fn err_msg(&mut self, msg: &str) {
+        self.write_stderr(&format!("{msg}\n"));
+    }
+
+    /// Write text to stderr as [`err_msg`](Self::err_msg) does, without adding a newline.
+    pub(crate) fn write_stderr(&mut self, text: &str) {
         if let Some(tx) = &self.err_tx {
-            let _ = tx.try_send(Bytes::from(format!("{msg}\n")));
+            let _ = tx.try_send(Bytes::from(text.to_string()));
         } else if self.capture {
-            self.captured_stderr.push_str(msg);
-            self.captured_stderr.push('\n');
+            self.captured_stderr.push_str(text);
         } else {
-            eprintln!("{msg}");
+            eprint!("{text}");
         }
+    }
+
+    /// Remove the stderr channel and return it.
+    pub(crate) fn take_err_tx(&mut self) -> Option<mpsc::Sender<Bytes>> {
+        self.err_tx.take()
     }
 
     /// Write a message to stdout (fd 1 channel if available, else real stdout).
@@ -665,6 +757,18 @@ pub async fn read_to_string_limited<R: tokio::io::AsyncRead + Unpin>(
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Return the largest char boundary in `s` at or below `index`.
+pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Read from an async reader into a byte vector, enforcing an optional size
 /// limit. Returns Err if the limit is exceeded. A `limit` of 0 means no cap.
 pub async fn read_to_end_limited<R: tokio::io::AsyncRead + Unpin>(
@@ -792,6 +896,8 @@ impl AsyncRead for FdReader {
 /// Owned async writer extracted from a Process fd.
 pub struct FdWriter {
     kind: FdKind,
+    /// Length of a chunk sent on a flagged channel that its receiver has not yet taken.
+    unconfirmed: Option<usize>,
 }
 
 impl AsyncWrite for FdWriter {
@@ -800,9 +906,23 @@ impl AsyncWrite for FdWriter {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        match &mut this.kind {
+        let FdWriter { kind, unconfirmed } = self.get_mut();
+        match kind {
             FdKind::ChannelWriter { tx, error_flag } => {
+                if let Some(len) = *unconfirmed {
+                    if tx.capacity() < tx.max_capacity() && !tx.is_closed() {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                    *unconfirmed = None;
+                    if error_flag
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+                    {
+                        return Poll::Ready(Err(io::Error::other("file size limit exceeded")));
+                    }
+                    return Poll::Ready(Ok(len.min(buf.len())));
+                }
                 if let Some(flag) = error_flag
                     && flag.load(std::sync::atomic::Ordering::Relaxed)
                 {
@@ -811,6 +931,12 @@ impl AsyncWrite for FdWriter {
                 let bytes = Bytes::copy_from_slice(buf);
                 let len = bytes.len();
                 match tx.try_send(bytes) {
+                    Ok(()) if error_flag.is_some() => {
+                        // Wait for the receiver to take the chunk, so its verdict decides this write.
+                        *unconfirmed = Some(len);
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
                     Ok(()) => Poll::Ready(Ok(len)),
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         // Channel full — we need to wait. Store bytes and poll again.
@@ -927,5 +1053,14 @@ pub trait Kernel: Send + Sync {
             io::ErrorKind::Unsupported,
             "HTTP not available",
         ))
+    }
+    /// Return the handler for commands that Shell does not implement.
+    ///
+    /// The default is `None`, which keeps `command not found` and status 127.
+    /// Keep the answer stable for the kernel's lifetime. A handler also makes
+    /// pipelines drain stderr concurrently and abort foreground tasks when
+    /// their execution is dropped.
+    fn command_fallback(&self) -> Option<&dyn CommandFallback> {
+        None
     }
 }
