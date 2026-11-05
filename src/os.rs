@@ -497,6 +497,23 @@ impl Process {
         );
     }
 
+    /// Copy the channel writer on `fd` into `target`. Returns `false` when `fd` holds no channel writer.
+    pub(crate) fn inherit_channel_writer(&self, fd: Fd, target: &mut Process) -> bool {
+        match self.fds.get(&fd) {
+            Some(FdKind::ChannelWriter { tx, error_flag }) => {
+                target.fds.insert(
+                    fd,
+                    FdKind::ChannelWriter {
+                        tx: tx.clone(),
+                        error_flag: error_flag.clone(),
+                    },
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Remove an fd from this process and install it in another.
     /// Used to pass stdin across fork boundaries (e.g. CompoundPipeline).
     pub fn transfer_fd(&mut self, fd: Fd, target: &mut Process) {
