@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -131,8 +131,15 @@ impl VfsKernel {
             Some(i) if i + 1 < abs_path.len() => (&abs_path[..i.max(1)], &abs_path[i + 1..]),
             _ => return None,
         };
+        let mut components = Path::new(name).components();
+        let (Some(Component::Normal(leaf)), None) = (components.next(), components.next()) else {
+            return None;
+        };
+        if leaf != name {
+            return None;
+        }
         let (host_parent, ro, _) = Self::resolve_host(vfs, parent)?;
-        Some((host_parent.join(name), ro))
+        Some((host_parent.join(leaf), ro))
     }
 
     #[cfg(not(target_arch = "wasm32"))]

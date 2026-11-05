@@ -5543,6 +5543,53 @@ fn bind_direct_readlink_does_not_follow_a_directory_out_of_the_bind() {
     }));
 }
 
+#[cfg(windows)]
+#[test]
+fn bind_direct_readlink_reads_only_one_host_name_on_windows() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_windows_test");
+        let mount = dir.join("mount");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(mount.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(mount.join("f"), "x").unwrap();
+        std::os::windows::fs::symlink_file("OUTSIDE_TARGET", outside.join("link")).unwrap();
+        std::os::windows::fs::symlink_file("f", mount.join("rel")).unwrap();
+        std::os::windows::fs::symlink_file("nowhere", mount.join("dangling")).unwrap();
+        std::os::windows::fs::symlink_file(mount.join("f"), mount.join("absolute")).unwrap();
+        let absolute = std::fs::read_link(mount.join("absolute")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(mount.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("readlink /b/rel; readlink /b/dangling; readlink /b/absolute")
+            .await;
+        assert_eq!(
+            out.stdout,
+            format!("f\nnowhere\n{}\n", absolute.display()),
+            "stderr: {}",
+            out.stderr
+        );
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        let leaves = [
+            outside.join("link").display().to_string(),
+            r"..\outside\link".to_string(),
+            r"sub\..\..\outside\link".to_string(),
+        ];
+        for leaf in leaves {
+            let out = shell.run(&format!("readlink '/b/{leaf}'")).await;
+            assert!(
+                !out.stdout.contains("OUTSIDE_TARGET"),
+                "{leaf}: stdout: {}",
+                out.stdout
+            );
+            assert_ne!(out.status, 0, "{leaf}");
+        }
+    }));
+}
+
 #[test]
 fn builder_credential_bearer() {
     let (rt, local) = rt();
