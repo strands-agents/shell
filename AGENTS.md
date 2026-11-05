@@ -11,7 +11,7 @@ It is a Rust crate that compiles to several targets from one source of truth:
 - **Native binary** (`strands-shell`) and a Rust library
 - **Python** extension module (`strands-shell` on PyPI), via [PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/)
 - **Node.js** native addon (`@strands-agents/shell` on npm), via [napi-rs](https://napi.rs/)
-- **WASM** module targeting `wasm32-wasip2`
+- **WASM** module targeting `wasm32-wasip2` (command) and `wasm32-wasip1` (reactor with an experimental C ABI)
 
 ## Architecture
 
@@ -24,7 +24,7 @@ The crate is the single source of truth; every binding wraps the same core.
   - **Isolated commands** in `src/commands/` — coreutils-style programs (`cat`, `grep`, `sed`, `curl`, `jq`, …) that take a kernel + args and produce output. Each is registered with the `#[command("name")]` proc-macro from `strands-shell-macros`.
 - **Parser / executor:** `src/parser.rs` parses shell syntax; `src/exec.rs` evaluates it (pipelines, redirections, expansions, control flow).
 - **Bindings:** `src/python.rs` (PyO3, the `strands_shell._native` module) and `src/js.rs` (napi-rs). They are intentionally parallel in shape — keep them in sync semantically. The customer-facing Python surface (the `Shell`, `Bind`, `Cred`, `Limits` classes and typed errors) lives in the pure-Python wrapper at `python/strands_shell/__init__.py`.
-- **WASM entry:** `src/wasm_main.rs` reads commands from WASI stdin and writes to WASI stdout/stderr; each instance runs in isolated linear memory.
+- **WASM entry:** `src/wasm_main.rs` reads commands from WASI stdin and writes to WASI stdout/stderr; each instance runs in isolated linear memory. `src/wasm_api.rs` (`wasm-api` feature, `wasm32-wasip1` cdylib) is the reactor variant: `shell_new`/`shell_run`/`shell_free` exports keep a `Shell` alive across calls, mirroring the Python and Node bindings. Its C ABI is experimental and versioned through `shell_abi_version`.
 - **MCP:** `src/mcp.rs` is the built-in MCP *server* (exposes the shell as tools); `src/mcp_client.rs` is the MCP *client* (servers configured under `[[mcp]]` become Lua modules).
 
 ### The `#[command(...)]` macro
@@ -79,14 +79,17 @@ npm test               # run the Node.js test suite (tests/js/*.mjs)
 ### WASM module
 
 ```bash
-./scripts/build-wasm.sh --release        # needs wasi-sdk >= 32
+./scripts/build-wasm.sh --release            # wasip2 command binary, needs wasi-sdk >= 32
+./scripts/build-wasm.sh --reactor --release  # wasip1 reactor (wasm-api feature, experimental)
+(cd tests/go && go test ./...)               # wazero integration suite
+(cd tests/java && mvn test)                  # Endive integration suite
 ```
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md#wasm-module) for which features are available under WASM (no PyO3, no MCP server, no `--config`). WASM is a build target, not a published release artifact.
+See [CONTRIBUTING.md](./CONTRIBUTING.md#wasm-module) for which features are available under WASM (no PyO3, no MCP server; the command binary has no `--config`, the reactor takes the same TOML via `shell_new`) and for the reactor's C ABI. WASM is a build target, not a published release artifact.
 
 ### CI merge gate
 
-`.github/workflows/ci.yml` runs the Rust suite (`cargo test --workspace --all-targets` + `cargo doc` with `-D warnings`) across Linux/macOS, the Python matrix (`maturin develop --release` + `pytest tests/python`), the Node matrix (`npm run build:debug` + `npm test`), and a security-audit job. Don't open a PR with known failures in the bindings you touched.
+`.github/workflows/ci.yml` runs the Rust suite (`cargo test --workspace --all-targets` + `cargo doc` with `-D warnings`) across Linux/macOS, the Python matrix (`maturin develop --release` + `pytest tests/python`), the Node matrix (`npm run build:debug` + `npm test`), a security-audit job, and a non-blocking WASM job (wasip1 reactor build + Go/wazero and Java/Endive suites). Don't open a PR with known failures in the bindings you touched.
 
 ## Key Conventions
 
@@ -108,7 +111,7 @@ All `use` statements go at the **top of the file** (Rust modules, Python wrapper
 
 ### Bindings stay in sync
 
-`src/python.rs` and `src/js.rs` mirror each other. A change to one binding's surface (new method, renamed argument, error mapping) should be reflected in the other unless there's a language-specific reason not to. Node methods are camelCase and return Promises; bytes are `Uint8Array`. Python methods are snake_case; bytes are `bytes`.
+`src/python.rs` and `src/js.rs` mirror each other. A change to one binding's surface (new method, renamed argument, error mapping) should be reflected in the other unless there's a language-specific reason not to. `src/wasm_api.rs` exposes the same construct-from-config and `run()` semantics over a C ABI; a change to what a shell accepts as configuration or returns from `run()` should be reflected there too. Node methods are camelCase and return Promises; bytes are `Uint8Array`. Python methods are snake_case; bytes are `bytes`.
 
 ### Match surrounding style
 

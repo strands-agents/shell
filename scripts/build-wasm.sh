@@ -12,10 +12,33 @@
 #   3. ~/wasi-sdk
 #
 # Usage:
-#   ./scripts/build-wasm.sh            # debug build
-#   ./scripts/build-wasm.sh --release  # release build
+#   ./scripts/build-wasm.sh                      # debug build
+#   ./scripts/build-wasm.sh --release            # release build
+#   ./scripts/build-wasm.sh --reactor --release  # wasm32-wasip1 reactor (wasm-api feature)
 #
 set -euo pipefail
+
+# --- Mode -----------------------------------------------------------------------
+# Default: the wasm32-wasip2 command binary. --reactor: the wasm32-wasip1 cdylib
+# exposing the shell_* C ABI (see src/wasm_api.rs) for embedding in WASI p1 hosts.
+REACTOR=0
+CARGO_ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--reactor" ]]; then
+        REACTOR=1
+    else
+        CARGO_ARGS+=("$arg")
+    fi
+done
+if [[ "$REACTOR" == 1 ]]; then
+    TARGET="wasm32-wasip1"
+    BUILD_ARGS=(--lib --features wasm-api)
+    ARTIFACT="strands_shell.wasm"
+else
+    TARGET="wasm32-wasip2"
+    BUILD_ARGS=(--features wasm --bin strands-shell-wasm)
+    ARTIFACT="strands-shell-wasm.wasm"
+fi
 
 # --- Locate wasi-sdk ----------------------------------------------------------
 if [[ -z "${WASI_SDK_PATH:-}" ]]; then
@@ -44,9 +67,11 @@ echo "  clang: $("$WASI_SDK_PATH/bin/clang" --version | head -1)"
 # --- Configure the C toolchain for the cc crate ------------------------------
 # The cc crate (used by lua-src to compile Lua's C sources) reads these env vars
 # with target-specific suffixes (hyphens replaced by underscores).
-export CC_wasm32_wasip2="$WASI_SDK_PATH/bin/clang"
-export AR_wasm32_wasip2="$WASI_SDK_PATH/bin/ar"
-export CFLAGS_wasm32_wasip2="--sysroot=$WASI_SDK_PATH/share/wasi-sysroot"
+for t in wasm32_wasip1 wasm32_wasip2; do
+    export "CC_$t=$WASI_SDK_PATH/bin/clang"
+    export "AR_$t=$WASI_SDK_PATH/bin/ar"
+    export "CFLAGS_$t=--sysroot=$WASI_SDK_PATH/share/wasi-sysroot"
+done
 
 # build.rs handles the linker search path for sysroot libraries
 # (wasi-emulated-signal, setjmp) via cargo:rustc-link-search.
@@ -55,24 +80,26 @@ export WASI_SDK_PATH
 # --- Build --------------------------------------------------------------------
 cd "$(dirname "$0")/.."
 
-cargo build \
-    --target wasm32-wasip2 \
-    --features wasm \
-    --bin strands-shell-wasm \
-    "$@"
+cargo build --target "$TARGET" "${BUILD_ARGS[@]}" ${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}
 
 PROFILE="debug"
-for arg in "$@"; do
+for arg in ${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}; do
     if [[ "$arg" == "--release" ]]; then
         PROFILE="release"
     fi
 done
 
-WASM="target/wasm32-wasip2/$PROFILE/strands-shell-wasm.wasm"
+WASM="target/$TARGET/$PROFILE/$ARTIFACT"
 if [[ -f "$WASM" ]]; then
     echo ""
     echo "Built: $WASM ($(du -h "$WASM" | cut -f1))"
     echo ""
-    echo "Run with:"
-    echo "  wasmtime -W exceptions=y -S http --dir /tmp $WASM"
+    if [[ "$REACTOR" == 1 ]]; then
+        echo "Test with:"
+        echo "  (cd tests/go && go test ./...)"
+        echo "  (cd tests/java && mvn test)"
+    else
+        echo "Run with:"
+        echo "  wasmtime -W exceptions=y -S http --dir /tmp $WASM"
+    fi
 fi
