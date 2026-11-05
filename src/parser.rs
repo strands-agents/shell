@@ -157,6 +157,15 @@ pub fn parse(input: &str) -> Result<CommandLine, String> {
     parse_with_aliases(input, &mut |_| None, &std::collections::HashMap::new())
 }
 
+/// Whether a parse error stays an error whatever input follows it.
+pub(crate) fn is_definite_error(err: &str) -> bool {
+    err.starts_with("unexpected ")
+        || err.contains(", got '")
+        || err.starts_with("expected filename after ")
+        || err == "expected command before '|'"
+        || err == "empty group"
+}
+
 /// Parse with a line reader for here-documents.
 /// `read_line` is called with the delimiter and should return the next line, or None on EOF.
 pub fn parse_with_reader(
@@ -1953,5 +1962,36 @@ mod tests {
     #[test]
     fn unexpected_token_double_semi() {
         assert!(p(";;").is_err());
+    }
+
+    #[test]
+    fn definite_errors_are_told_from_incomplete_input() {
+        for input in [
+            ")",
+            "fi",
+            "case x; in",
+            "echo >",
+            "| echo",
+            "( )",
+            "echo a; ;;",
+        ] {
+            let err = p(input).unwrap_err();
+            assert!(is_definite_error(&err), "{input:?}: {err}");
+        }
+        for input in [
+            "if true; then",
+            "for i in a",
+            "case x in",
+            "{ echo a",
+            "( echo a",
+            "echo a |",
+            "echo \"a",
+            "echo 'a",
+            "echo $(a",
+            "f()",
+        ] {
+            let err = p(input).unwrap_err();
+            assert!(!is_definite_error(&err), "{input:?}: {err}");
+        }
     }
 }
