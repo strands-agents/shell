@@ -1853,7 +1853,7 @@ async fn run_capturing_status(
                 Item::Subshell(cl) => {
                     let mut sub = proc.fork();
                     sub.depth += 1;
-                    if let Some(msg) = sub.check_limits() {
+                    let ran = if let Some(msg) = sub.check_limits() {
                         sub.err_msg(msg);
                         (1, String::new())
                     } else {
@@ -1862,7 +1862,9 @@ async fn run_capturing_status(
                             Box::pin(run_capturing_status(os.clone(), &mut sub, cl)).await;
                         sub.transfer_fd(STDIN, proc);
                         (captured_status(result, sub.last_exit), s)
-                    }
+                    };
+                    proc.captured_stderr.push_str(&sub.captured_stderr);
+                    ran
                 }
                 Item::If {
                     branches,
