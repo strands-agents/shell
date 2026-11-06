@@ -1413,6 +1413,149 @@ expect_output!(
     0
 );
 
+// ── Function call redirections ──────────────────────────────────────
+
+expect_output!(
+    function_stdout_redirect,
+    "f() { echo x; }; f > /tmp/f; echo \"[$(cat /tmp/f)]\"",
+    "[x]\n",
+    "",
+    0
+);
+expect_output!(
+    function_append_redirect,
+    "f() { echo x; }; f > /tmp/f; f >> /tmp/f; cat /tmp/f",
+    "x\nx\n",
+    "",
+    0
+);
+expect_output!(
+    function_dev_null_redirect,
+    "f() { echo x; }; f > /dev/null; echo $?",
+    "0\n",
+    "",
+    0
+);
+expect_output!(
+    function_stderr_redirect,
+    "g() { echo y >&2; echo o; }; g 2> /tmp/e; echo \"[$(cat /tmp/e)]\"",
+    "o\n[y]\n",
+    "",
+    0
+);
+expect_output!(
+    function_stdin_redirect,
+    "printf 'hello\\n' > /tmp/in; h() { read l; echo \"got $l\"; }; h < /tmp/in",
+    "got hello\n",
+    "",
+    0
+);
+expect_output!(
+    function_heredoc_redirect,
+    "h() { read l; echo \"got $l\"; }; h <<EOF\nfrom heredoc\nEOF",
+    "got from heredoc\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_nested_call,
+    "f() { echo x; }; outer() { f; echo z; }; outer > /tmp/b; cat /tmp/b",
+    "x\nz\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_order,
+    "m() { echo a; echo b >&2; }; m 2>&1 > /tmp/h; echo \"[$(cat /tmp/h)]\"",
+    "b\n[a]\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_return_status,
+    "r() { echo r; return 3; }; r > /tmp/d; echo \"$? [$(cat /tmp/d)]\"",
+    "3 [r]\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_keeps_state,
+    "s() { cd /tmp; W=set; }; s > /dev/null; echo \"$PWD $W\"",
+    "/tmp set\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_restores_locals_and_args,
+    "lo() { local L=in; echo \"$L $1\"; }; L=outer; set -- a; lo q > /tmp/l; echo \"$L $1 [$(cat /tmp/l)]\"",
+    "outer a [in q]\n",
+    "",
+    0
+);
+expect_output!(
+    function_self_dup_keeps_caller_stdin,
+    "printf '1\\n2\\n3\\n4\\n' > /tmp/q; f() { read m; }; while read l; do f <&0; echo \"$l$m\"; done < /tmp/q",
+    "12\n34\n",
+    "",
+    0
+);
+
+#[test]
+fn function_redirect_failure_skips_body() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("f() { echo ran; }; f > /nonexistent/dir/x; echo \"status=$?\"")
+            .await;
+        assert_eq!(out.stdout, "status=1\n");
+        assert!(out.stderr.contains("/nonexistent/dir"), "{}", out.stderr);
+    }));
+}
+
+#[test]
+fn function_redirect_set_e_exits() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("se() { set -e; echo before; false; echo no; }; se > /tmp/se; echo after")
+            .await;
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+        let out = shell.run("cat /tmp/se").await;
+        assert_eq!(out.stdout, "before\n");
+    }));
+}
+
+#[test]
+fn function_redirect_recursion_limit() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .max_depth(4)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = shell.run("f() { f > /dev/null; }; f").await;
+        assert_ne!(out.status, 0, "recursive function should be blocked");
+    }));
+}
+
+#[test]
+fn function_redirect_from_cli() {
+    let dir = TestDir::new("function_redirect_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("f() { echo out; echo err >&2; }; f > /tmp/o 2> /tmp/e; f > /dev/null 2>&1; cat /tmp/o /tmp/e")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "out\nerr\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert!(out.status.success());
+}
+
 // ── find builtin ────────────────────────────────────────────────────
 
 #[test]
