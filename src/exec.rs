@@ -2831,7 +2831,9 @@ async fn execute_pipeline(
                 .saturating_sub(shell_proc.captured_output.len());
             let end = os::floor_char_boundary(&output, remaining);
             shell_proc.captured_output.push_str(&output[..end]);
-            shell_proc.err_msg("strands-shell: output size limit exceeded");
+            if !shell_proc.output_limit_reported() {
+                shell_proc.err_msg("strands-shell: output size limit exceeded");
+            }
             return 1;
         }
         shell_proc.captured_output.push_str(&output);
@@ -3232,12 +3234,21 @@ async fn run_pipeline(
                         if args.is_empty() {
                             return 0;
                         }
+                        // Capture both streams, so each reaches this stage's redirected fd.
+                        state_proc.capture = true;
+                        state_proc.clear_err_tx();
                         let exit = run_script(os, &mut state_proc, &args[0], &args[1..]).await;
                         let output = std::mem::take(&mut state_proc.captured_output);
                         if !output.is_empty()
                             && let Ok(mut w) = crate::io::stdout()
                         {
                             let _ = w.write_all(output.as_bytes()).await;
+                        }
+                        let errors = std::mem::take(&mut state_proc.captured_stderr);
+                        if !errors.is_empty()
+                            && let Ok(mut w) = crate::io::stderr()
+                        {
+                            let _ = w.write_all(errors.as_bytes()).await;
                         }
                         return exit;
                     }
