@@ -2898,6 +2898,105 @@ expect_streams!(
     ""
 );
 
+// ── Stderr of a compound piped into a command ───────────────────────
+
+expect_streams!(
+    compound_pipe_for_stderr,
+    "for i in 1; do echo out; echo err >&2; done | cat",
+    "out\n",
+    "err\n"
+);
+expect_streams!(
+    compound_pipe_if_stderr,
+    "if true; then echo e >&2; fi | cat",
+    "",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_while_no_output,
+    "while false; do :; done | cat",
+    "",
+    ""
+);
+expect_streams!(
+    compound_pipe_tail_stderr_redirect,
+    "{ echo o; echo e >&2; } | cat 2>/dev/null",
+    "o\n",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_tail_stdout_redirect,
+    "{ echo o; echo e >&2; } | cat >/dev/null",
+    "",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_negated_stderr,
+    "! { echo e >&2; false; } | cat; echo \"rc=$?\"",
+    "rc=1\n",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_in_substitution_stderr,
+    "x=$({ echo o; echo e >&2; } | cat); echo \"x=$x\"",
+    "x=o\n",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_stderr_many_lines,
+    "i=0; while [ $i -lt 2000 ]; do i=$((i+1)); echo $i >&2; done | cat; \
+     i=0; while [ $i -lt 2000 ]; do i=$((i+1)); echo $i >&2; done | cat",
+    "",
+    format!(
+        "{0}{0}",
+        (1..=2000).map(|i| format!("{i}\n")).collect::<String>()
+    )
+);
+expect_streams!(
+    compound_pipe_stderr_inside_pipeline_stage,
+    "f() { i=0; while [ $i -lt 2000 ]; do i=$((i+1)); echo $i >&2; done | cat; }; f | cat; f | cat",
+    "",
+    format!(
+        "{0}{0}",
+        (1..=2000).map(|i| format!("{i}\n")).collect::<String>()
+    )
+);
+
+#[test]
+fn compound_pipe_stderr_timeout_reported_once() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        let out = shell
+            .run("{ while true; do echo x >&2; done; } | head -1")
+            .await;
+        assert_eq!(
+            out.stderr.matches("execution timeout exceeded").count(),
+            1,
+            "stderr: {:?}",
+            out.stderr.get(out.stderr.len().saturating_sub(200)..)
+        );
+        assert!(out.stderr.starts_with("x\n"));
+    }));
+}
+
+#[test]
+fn compound_pipe_stderr_from_cli() {
+    let dir = TestDir::new("compound_pipe_stderr_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("{ echo o; echo e >&2; } | cat; f() { if true; then echo e2 >&2; fi | cat; }; f | cat")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "o\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "e\ne2\n");
+    assert!(out.status.success());
+}
+
 // ── Subshell stderr in captured paths ───────────────────────────────
 
 expect_streams!(subshell_stderr_plain, "( echo e >&2 )", "", "e\n");
