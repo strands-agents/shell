@@ -1951,6 +1951,34 @@ expect_streams!(
     CD_NOPE
 );
 
+// ── Subshell stderr in captured paths ───────────────────────────────
+
+expect_streams!(subshell_stderr_plain, "( echo e >&2 )", "", "e\n");
+expect_streams!(
+    subshell_stderr_in_substitution,
+    "x=$( (echo e >&2) ); echo \"[$x]\"",
+    "[]\n",
+    "e\n"
+);
+expect_streams!(
+    subshell_command_stderr_in_substitution,
+    "x=$( (cd /nope) ); echo \"[$x]\"",
+    "[]\n",
+    CD_NOPE
+);
+expect_streams!(
+    subshell_stderr_with_stdout_to_file,
+    "( echo o; echo e >&2 ) >/tmp/out; cat /tmp/out",
+    "o\n",
+    "e\n"
+);
+expect_streams!(
+    nested_subshell_stderr_in_substitution,
+    "x=$( ( (echo e >&2); echo o ) ); echo \"$x\"",
+    "o\n",
+    "e\n"
+);
+
 // ── Heredoc expansion ───────────────────────────────────────────────
 
 #[test]
