@@ -3085,6 +3085,105 @@ expect!(
     ".hidden\nvisible"
 );
 
+expect!(
+    ls_h_without_l_lists_names,
+    "mkdir -p /tmp/lsh; touch /tmp/lsh/a /tmp/lsh/b; ls -h /tmp/lsh",
+    "a\nb"
+);
+
+expect!(
+    ls_lh_pipes_into_grep,
+    "mkdir -p /tmp/lsg; touch /tmp/lsg/foo /tmp/lsg/bar; ls -lh /tmp/lsg | grep -c foo",
+    "1"
+);
+
+/// Bind a host dir holding files with fixed sizes, modes and mtimes.
+/// `files` is (name, size, mtime seconds since epoch).
+fn ls_fixture(name: &str, files: &[(&str, u64, u64)]) -> TestDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestDir::new(name);
+    for &(file, len, secs) in files {
+        let path = dir.join(file);
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(len).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    dir
+}
+
+fn run_ls_fixture(dir: &TestDir, cmd: &str) -> strands_shell::Output {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/fx")
+            .build()
+            .unwrap();
+        shell.run(cmd).await
+    }))
+}
+
+// 2020-01-01T00:00:00Z, far enough in the past that -l prints the year.
+const LS_T0: u64 = 1_577_836_800;
+
+#[test]
+fn ls_long_format_unchanged() {
+    let dir = ls_fixture("ls_long_fmt", &[("f", 1536, LS_T0)]);
+    let out = run_ls_fixture(&dir, "ls -l /fx");
+    assert_eq!(out.stdout, "-rw-r--r--     1536 Jan  1  2020 f\n");
+    assert_eq!(out.status, 0);
+}
+
+#[test]
+fn ls_lh_prints_human_sizes() {
+    // Expected sizes from GNU coreutils `ls -lh`.
+    let files = [
+        ("a", 0, LS_T0),
+        ("b", 1023, LS_T0),
+        ("c", 1024, LS_T0),
+        ("d", 1025, LS_T0),
+        ("e", 10239, LS_T0),
+        ("f", 5_000_000, LS_T0),
+    ];
+    let dir = ls_fixture("ls_lh", &files);
+    let out = run_ls_fixture(&dir, "ls -lh /fx");
+    assert_eq!(
+        out.stdout,
+        "-rw-r--r--        0 Jan  1  2020 a\n\
+         -rw-r--r--     1023 Jan  1  2020 b\n\
+         -rw-r--r--     1.0K Jan  1  2020 c\n\
+         -rw-r--r--     1.1K Jan  1  2020 d\n\
+         -rw-r--r--      10K Jan  1  2020 e\n\
+         -rw-r--r--     4.8M Jan  1  2020 f\n"
+    );
+    assert_eq!(out.status, 0);
+    let single = run_ls_fixture(&dir, "ls --human-readable -l /fx/f");
+    assert_eq!(single.stdout, "-rw-r--r--     4.8M Jan  1  2020 /fx/f\n");
+}
+
+#[test]
+fn ls_sort_by_time_and_size() {
+    // Ties (a/b on mtime, b/c on size) fall back to name order, like GNU.
+    let files = [
+        ("a", 10, LS_T0 + 100),
+        ("b", 30, LS_T0 + 100),
+        ("c", 30, LS_T0 + 300),
+        ("d", 20, LS_T0),
+    ];
+    let dir = ls_fixture("ls_sort", &files);
+    let ls = |flags: &str| run_ls_fixture(&dir, &format!("ls {flags} /fx")).stdout;
+    assert_eq!(ls("-t"), "c\na\nb\nd\n");
+    assert_eq!(ls("-tr"), "d\nb\na\nc\n");
+    assert_eq!(ls("-S"), "b\nc\nd\na\n");
+    assert_eq!(ls("-Sr"), "a\nd\nc\nb\n");
+    assert_eq!(ls("-r"), "d\nc\nb\na\n");
+    assert_eq!(
+        ls("-lt").lines().last().unwrap(),
+        "-rw-r--r--       20 Jan  1  2020 d"
+    );
+}
+
 // ── tail coverage ───────────────────────────────────────────────────
 
 expect!(
@@ -7622,7 +7721,7 @@ expect!(
 expect!(
     ls_help,
     "ls --help | head -n 1",
-    "Usage: ls [-laR1] [FILE]..."
+    "Usage: ls [-laR1hrSt] [FILE]..."
 );
 
 // ── sed coverage ────────────────────────────────────────────────────
