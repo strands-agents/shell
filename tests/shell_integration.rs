@@ -9634,6 +9634,43 @@ expect!(
     "hello world"
 );
 expect!(xargs_quoting, "echo \"it's\" | xargs echo", "it's");
+expect!(xargs_n_attached, "printf 'a b\\n' | xargs -n1 echo", "a\nb");
+expect!(
+    xargs_replace_attached,
+    "printf 'f\\n' | xargs -I{} echo x{}y",
+    "xfy"
+);
+expect!(xargs_d_attached, "echo 'a,b,c' | xargs -d, echo", "a b c");
+expect!(
+    xargs_null_then_n_attached,
+    "printf 'a\\0b' | xargs -0 -n1 echo",
+    "a\nb"
+);
+expect!(
+    xargs_child_flags_grep,
+    "printf 'x1\\ny\\nx2\\n' > /tmp/xgf; echo /tmp/xgf | xargs grep -n x",
+    "1:x1\n3:x2"
+);
+expect!(
+    xargs_child_flags_head,
+    "printf 'x1\\ny\\nx2\\n' > /tmp/xhf; echo /tmp/xhf | xargs head -n 1",
+    "x1"
+);
+expect!(
+    xargs_double_dash,
+    "printf 'x1\\ny\\n' > /tmp/xdf; echo /tmp/xdf | xargs -- head -n 1",
+    "x1"
+);
+expect!(
+    xargs_n_then_double_dash,
+    "printf 'a b c\\n' | xargs -n2 -- echo",
+    "a b\nc"
+);
+expect!(
+    xargs_replace_separated_with_child_flags,
+    "printf 'x1\\ny\\n' > /tmp/xrf; echo /tmp/xrf | xargs -I {} head -n 1 {}",
+    "x1"
+);
 
 // ── ls ──────────────────────────────────────────────────────────────
 
