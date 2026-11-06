@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -123,6 +123,23 @@ impl VfsKernel {
             return Some((host, *ro, canon_base));
         }
         None
+    }
+
+    /// Resolve the host path of `abs_path` without following its last component.
+    fn resolve_host_nofollow(vfs: &Vfs, abs_path: &str) -> Option<(PathBuf, bool)> {
+        let (parent, name) = match abs_path.rfind('/') {
+            Some(i) if i + 1 < abs_path.len() => (&abs_path[..i.max(1)], &abs_path[i + 1..]),
+            _ => return None,
+        };
+        let mut components = Path::new(name).components();
+        let (Some(Component::Normal(leaf)), None) = (components.next(), components.next()) else {
+            return None;
+        };
+        if leaf != name {
+            return None;
+        }
+        let (host_parent, ro, _) = Self::resolve_host(vfs, parent)?;
+        Some((host_parent.join(leaf), ro))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -711,6 +728,12 @@ impl Kernel for VfsKernel {
     async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String> {
         let abs = Self::abs(proc, path);
         let vfs = self.vfs.lock().await;
+        if let Some((host_path, _ro)) = Self::resolve_host_nofollow(&vfs, &abs) {
+            drop(vfs);
+            return Ok(std::fs::read_link(host_path)?
+                .to_string_lossy()
+                .into_owned());
+        }
         let ino = vfs.resolve(&abs, false)?;
         match &vfs.get(ino)?.data {
             InodeData::Symlink(target) => Ok(target.clone()),

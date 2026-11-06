@@ -6058,6 +6058,102 @@ fn bind_direct_symlink_escape_blocked() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn bind_direct_readlink_prints_stored_link_text() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_test");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("f"), "x").unwrap();
+        std::os::unix::fs::symlink("f", dir.join("rel")).unwrap();
+        std::os::unix::fs::symlink("../f", dir.join("sub/up")).unwrap();
+        std::os::unix::fs::symlink("nowhere", dir.join("dangling")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("absolute")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("readlink /b/rel; readlink /b/sub/up; readlink /b/dangling; readlink /b/absolute; cd /b/sub && readlink up")
+            .await;
+        assert_eq!(out.stdout, "f\n../f\nnowhere\n/etc/passwd\n../f\n");
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        for path in ["/b/f", "/b/missing"] {
+            let out = shell.run(&format!("readlink {path}")).await;
+            assert_eq!(out.stdout, "", "{path}");
+            assert_eq!(out.status, 1, "{path}");
+        }
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_readlink_does_not_follow_a_directory_out_of_the_bind() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_escape_test");
+        std::fs::create_dir_all(dir.join("mount")).unwrap();
+        std::fs::create_dir_all(dir.join("outside")).unwrap();
+        std::os::unix::fs::symlink("ESCAPED", dir.join("outside/inner")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside"), dir.join("mount/escape")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.join("mount").to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        let out = shell.run("readlink /b/escape/inner").await;
+        assert!(!out.stdout.contains("ESCAPED"), "stdout: {}", out.stdout);
+        assert_ne!(out.status, 0);
+    }));
+}
+
+#[cfg(windows)]
+#[test]
+fn bind_direct_readlink_reads_only_one_host_name_on_windows() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_windows_test");
+        let mount = dir.join("mount");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(mount.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(mount.join("f"), "x").unwrap();
+        std::os::windows::fs::symlink_file("OUTSIDE_TARGET", outside.join("link")).unwrap();
+        std::os::windows::fs::symlink_file("f", mount.join("rel")).unwrap();
+        std::os::windows::fs::symlink_file("nowhere", mount.join("dangling")).unwrap();
+        std::os::windows::fs::symlink_file(mount.join("f"), mount.join("absolute")).unwrap();
+        let absolute = std::fs::read_link(mount.join("absolute")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(mount.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("readlink /b/rel; readlink /b/dangling; readlink /b/absolute")
+            .await;
+        assert_eq!(
+            out.stdout,
+            format!("f\nnowhere\n{}\n", absolute.display()),
+            "stderr: {}",
+            out.stderr
+        );
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        let leaves = [
+            outside.join("link").display().to_string(),
+            r"..\outside\link".to_string(),
+            r"sub\..\..\outside\link".to_string(),
+        ];
+        for leaf in leaves {
+            let out = shell.run(&format!("readlink '/b/{leaf}'")).await;
+            assert!(
+                !out.stdout.contains("OUTSIDE_TARGET"),
+                "{leaf}: stdout: {}",
+                out.stdout
+            );
+            assert_ne!(out.status, 0, "{leaf}");
+        }
+    }));
+}
+
 #[test]
 fn builder_credential_bearer() {
     let (rt, local) = rt();
@@ -6602,6 +6698,124 @@ fn script_exit_code() {
         let out = shell.run("sh /tmp/exitcode.sh").await;
         assert_eq!(out.status, 42);
     }));
+}
+
+/// Runs `cmd` after writing a script that prints `out` to stdout and `err` to stderr.
+async fn run_with_two_stream_script(cmd: &str) -> strands_shell::Output {
+    let mut shell = Shell::builder().build().unwrap();
+    shell
+        .run("printf '#!/bin/sh\\necho out\\necho err >&2\\n' > /tmp/streams.sh; chmod +x /tmp/streams.sh")
+        .await;
+    shell.run(cmd).await
+}
+
+#[test]
+fn script_stderr_reaches_caller() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script("sh /tmp/streams.sh").await;
+        assert_eq!(out.stdout, "out\n");
+        assert_eq!(out.stderr, "err\n");
+    }));
+}
+
+#[test]
+fn script_streams_follow_redirects() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script(
+            "sh /tmp/streams.sh > /tmp/o 2> /tmp/e; echo \"o=$(cat /tmp/o) e=$(cat /tmp/e)\"",
+        )
+        .await;
+        assert_eq!(out.stdout, "o=out e=err\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn script_stderr_dup_into_pipe() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out =
+            run_with_two_stream_script("sh /tmp/streams.sh 2>&1 > /tmp/o | tr a-z A-Z; cat /tmp/o")
+                .await;
+        assert_eq!(out.stdout, "ERR\nout\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn script_stderr_in_substitution() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script("x=$(sh /tmp/streams.sh 2>&1); echo \"[$x]\"").await;
+        assert_eq!(out.stdout, "[out\nerr]\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn shebang_script_stderr_follows_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out =
+            run_with_two_stream_script("/tmp/streams.sh 2> /tmp/e; echo \"e=$(cat /tmp/e)\"").await;
+        assert_eq!(out.stdout, "out\ne=err\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn script_open_error_follows_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("sh /tmp/missing.sh 2> /tmp/e; grep -c missing.sh /tmp/e")
+            .await;
+        assert_eq!(out.stdout, "1\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn nested_script_keeps_its_own_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script(
+            "printf 'sh /tmp/streams.sh 2>/dev/null\\necho outer >&2\\n' > /tmp/outer.sh; sh /tmp/outer.sh",
+        )
+        .await;
+        assert_eq!(out.stdout, "out\n");
+        assert_eq!(out.stderr, "outer\n");
+    }));
+}
+
+#[test]
+fn script_reports_output_limit_once() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().max_output(64).build().unwrap();
+        shell
+            .run("printf 'for i in 1 2 3 4 5 6 7 8 9 10; do echo 0123456789abcdef; done\\n' > /tmp/loud.sh")
+            .await;
+        let out = shell.run("sh /tmp/loud.sh > /tmp/o").await;
+        assert_eq!(out.stderr, "strands-shell: output size limit exceeded\n");
+    }));
+}
+
+#[test]
+fn script_streams_follow_redirects_in_cli() {
+    let dir = TestDir::new("script_streams_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("printf 'echo out\\necho err >&2\\n' > /tmp/s.sh; sh /tmp/s.sh > /tmp/o 2> /tmp/e; sh /tmp/s.sh | tr a-z A-Z; cat /tmp/o /tmp/e")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "OUT\nout\nerr\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "err\n");
+    assert!(out.status.success());
 }
 
 // ── Shebang resolution ─────────────────────────────────────────────
