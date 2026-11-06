@@ -1742,6 +1742,231 @@ fn find_print0() {
     }));
 }
 
+// ── find -size / -mtime / -mmin / -newer ─────────────────────────────
+
+/// Run `cmd` in a fresh shell after `setup`, returning its output.
+fn find_run(setup: &str, cmd: &str) -> strands_shell::Output {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run(setup).await;
+        assert_eq!(out.status, 0, "setup failed: {}", out.stderr);
+        shell.run(cmd).await
+    }))
+}
+
+const FIND_SIZES: &str = "mkdir -p /tmp/fs; cd /tmp/fs; \
+     for n in 0 1 511 512 513 1023 1024 1025 1048577; do head -c $n /dev/zero > s$n; done";
+
+#[test]
+fn find_size_rounds_up_to_units() {
+    // GNU rounds the size up to whole units before comparing, so -1M only
+    // matches empty files and 1k matches anything from 1 to 1024 bytes.
+    for (arg, want) in [
+        ("-1M", "s0"),
+        ("1M", "s1 s1023 s1024 s1025 s511 s512 s513"),
+        ("2M", "s1048577"),
+        ("+1k", "s1025 s1048577"),
+        ("1k", "s1 s1023 s1024 s511 s512 s513"),
+        ("-2k", "s0 s1 s1023 s1024 s511 s512 s513"),
+        ("2", "s1023 s1024 s513"),
+        ("-2", "s0 s1 s511 s512"),
+        ("1", "s1 s511 s512"),
+        ("1b", "s1 s511 s512"),
+        ("512c", "s512"),
+        ("-512c", "s0 s1 s511"),
+        ("+1024c", "s1025 s1048577"),
+        ("1w", "s1"),
+        ("0", "s0"),
+        ("-1G", "s0"),
+    ] {
+        let cmd = format!("find . -type f -size {arg} | sed 's|^./||' | sort | tr '\\n' ' '");
+        let out = find_run(FIND_SIZES, &cmd);
+        assert_eq!(out.stdout.trim_end(), want, "-size {arg}");
+        assert_eq!(out.status, 0, "-size {arg}: {}", out.stderr);
+    }
+}
+
+#[test]
+fn find_size_rejects_bad_arguments() {
+    for (arg, err) in [
+        ("1T", "find: invalid -size type `T'"),
+        ("1x", "find: invalid -size type `x'"),
+        ("+-1", "find: Invalid argument `+-1' to -size"),
+        ("k", "find: Invalid argument `k' to -size"),
+        ("1.5k", "find: Invalid argument `1.5k' to -size"),
+        ("''", "find: invalid null argument to -size"),
+    ] {
+        let out = find_run("touch /tmp/fsz", &format!("find /tmp/fsz -size {arg}"));
+        assert_eq!(out.status, 1, "-size {arg}");
+        assert_eq!(out.stdout, "", "-size {arg}");
+        assert_eq!(out.stderr.trim(), err, "-size {arg}");
+    }
+}
+
+#[test]
+fn find_mtime_mmin_fresh_file() {
+    // A file made just now is in the current 24h period and minute.
+    for (pred, matches) in [
+        ("-mtime 0", true),
+        ("-mtime -1", true),
+        ("-mtime +0", false),
+        ("-mtime 1", false),
+        ("-mmin -1", true),
+        ("-mmin 1", true),
+        ("-mmin 0", false),
+        ("-mmin +0", true),
+        ("-mmin +1", false),
+    ] {
+        let out = find_run("touch /tmp/fresh", &format!("find /tmp/fresh {pred}"));
+        let want = if matches { "/tmp/fresh" } else { "" };
+        assert_eq!(out.stdout.trim(), want, "{pred}");
+        assert_eq!(out.status, 0, "{pred}: {}", out.stderr);
+    }
+}
+
+#[test]
+fn find_mtime_rejects_bad_arguments() {
+    for (pred, arg) in [("-mtime", "x"), ("-mtime", "-"), ("-mmin", "1d")] {
+        let out = find_run("touch /tmp/fmt", &format!("find /tmp/fmt {pred} {arg}"));
+        assert_eq!(out.status, 1, "{pred} {arg}");
+        assert_eq!(
+            out.stderr.trim(),
+            format!("find: invalid argument `{arg}' to `{pred}'"),
+        );
+    }
+}
+
+/// Run `cmd` against a direct bind at /t holding files aged by `ages`
+/// (name, seconds before now), so their mtimes are fixed.
+fn find_aged_run(tag: &str, ages: &[(&str, u64)], cmd: &str) -> strands_shell::Output {
+    let dir = TestDir::new(&format!("lsh_find_aged_{tag}"));
+    let now = std::time::SystemTime::now();
+    for (name, secs) in ages {
+        let file = std::fs::File::create(dir.join(name)).unwrap();
+        file.set_modified(now - std::time::Duration::from_secs(*secs))
+            .unwrap();
+    }
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/t")
+            .build()
+            .unwrap();
+        shell.run(cmd).await
+    }))
+}
+
+const FIND_AGES: &[(&str, u64)] = &[
+    ("m0", 10),
+    ("m1", 90),
+    ("m3", 150),
+    ("h1", 3_700),
+    ("d0", 43_200),
+    ("d1", 129_600),
+    ("d2", 200_000),
+    ("d5", 450_000),
+];
+
+#[test]
+fn find_mtime_mmin_with_set_mtimes() {
+    for (pred, want) in [
+        // -mtime N: N whole 24h periods ago, fraction dropped.
+        ("-mtime 0", "d0 h1 m0 m1 m3"),
+        ("-mtime 1", "d1"),
+        ("-mtime 2", "d2"),
+        ("-mtime +1", "d2 d5"),
+        ("-mtime -2", "d0 d1 h1 m0 m1 m3"),
+        ("-mtime +4", "d5"),
+        ("-mtime 1.5", "d1 d2"),
+        // -mmin N: within the Nth minute back, rounded up.
+        ("-mmin 1", "m0"),
+        ("-mmin 2", "m1"),
+        ("-mmin 3", "m3"),
+        ("-mmin -2", "m0 m1"),
+        ("-mmin +2", "d0 d1 d2 d5 h1 m3"),
+        ("-mmin -60", "m0 m1 m3"),
+        ("-mmin +60", "d0 d1 d2 d5 h1"),
+    ] {
+        let cmd = format!("find /t -type f {pred} | sed 's|^/t/||' | sort | tr '\\n' ' '");
+        let out = find_aged_run("mtime", FIND_AGES, &cmd);
+        assert_eq!(out.stdout.trim_end(), want, "{pred}");
+        assert_eq!(out.status, 0, "{pred}: {}", out.stderr);
+    }
+}
+
+#[test]
+fn find_mtime_boundaries_match_gnu() {
+    // GNU's -mtime -N reaches one second past N days; -mtime N and +N, and
+    // -mmin, do not. Ages leave room for the time the test takes to run.
+    let dir = TestDir::new("lsh_find_aged_bounds");
+    let now = std::time::SystemTime::now();
+    for (name, millis) in [
+        ("s0.2", 200),
+        ("s0.5", 500),
+        ("s1.5", 1_500),
+        ("d-0.5", 86_399_500),
+        ("d+0.2", 86_400_200),
+        ("d+1.5", 86_401_500),
+    ] {
+        let file = std::fs::File::create(dir.join(name)).unwrap();
+        file.set_modified(now - std::time::Duration::from_millis(millis))
+            .unwrap();
+    }
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/t")
+            .build()
+            .unwrap();
+        for (pred, want) in [
+            ("-mtime -0", "s0.2 s0.5"),
+            ("-mtime -1", "d+0.2 d-0.5 s0.2 s0.5 s1.5"),
+            ("-mtime 0", "d-0.5 s0.2 s0.5 s1.5"),
+            ("-mtime +0", "d+0.2 d+1.5"),
+            ("-mmin -0", ""),
+            ("-mmin -1", "s0.2 s0.5 s1.5"),
+        ] {
+            let cmd = format!("find /t -type f {pred} | sed 's|^/t/||' | sort | tr '\\n' ' '");
+            let out = shell.run(&cmd).await;
+            assert_eq!(out.stdout.trim_end(), want, "{pred}");
+            assert_eq!(out.status, 0, "{pred}: {}", out.stderr);
+        }
+    }));
+}
+
+#[test]
+fn find_newer_compares_mtimes_strictly() {
+    let out = find_aged_run(
+        "newer",
+        &[
+            ("old", 500),
+            ("ref", 100),
+            ("same", 100),
+            ("new", 50),
+            ("newest", 1),
+        ],
+        "find /t -type f -newer /t/ref | sort; find /t -type f ! -newer /t/ref | sort",
+    );
+    assert_eq!(
+        out.stdout, "/t/new\n/t/newest\n/t/old\n/t/ref\n/t/same\n",
+        "stderr: {}",
+        out.stderr
+    );
+    assert_eq!(out.status, 0);
+}
+
+#[test]
+fn find_newer_missing_reference_fails() {
+    let out = find_run("touch /tmp/fnw", "find /tmp/fnw -newer /tmp/nosuch");
+    assert_eq!(out.status, 1);
+    assert_eq!(out.stdout, "");
+    assert_eq!(
+        out.stderr.trim(),
+        "find: '/tmp/nosuch': No such file or directory"
+    );
+}
+
 // ── xargs builtin ───────────────────────────────────────────────────
 
 expect!(xargs_basic, "printf 'a b c' | xargs echo", "a b c");
