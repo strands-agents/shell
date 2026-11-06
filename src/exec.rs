@@ -3211,6 +3211,9 @@ async fn run_pipeline(
                 os.clone(),
                 CURRENT_PROCESS.scope(RefCell::new(child), async move {
                     if is_script {
+                        // Hand the stage's stdin to the script's commands.
+                        CURRENT_PROCESS
+                            .with(|p| p.borrow_mut().transfer_fd(STDIN, &mut state_proc));
                         if args.is_empty() {
                             return 0;
                         }
