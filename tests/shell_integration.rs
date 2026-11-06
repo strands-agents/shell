@@ -9019,6 +9019,42 @@ expect!(
     "printf 'a 1\\nb 2\\nc 3\\n' | sort -k2,2r",
     "c 3\nb 2\na 1"
 );
+// sort -h compares human-readable numbers (GNU --human-numeric-sort)
+expect!(
+    sort_human_numeric,
+    "printf '1K\\n2M\\n512\\n1.5K\\n3G\\n-1K\\n0\\n10\\n' | sort -h",
+    "-1K\n0\n10\n512\n1K\n1.5K\n2M\n3G"
+);
+expect!(
+    sort_human_numeric_reverse,
+    "printf '2K\\n1M\\n' | sort -rh",
+    "1M\n2K"
+);
+expect!(
+    sort_human_numeric_long,
+    "printf '2K\\n1M\\n3\\n' | sort --human-numeric-sort",
+    "3\n2K\n1M"
+);
+expect!(
+    sort_human_numeric_suffix_before_value,
+    "printf '0.5K\\n4M\\n.5M\\n1Y\\n9Z\\n-0.5K\\n-2\\n0K\\n1k2\\n' | sort -h",
+    "-0.5K\n-2\n0K\n0.5K\n1k2\n.5M\n4M\n9Z\n1Y"
+);
+expect!(
+    sort_human_numeric_key,
+    "printf 'a 2K\\nb 1M\\nc 512\\nd 1k\\ne -3G\\n' | sort -k2h",
+    "e -3G\nc 512\nd 1k\na 2K\nb 1M"
+);
+expect!(
+    sort_human_numeric_key_reverse_sep,
+    "printf 'a:2K\\nb:1M\\nc:512\\n' | sort -t: -k2,2hr",
+    "b:1M\na:2K\nc:512"
+);
+expect!(
+    sort_human_numeric_unique,
+    "printf '1M\\n2K\\n1M\\n' | sort -hu",
+    "2K\n1M"
+);
 expect!(
     sort_key_spec_numeric,
     "printf 'a 10\\nb 2\\nc 1\\n' | sort -k2,2n",
