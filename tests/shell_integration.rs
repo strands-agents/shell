@@ -4835,6 +4835,133 @@ expect!(
     "1\n2\nend"
 );
 
+// ── exec: status of assignment-only commands ───────────────────────
+expect!(assign_subst_false_status, "x=$(false); echo $?", "1");
+expect!(assign_subst_exit_status, "x=$(exit 3); echo $?", "3");
+expect!(assign_backtick_false_status, "x=`false`; echo $?", "1");
+expect!(
+    assign_quoted_subst_false_status,
+    "x=\"$(false)\"; echo $?",
+    "1"
+);
+expect!(
+    assign_subst_last_assignment_wins,
+    "x=$(true) y=$(exit 4); echo $?",
+    "4"
+);
+expect!(
+    assign_subst_with_redirect_status,
+    "x=$(false) >/dev/null; echo $?",
+    "1"
+);
+expect!(lone_subst_status, "$(false); echo $?", "1");
+expect!(assign_subst_parse_error_status, "x=$(fi); echo $?", "1");
+expect!(
+    assign_subst_then_empty_subst_word_status,
+    "x=$(false) $(true); echo $?",
+    "1"
+);
+expect!(
+    assign_subst_or_fires,
+    "out=$(false) || echo failed",
+    "failed"
+);
+expect!(
+    assign_subst_and_skips,
+    "x=$(false) && echo no || echo yes",
+    "yes"
+);
+expect!(
+    assign_subst_if_not_fires,
+    "if ! out=$(false); then echo neg; fi",
+    "neg"
+);
+expect!(
+    assign_subst_errexit_aborts,
+    "(set -e; x=$(false); echo unreachable); echo $?",
+    "1"
+);
+expect!(
+    assign_subst_nested_status,
+    "x=$(y=$(false); echo $?); echo $x $?",
+    "1 0"
+);
+expect!(
+    assign_subst_subshell_status,
+    "x=$( (exit 7) ); echo $?",
+    "7"
+);
+expect!(
+    assign_subst_function_return_status,
+    "x=$(f() { return 3; }; f); echo $?",
+    "3"
+);
+expect!(
+    assign_subst_in_function,
+    "f() { x=$(exit 5); echo $?; }; f",
+    "5"
+);
+expect!(
+    assign_subst_in_loop,
+    "for i in 1 2; do x=$(exit $i); echo $?; done",
+    "1
+2"
+);
+expect!(assign_subst_true_status, "false; x=$(true); echo $?", "0");
+expect!(assign_empty_status, "x=; echo $?", "0");
+expect!(assign_empty_after_false_status, "false; x=; echo $?", "0");
+expect!(
+    assign_plain_var_after_false_status,
+    "false; x=$y; echo $?",
+    "0"
+);
+expect!(
+    local_subst_false_status,
+    "f() { local x=$(false); echo $?; }; f",
+    "0"
+);
+expect!(export_subst_false_status, "export x=$(false); echo $?", "0");
+expect!(
+    assign_subst_next_assignment_resets,
+    "x=$(false); y=$(true); echo $?",
+    "0"
+);
+expect!(
+    assign_subst_last_substitution_true,
+    "x=$(false)$(true); echo $?",
+    "0"
+);
+expect!(
+    assign_subst_last_substitution_false,
+    "x=$(true)$(false); echo $?",
+    "1"
+);
+expect!(
+    assign_subst_prefix_true_command,
+    "x=$(false) true; echo $?",
+    "0"
+);
+expect!(
+    assign_subst_prefix_false_command,
+    "x=$(true) false; echo $?",
+    "1"
+);
+expect!(
+    subst_in_case_word_status,
+    "case $(exit 3) in *) esac; echo $?",
+    "0"
+);
+expect!(
+    subst_in_for_list_status,
+    "for i in $(exit 3); do :; done; echo $?",
+    "0"
+);
+expect!(
+    subst_in_command_arg_status,
+    "echo $(exit 3) >/dev/null; echo $?",
+    "0"
+);
+
 // ── exec: shebang / script execution ──────────────────────────────
 expect!(
     script_shebang_source,
