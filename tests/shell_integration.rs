@@ -2899,7 +2899,47 @@ expect!(
     "printf '%b' 'hello\\nworld'",
     "hello\nworld"
 );
-expect!(printf_octal_escape, "printf '\\0101'", "A");
+// Like bash, a format-string octal escape is `\` plus 1-3 digits, so
+// `\0101` is `\010` then `1`; `%b` also accepts `\0` plus 3 digits.
+expect!(printf_octal_escape, "printf '\\101\\n'", "A");
+expect!(printf_octal_escape_leading_zero, "printf '\\0101'", "\x081");
+expect!(printf_octal_escape_max_digits, "printf '\\1012'", "A2");
+expect!(printf_hex_escape, "printf 'a\\x41b\\n'", "aAb");
+expect!(
+    printf_hex_escape_max_digits,
+    "printf '\\x414\\x4|'",
+    "A4\x04|"
+);
+expect!(
+    printf_hex_escape_no_digits,
+    "printf '\\xg' 2>/dev/null",
+    "\\xg"
+);
+expect!(printf_hex_escape_nul, "printf '\\x00z' | wc -c", "2");
+expect!(
+    printf_hex_escape_raw_byte,
+    "printf '\\xff\\200' | wc -c",
+    "2"
+);
+expect!(printf_unicode_escape, "printf '\\u00e9\\U0001F600'", "é😀");
+expect!(
+    printf_format_backslash_c_is_literal,
+    r"printf 'x\cy'",
+    r"x\cy"
+);
+expect!(
+    printf_b_octal_escape,
+    r"printf '%b|' '\0101' '\101' '\01012'",
+    "A|A|A2|"
+);
+expect!(printf_b_hex_escape, r"printf '%b' 'a\x41b'", "aAb");
+expect_output!(
+    printf_b_backslash_c_stops_output,
+    r"printf '%s %b %s\n' 1 '\c' 3 4 5 6",
+    "1 ",
+    "",
+    0
+);
 
 // ── chmod coverage ──────────────────────────────────────────────────
 
