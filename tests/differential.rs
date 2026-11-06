@@ -4,13 +4,15 @@
 //! named in the case header. See `tests/differential/README.md`.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use strands_shell::{Output, Shell};
 
 const DEFAULT_RULES: &[&str] = &["stdout", "status", "stderr-presence"];
 const CASE_TIMEOUT: Duration = Duration::from_secs(30);
+const RECORD_PATH: &str = "/usr/bin:/bin";
 
 struct Case {
     name: String,
@@ -18,6 +20,7 @@ struct Case {
     script: String,
     rules: Vec<String>,
     known_difference: Option<String>,
+    skip: Option<String>,
 }
 
 struct Expected {
@@ -30,12 +33,10 @@ fn cases_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/cases")
 }
 
-/// Reads a file with line endings normalized to `\n`, so a CRLF checkout on
-/// Windows compares the same as on Unix.
-fn read_lf(path: &Path) -> String {
-    let text =
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    text.replace("\r\n", "\n")
+/// Reads a file byte for byte. `.gitattributes` keeps line endings in the
+/// cases directory unconverted, so output containing `\r` survives checkout.
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 fn load_cases() -> Vec<Case> {
@@ -50,15 +51,18 @@ fn load_cases() -> Vec<Case> {
 
 fn parse_case(path: &Path) -> Case {
     let name = path.file_stem().unwrap().to_string_lossy().into_owned();
-    let script = read_lf(path);
+    let script = read(path);
     let mut rules: Vec<String> = DEFAULT_RULES.iter().map(|r| r.to_string()).collect();
     let mut known_difference = None;
+    let mut skip = None;
     for line in script.lines().take_while(|line| line.starts_with('#')) {
         let line = line.trim_start_matches('#').trim();
         if let Some(list) = line.strip_prefix("compare:") {
             rules = list.split(',').map(|r| r.trim().to_string()).collect();
         } else if let Some(reason) = line.strip_prefix("known-difference:") {
             known_difference = Some(reason.trim().to_string());
+        } else if let Some(reason) = line.strip_prefix("skip:") {
+            skip = Some(reason.trim().to_string());
         }
     }
     for rule in &rules {
@@ -81,6 +85,7 @@ fn parse_case(path: &Path) -> Case {
         script,
         rules,
         known_difference,
+        skip,
     }
 }
 
@@ -103,7 +108,7 @@ fn format_expected(status: i32, stderr_empty: bool, stdout: &str) -> String {
 
 fn parse_expected(case: &Case) -> Expected {
     let path = expected_path(case);
-    let text = read_lf(&path);
+    let text = read(&path);
     let bad = format!("{}: malformed expected file", path.display());
     let (status_line, rest) = text.split_once('\n').expect(&bad);
     let (stderr_line, rest) = rest.split_once('\n').expect(&bad);
@@ -122,30 +127,71 @@ fn parse_expected(case: &Case) -> Expected {
     }
 }
 
-/// Runs the case under bash in a fresh directory and rewrites its `.expected`.
-fn record(case: &Case) {
+/// Runs the case under bash in a fresh directory with a fixed environment
+/// and returns its exit status and `.expected` text.
+fn record(case: &Case) -> (i32, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("differential")
         .join(&case.name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let out = std::process::Command::new("bash")
+    let out = Command::new("bash")
         .arg(&case.path)
         .current_dir(&dir)
+        .env_clear()
+        .env("PATH", RECORD_PATH)
+        .env("HOME", &dir)
         .env("LC_ALL", "C")
-        .stdin(std::process::Stdio::null())
+        .stdin(Stdio::null())
         .output()
         .expect("run bash");
+    std::fs::remove_dir_all(&dir).unwrap();
     let status = out.status.code().expect("bash killed by signal");
     let stdout = String::from_utf8(out.stdout).expect("bash stdout is UTF-8");
-    let text = format_expected(status, out.stderr.is_empty(), &stdout);
-    std::fs::write(expected_path(case), text).unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
+    (
+        status,
+        format_expected(status, out.stderr.is_empty(), &stdout),
+    )
+}
+
+/// Records every case. Writes nothing if bash is missing or any case exits
+/// 127, which usually means a command it uses isn't installed.
+fn record_all(cases: &[Case]) {
+    let bash = Command::new("bash")
+        .args(["-c", "true"])
+        .env_clear()
+        .env("PATH", RECORD_PATH)
+        .status();
+    assert!(
+        bash.is_ok_and(|s| s.success()),
+        "recording needs bash on {RECORD_PATH}"
+    );
+    let recorded: Vec<(&Case, i32, String)> = cases
+        .iter()
+        .map(|case| {
+            let (status, text) = record(case);
+            (case, status, text)
+        })
+        .collect();
+    let missing: Vec<&str> = recorded
+        .iter()
+        .filter(|(_, status, _)| *status == 127)
+        .map(|(case, _, _)| case.name.as_str())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "nothing recorded: these cases exited 127, probably a tool missing from {RECORD_PATH}: {}",
+        missing.join(", ")
+    );
+    for (case, _, text) in recorded {
+        std::fs::write(expected_path(case), text).unwrap();
+        println!("recorded {}", case.name);
+    }
 }
 
 /// Runs the case in a fresh shell on its own thread, so a hang fails the case
 /// instead of blocking the whole test.
-fn run_strands(case: &Case) -> Option<Output> {
+fn run_strands(case: &Case) -> Result<Output, String> {
     let script = case.script.clone();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -160,7 +206,10 @@ fn run_strands(case: &Case) -> Option<Output> {
         }));
         let _ = tx.send(out);
     });
-    rx.recv_timeout(CASE_TIMEOUT).ok()
+    rx.recv_timeout(CASE_TIMEOUT).map_err(|e| match e {
+        RecvTimeoutError::Timeout => format!("timed out after {CASE_TIMEOUT:?}"),
+        RecvTimeoutError::Disconnected => "panicked".to_string(),
+    })
 }
 
 fn trimmed(stdout: &str) -> Vec<&str> {
@@ -197,11 +246,43 @@ fn check(rules: &[String], expected: &Expected, actual: &Output) -> Vec<String> 
         .collect()
 }
 
+/// Shows each line escaped, so `\r`, trailing spaces and a missing final
+/// newline are visible.
 fn indent(text: &str) -> String {
     if text.is_empty() {
         return "    (empty)\n".to_string();
     }
-    text.lines().map(|line| format!("    | {line}\n")).collect()
+    text.split_inclusive('\n')
+        .map(|line| format!("    {line:?}\n"))
+        .collect()
+}
+
+/// Runs the case and describes how it differs from bash, or `None` if it
+/// matches.
+fn difference(case: &Case) -> Option<String> {
+    let expected = parse_expected(case);
+    let actual = match run_strands(case) {
+        Ok(actual) => actual,
+        Err(e) => return Some(e),
+    };
+    let broken = check(&case.rules, &expected, &actual);
+    if broken.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "failed rules: {}\n  expected (bash): status {}, stderr {}, stdout:\n{}  actual (strands-shell): status {}, stdout:\n{}  actual stderr:\n{}",
+        broken.join(", "),
+        expected.status,
+        if expected.stderr_empty {
+            "empty"
+        } else {
+            "non-empty"
+        },
+        indent(&expected.stdout),
+        actual.status,
+        indent(&actual.stdout),
+        indent(&actual.stderr),
+    ))
 }
 
 #[test]
@@ -210,49 +291,34 @@ fn differential() {
     assert!(!cases.is_empty(), "no cases in {}", cases_dir().display());
 
     if std::env::var_os("DIFFERENTIAL_RECORD").is_some() {
-        for case in &cases {
-            record(case);
-            println!("recorded {}", case.name);
-        }
+        record_all(&cases);
         return;
     }
 
     let mut failures = Vec::new();
     let mut passed = 0;
+    let mut known = 0;
     for case in &cases {
-        if let Some(reason) = &case.known_difference {
-            println!("skip {}: known difference: {reason}", case.name);
+        if let Some(reason) = &case.skip {
+            println!("skip {}: {reason}", case.name);
             continue;
         }
-        let expected = parse_expected(case);
-        let Some(actual) = run_strands(case) else {
-            failures.push(format!("{}: timed out after {CASE_TIMEOUT:?}\n", case.name));
-            continue;
-        };
-        let broken = check(&case.rules, &expected, &actual);
-        if broken.is_empty() {
-            passed += 1;
-            continue;
+        match (&case.known_difference, difference(case)) {
+            (None, None) => passed += 1,
+            (None, Some(diff)) => failures.push(format!("{}: {diff}", case.name)),
+            (Some(reason), Some(_)) => {
+                known += 1;
+                println!("known difference {}: {reason}", case.name);
+            }
+            (Some(_), None) => failures.push(format!(
+                "{} now matches bash: remove the known-difference marker\n",
+                case.name
+            )),
         }
-        failures.push(format!(
-            "{}: failed rules: {}\n  expected (bash): status {}, stderr {}, stdout:\n{}  actual (strands-shell): status {}, stdout:\n{}  actual stderr:\n{}",
-            case.name,
-            broken.join(", "),
-            expected.status,
-            if expected.stderr_empty { "empty" } else { "non-empty" },
-            indent(&expected.stdout),
-            actual.status,
-            indent(&actual.stdout),
-            indent(&actual.stderr),
-        ));
     }
     println!(
-        "{passed} passed, {} failed, {} known differences",
-        failures.len(),
-        cases
-            .iter()
-            .filter(|c| c.known_difference.is_some())
-            .count()
+        "{passed} passed, {} failed, {known} known differences",
+        failures.len()
     );
     assert!(
         failures.is_empty(),

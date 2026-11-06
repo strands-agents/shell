@@ -21,9 +21,13 @@ Comment lines at the top of a case can set:
 
 - `# compare: stdout, status` picks the rules to check. Without it the rules
   are `stdout, status, stderr-presence`.
-- `# known-difference: <reason>` skips the case and lists it in the test output
-  (`cargo test --test differential -- --nocapture`). Use it for intentional
-  differences or bugs with an open fix, e.g. `# known-difference: fixed by #230`.
+- `# known-difference: <reason>` marks a bug or gap, e.g.
+  `# known-difference: fixed by #230`. The case still runs. While it differs
+  it's listed in the test output (`cargo test --test differential --
+  --nocapture`) and doesn't fail. Once it matches bash the test fails and asks
+  you to remove the marker.
+- `# skip: <reason>` doesn't run the case. Use it only for differences we keep
+  on purpose.
 
 Rules:
 
@@ -42,6 +46,11 @@ Rules:
 DIFFERENTIAL_RECORD=1 cargo test --test differential
 ```
 
-This runs every case with `bash` (with `LC_ALL=C`) in a fresh directory and
-rewrites all `.expected` files. Normal runs don't need bash. The current files
-were recorded on Linux with bash 5.2.15, GNU coreutils 8.32 and jq 1.8.1.
+This runs every case with `bash` in a fresh directory, with an empty
+environment except `PATH=/usr/bin:/bin`, `HOME` set to that directory and
+`LC_ALL=C`, and rewrites all `.expected` files. If any case exits 127 (usually
+a missing tool) nothing is written. Normal runs don't need bash. The current
+files were recorded on Linux with bash 5.2.15, GNU coreutils 8.32 and jq 1.8.1.
+
+Files under `cases/` are stored byte for byte (see `.gitattributes`), so
+expected output with `\r\n` stays intact on Windows.
