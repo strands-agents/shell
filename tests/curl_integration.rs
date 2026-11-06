@@ -103,6 +103,10 @@ async fn start_server() -> String {
         .route(
             "/redirect-ftp",
             get(|| async { Redirect::temporary("ftp://example.com/file") }),
+        )
+        .route(
+            "/method",
+            any(|method: Method| async move { ([("x-method", method.to_string())], "body") }),
         );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -270,6 +274,126 @@ fn curl_head_method() {
         let out = shell.run(&format!("curl -X HEAD {base}/hello")).await;
         assert_eq!(out.stdout, "");
         assert_eq!(out.status, 0);
+    }));
+}
+
+#[test]
+fn curl_head_flag_prints_headers_only() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        for flag in ["-I", "--head", "-sI", "-Ii"] {
+            let out = shell.run(&format!("curl {flag} {base}/method")).await;
+            assert_eq!(out.status, 0, "{flag}");
+            assert!(
+                out.stdout.starts_with("HTTP/1.1 200 OK\r\n"),
+                "{flag}: {}",
+                out.stdout
+            );
+            assert!(
+                out.stdout.contains("x-method: HEAD\r\n"),
+                "{flag}: {}",
+                out.stdout
+            );
+            assert!(out.stdout.ends_with("\r\n\r\n"), "{flag}: {}", out.stdout);
+        }
+    }));
+}
+
+#[test]
+fn curl_head_flag_lets_request_pick_the_method() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!(
+                "curl -sI -X GET -w '%{{size_download}}' {base}/method"
+            ))
+            .await;
+        assert_eq!(out.status, 0);
+        assert!(out.stdout.contains("x-method: GET\r\n"), "{}", out.stdout);
+        // The body is fetched but, as in curl, neither shown nor counted.
+        assert!(out.stdout.ends_with("\r\n\r\n0"), "{}", out.stdout);
+    }));
+}
+
+#[test]
+fn curl_head_flag_follows_redirects_showing_every_hop() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell.run(&format!("curl -sIL {base}/redirect")).await;
+        assert_eq!(out.status, 0);
+        let blocks: Vec<&str> = out.stdout.split_terminator("\r\n\r\n").collect();
+        assert_eq!(blocks.len(), 2, "{}", out.stdout);
+        assert!(blocks[0].starts_with("HTTP/1.1 307 "), "{}", out.stdout);
+        assert!(blocks[0].contains("location: /hello"), "{}", out.stdout);
+        assert!(blocks[1].starts_with("HTTP/1.1 200 OK"), "{}", out.stdout);
+
+        // Without `-L` only the redirect itself is shown.
+        let out = shell.run(&format!("curl -sI {base}/redirect")).await;
+        assert!(out.stdout.starts_with("HTTP/1.1 307 "), "{}", out.stdout);
+        assert_eq!(out.stdout.matches("HTTP/").count(), 1, "{}", out.stdout);
+    }));
+}
+
+#[test]
+fn curl_head_flag_with_output_writes_headers_to_the_file() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!(
+                "curl -sI -o /tmp/head.txt -w '%{{http_code}}' {base}/hello"
+            ))
+            .await;
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout, "200");
+        let out = shell.run("cat /tmp/head.txt").await;
+        assert!(
+            out.stdout.starts_with("HTTP/1.1 200 OK\r\n"),
+            "{}",
+            out.stdout
+        );
+        assert!(out.stdout.ends_with("\r\n\r\n"), "{}", out.stdout);
+    }));
+}
+
+#[test]
+fn curl_head_flag_with_fail_shows_headers_then_exits_22() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!("curl -sIf -w '%{{http_code}}' {base}/status/404"))
+            .await;
+        assert_eq!(out.status, 22);
+        assert!(
+            out.stdout.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{}",
+            out.stdout
+        );
+        assert!(out.stdout.ends_with("\r\n\r\n404"), "{}", out.stdout);
+    }));
+}
+
+#[test]
+fn curl_head_flag_conflicts_with_data() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell.run(&format!("curl -I -d x {base}/echo")).await;
+        assert_eq!(out.status, 2);
+        assert_eq!(out.stdout, "");
+        assert!(
+            out.stderr
+                .contains("You can only select one HTTP request method!"),
+            "{}",
+            out.stderr
+        );
+        let out = shell.run(&format!("curl -s -I -d x {base}/echo")).await;
+        assert_eq!(out.status, 2);
+        assert_eq!(out.stderr, "");
     }));
 }
 
