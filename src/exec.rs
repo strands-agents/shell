@@ -1716,11 +1716,15 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
             .push_str("strands-shell: input too large\n");
         proc.err_msg("strands-shell: input too large");
         proc.last_exit = 1;
+        proc.last_subst_status = Some(1);
         return String::new();
     }
     let command_line = match parser::parse(cmd) {
         Ok(cl) => cl,
-        Err(_) => return String::new(),
+        Err(_) => {
+            proc.last_subst_status = Some(1);
+            return String::new();
+        }
     };
     let mut sub = proc.fork();
     sub.depth += 1;
@@ -1729,13 +1733,15 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
             .push_str("strands-shell: maximum recursion depth exceeded\n");
         proc.err_msg("strands-shell: maximum recursion depth exceeded");
         proc.last_exit = 1;
+        proc.last_subst_status = Some(1);
         return String::new();
     }
-    let result = run_capturing(os, &mut sub, &command_line).await;
+    let (output, result) = run_capturing_status(os, &mut sub, &command_line).await;
     if !sub.captured_stderr.is_empty() {
         proc.captured_stderr.push_str(&sub.captured_stderr);
     }
-    result
+    proc.last_subst_status = Some(captured_status(result, sub.last_exit));
+    output
 }
 
 /// Execute a command line, capturing all stdout into a String instead of printing it.
@@ -3212,6 +3218,7 @@ async fn run_pipeline(
     let mut expanded_env: Vec<Vec<(String, String)>> = Vec::with_capacity(len);
     let mut expanded_redirects: Vec<Vec<(Redirect, String)>> = Vec::with_capacity(len);
 
+    shell_proc.last_subst_status = None;
     for cmd in pipeline {
         expanded_args.push(expand_words(os.clone(), shell_proc, &cmd.args).await);
         let mut env = Vec::new();
@@ -3263,7 +3270,8 @@ async fn run_pipeline(
         for (k, v) in &expanded_env[0] {
             shell_proc.set_env(k, v);
         }
-        return (0, String::new());
+        // With no command name, the status is that of the last command substitution.
+        return (shell_proc.last_subst_status.unwrap_or(0), String::new());
     }
 
     // Resolve executables: for each stage, if the command is not a builtin,
