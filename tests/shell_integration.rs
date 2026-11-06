@@ -3524,6 +3524,7 @@ expect!(
 
 /// Bind a host dir holding files with fixed sizes, modes and mtimes.
 /// `files` is (name, size, mtime seconds since epoch).
+#[cfg(unix)]
 fn ls_fixture(name: &str, files: &[(&str, u64, u64)]) -> TestDir {
     use std::os::unix::fs::PermissionsExt;
     let dir = TestDir::new(name);
@@ -3538,6 +3539,7 @@ fn ls_fixture(name: &str, files: &[(&str, u64, u64)]) -> TestDir {
     dir
 }
 
+#[cfg(unix)]
 fn run_ls_fixture(dir: &TestDir, cmd: &str) -> strands_shell::Output {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
@@ -3550,8 +3552,10 @@ fn run_ls_fixture(dir: &TestDir, cmd: &str) -> strands_shell::Output {
 }
 
 // 2020-01-01T00:00:00Z, far enough in the past that -l prints the year.
+#[cfg(unix)]
 const LS_T0: u64 = 1_577_836_800;
 
+#[cfg(unix)]
 #[test]
 fn ls_long_format_unchanged() {
     let dir = ls_fixture("ls_long_fmt", &[("f", 1536, LS_T0)]);
@@ -3560,6 +3564,7 @@ fn ls_long_format_unchanged() {
     assert_eq!(out.status, 0);
 }
 
+#[cfg(unix)]
 #[test]
 fn ls_lh_prints_human_sizes() {
     // Expected sizes from GNU coreutils `ls -lh`.
@@ -3587,6 +3592,7 @@ fn ls_lh_prints_human_sizes() {
     assert_eq!(single.stdout, "-rw-r--r--     4.8M Jan  1  2020 /fx/f\n");
 }
 
+#[cfg(unix)]
 #[test]
 fn ls_sort_by_time_and_size() {
     // Ties (a/b on mtime, b/c on size) fall back to name order, like GNU.
