@@ -9414,6 +9414,139 @@ expect!(
     "hello"
 );
 
+// ── grep -P ─────────────────────────────────────────────────────────
+
+#[test]
+fn grep_perl_matches_like_gnu() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, want) in [
+            (r"echo 'a1 b22' | grep -oP '\d+'", "1\n22\n"),
+            (r"printf 'a b\na\tb\nab\n' | grep -cP 'a\sb'", "2\n"),
+            (r"printf 'a\tb\nab\n' | grep --perl-regexp 'a\tb'", "a\tb\n"),
+            (
+                r"printf 'word\nswordfish\na word.\n' | grep -P '\bword\b'",
+                "word\na word.\n",
+            ),
+            (r"echo '<a><b>' | grep -oP '<.*?>'", "<a>\n<b>\n"),
+            (r"echo aaa | grep -oP 'a{1,2}?'", "a\na\na\n"),
+            (r"echo HELLO | grep -P '(?i)hello'", "HELLO\n"),
+            (r"echo ABC | grep -iP 'abc'", "ABC\n"),
+            (r"echo ab | grep -oP '(?<x>a)b'", "ab\n"),
+            (
+                r"printf 'cat catalog cat\ncatalog\n' | grep -owP cat",
+                "cat\ncat\n",
+            ),
+            (
+                r"printf '123\n123a\nab\nb\n' | grep -xP '\d+|b'",
+                "123\nb\n",
+            ),
+            (r"printf 'a+\naa\n' | grep -P 'a\+'", "a+\n"),
+            (r"echo '(?=x' | grep -oP '[(?=]+x'", "(?=x\n"),
+            (r"echo AA | grep -oP '\x{41}+'", "AA\n"),
+            // PCRE's `\<` and `\>` are literal angle brackets, not word boundaries.
+            (r"printf '<div>\ndiv x\n' | grep -P '\<div\>'", "<div>\n"),
+            (r"printf '<\na\n' | grep -P '[\<]'", "<\n"),
+            // `&&`, `~~` and `[` in a class are literals, not set operators.
+            (r"printf '&\na\n' | grep -P '[&&]'", "&\n"),
+            (r"printf 'a\nb\n&\nc\n' | grep -P '[a&&b]'", "a\nb\n&\n"),
+            (r"printf '~\na\n' | grep -P '[~~]'", "~\n"),
+            (r"printf '[\na\n' | grep -P '[[x]'", "[\n"),
+            (r"printf 'x1\n' | grep -P '[[:digit:]]'", "x1\n"),
+            (r"printf ']\nb\n' | grep -P '[]a]'", "]\n"),
+            // A `{` that starts no counted quantifier is literal.
+            (
+                r"printf 'a{start}\nhello\n' | grep -P '\b{start}'",
+                "a{start}\n",
+            ),
+            (r"printf 'fn() {\nfn()\n' | grep -P 'fn\(\) {'", "fn() {\n"),
+            (r"printf 'foo{bar\nfoo\n' | grep -P 'foo{'", "foo{bar\n"),
+            (r"printf '{\na\n' | grep -P '{'", "{\n"),
+            (r"printf 'aa\na\n' | grep -P '^a{2}$'", "aa\n"),
+            (r"printf 'A\nb\n' | grep -P '(?i:a)'", "A\n"),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, want, "{cmd}: stdout");
+            assert_eq!(out.stderr, "", "{cmd}: stderr");
+            assert_eq!(out.status, 0, "{cmd}: status");
+        }
+    }));
+}
+
+#[test]
+fn grep_perl_rejects_unsupported_constructs() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, err) in [
+            (
+                r"echo foo1 | grep -P 'foo(?=1)'",
+                "-P does not support lookahead",
+            ),
+            (
+                r"echo foo | grep -P 'foo(?!1)'",
+                "-P does not support lookahead",
+            ),
+            (
+                r"echo x1 | grep -oP '(?<=x)\d'",
+                "-P does not support lookbehind",
+            ),
+            (
+                r"echo ab | grep -P '(?<!x)b'",
+                "-P does not support lookbehind",
+            ),
+            (
+                r"echo abab | grep -P '(ab)\1'",
+                "-P does not support backreference",
+            ),
+            (
+                r"echo aa | grep -P '(?<n>a)\k<n>'",
+                "-P does not support backreference",
+            ),
+            (
+                r"echo aa | grep -P 'a++a'",
+                "-P does not support possessive quantifier",
+            ),
+            (
+                r"echo aaa | grep -P 'a{1,2}+a'",
+                "-P does not support possessive quantifier",
+            ),
+            (
+                r"echo aa | grep -P '(?>a+)a'",
+                "-P does not support atomic group",
+            ),
+            (
+                r"echo foo=1 | grep -oP 'foo=\K\d'",
+                r"-P does not support match reset \K",
+            ),
+            (
+                r"echo b | grep -P '[a--b]'",
+                "-P does not support '--' in a character class",
+            ),
+            (
+                r"echo 'a<' | grep -P '(?x)[ <]'",
+                "-P does not support (?x)",
+            ),
+            (r"echo a | grep -P '(?ix)a'", "-P does not support (?x)"),
+            (r"echo a | grep -P '(?x:a)'", "-P does not support (?x)"),
+            ("echo a | grep -E -P a", "conflicting matchers specified"),
+            ("echo a | grep -P -F a", "conflicting matchers specified"),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, "", "{cmd}: stdout");
+            assert_eq!(out.stderr, format!("grep: {err}\n"), "{cmd}: stderr");
+            assert_eq!(out.status, 2, "{cmd}: status");
+        }
+    }));
+}
+
+expect_status!(
+    grep_perl_invalid_pattern,
+    "echo a | grep -P 'a(' 2>/dev/null",
+    2
+);
+
 // ── ls additional coverage ──────────────────────────────────────────
 
 expect!(
