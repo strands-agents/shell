@@ -6446,6 +6446,69 @@ expect!(dquote_backslash_special_dquote, r#"echo "a\"b""#, r#"a"b"#);
 
 // ── Script execution via sh ─────────────────────────────────────────
 
+/// Runs `cmd` after writing a `cat` script and a `read` script.
+async fn run_with_stdin_scripts(cmd: &str) -> strands_shell::Output {
+    let mut shell = Shell::builder().build().unwrap();
+    shell
+        .run(
+            "printf 'cat\\n' > /tmp/cat.sh; printf 'read l; echo got $l\\n' > /tmp/read.sh; \
+             printf '#!/bin/sh\\ncat\\n' > /tmp/catx.sh; chmod +x /tmp/catx.sh",
+        )
+        .await;
+    shell.run(cmd).await
+}
+
+#[test]
+fn script_reads_piped_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin_scripts("echo x | sh /tmp/cat.sh").await;
+        assert_eq!(out.stdout, "x\n");
+        let out = run_with_stdin_scripts("echo x | sh /tmp/read.sh").await;
+        assert_eq!(out.stdout, "got x\n");
+        assert_eq!(out.stderr, "");
+        let out = run_with_stdin_scripts("echo x | /tmp/catx.sh | tr a-z A-Z").await;
+        assert_eq!(out.stdout, "X\n");
+    }));
+}
+
+#[test]
+fn script_reads_redirected_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out =
+            run_with_stdin_scripts("printf 'a\\nb\\n' > /tmp/in; sh /tmp/cat.sh < /tmp/in").await;
+        assert_eq!(out.stdout, "a\nb\n");
+        let out = run_with_stdin_scripts("sh /tmp/read.sh <<EOF\nhd\nEOF").await;
+        assert_eq!(out.stdout, "got hd\n");
+        let out = run_with_stdin_scripts("sh /tmp/read.sh < /dev/null; echo $?").await;
+        assert_eq!(out.stdout, "got\n0\n");
+    }));
+}
+
+#[test]
+fn script_stdin_edge_cases() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        // Reads only the first line of a multi-line pipe.
+        let out = run_with_stdin_scripts("printf 'a\\nb\\nc\\n' | sh /tmp/read.sh").await;
+        assert_eq!(out.stdout, "got a\n");
+        // A script that ignores its piped stdin still succeeds.
+        let out = run_with_stdin_scripts(
+            "printf 'true\\n' > /tmp/noop.sh; printf 'a\\n' | sh /tmp/noop.sh; echo $?",
+        )
+        .await;
+        assert_eq!(out.stdout, "0\n");
+        // No stdin at all: unchanged.
+        let out = run_with_stdin_scripts("sh /tmp/cat.sh; echo rc=$?").await;
+        assert_eq!(out.stdout, "rc=0\n");
+        // The pipe does not outlive the pipeline.
+        let out =
+            run_with_stdin_scripts("echo x | sh /tmp/read.sh; read z; echo \"rc=$? z=$z\"").await;
+        assert_eq!(out.stdout, "got x\nrc=1 z=\n");
+    }));
+}
+
 #[test]
 fn script_multiline_sh() {
     let (rt, local) = rt();
