@@ -5939,6 +5939,102 @@ fn bind_direct_symlink_escape_blocked() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn bind_direct_readlink_prints_stored_link_text() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_test");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("f"), "x").unwrap();
+        std::os::unix::fs::symlink("f", dir.join("rel")).unwrap();
+        std::os::unix::fs::symlink("../f", dir.join("sub/up")).unwrap();
+        std::os::unix::fs::symlink("nowhere", dir.join("dangling")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("absolute")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("readlink /b/rel; readlink /b/sub/up; readlink /b/dangling; readlink /b/absolute; cd /b/sub && readlink up")
+            .await;
+        assert_eq!(out.stdout, "f\n../f\nnowhere\n/etc/passwd\n../f\n");
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        for path in ["/b/f", "/b/missing"] {
+            let out = shell.run(&format!("readlink {path}")).await;
+            assert_eq!(out.stdout, "", "{path}");
+            assert_eq!(out.status, 1, "{path}");
+        }
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_readlink_does_not_follow_a_directory_out_of_the_bind() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_escape_test");
+        std::fs::create_dir_all(dir.join("mount")).unwrap();
+        std::fs::create_dir_all(dir.join("outside")).unwrap();
+        std::os::unix::fs::symlink("ESCAPED", dir.join("outside/inner")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside"), dir.join("mount/escape")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.join("mount").to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        let out = shell.run("readlink /b/escape/inner").await;
+        assert!(!out.stdout.contains("ESCAPED"), "stdout: {}", out.stdout);
+        assert_ne!(out.status, 0);
+    }));
+}
+
+#[cfg(windows)]
+#[test]
+fn bind_direct_readlink_reads_only_one_host_name_on_windows() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_windows_test");
+        let mount = dir.join("mount");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(mount.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(mount.join("f"), "x").unwrap();
+        std::os::windows::fs::symlink_file("OUTSIDE_TARGET", outside.join("link")).unwrap();
+        std::os::windows::fs::symlink_file("f", mount.join("rel")).unwrap();
+        std::os::windows::fs::symlink_file("nowhere", mount.join("dangling")).unwrap();
+        std::os::windows::fs::symlink_file(mount.join("f"), mount.join("absolute")).unwrap();
+        let absolute = std::fs::read_link(mount.join("absolute")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(mount.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("readlink /b/rel; readlink /b/dangling; readlink /b/absolute")
+            .await;
+        assert_eq!(
+            out.stdout,
+            format!("f\nnowhere\n{}\n", absolute.display()),
+            "stderr: {}",
+            out.stderr
+        );
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        let leaves = [
+            outside.join("link").display().to_string(),
+            r"..\outside\link".to_string(),
+            r"sub\..\..\outside\link".to_string(),
+        ];
+        for leaf in leaves {
+            let out = shell.run(&format!("readlink '/b/{leaf}'")).await;
+            assert!(
+                !out.stdout.contains("OUTSIDE_TARGET"),
+                "{leaf}: stdout: {}",
+                out.stdout
+            );
+            assert_ne!(out.status, 0, "{leaf}");
+        }
+    }));
+}
+
 #[test]
 fn builder_credential_bearer() {
     let (rt, local) = rt();
