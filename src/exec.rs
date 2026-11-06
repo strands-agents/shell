@@ -1871,7 +1871,9 @@ async fn run_capturing_status(
                     negated,
                 } => {
                     let compound_cl = vec![(*compound.clone(), None)];
-                    let captured = Box::pin(run_capturing(os.clone(), proc, &compound_cl)).await;
+                    let (captured, result) =
+                        Box::pin(run_capturing_status(os.clone(), proc, &compound_cl)).await;
+                    let compound_exit = captured_status(result, proc.last_exit);
                     let (tx, rx) = os::pipe(64);
                     let mut tasks = ForegroundTasks::new(os.as_ref());
                     let handle = tokio::task::spawn_local(async move {
@@ -1885,6 +1887,9 @@ async fn run_capturing_status(
                     let (mut exit, out) = execute_pipeline_capture(os.clone(), proc, tail).await;
                     let _ = handle.await;
                     proc.close(0);
+                    if proc.opt_pipefail && exit == 0 {
+                        exit = compound_exit;
+                    }
                     if *negated {
                         exit = if exit == 0 { 1 } else { 0 };
                     }
@@ -2116,19 +2121,24 @@ async fn execute_item(
             let (tx, rx) = os::pipe(64);
             let mut tasks = ForegroundTasks::new(os.as_ref());
             let handle = tokio::task::spawn_local(async move {
-                let output = Box::pin(run_capturing(os2, &mut sub, &compound_cl)).await;
+                let (output, result) =
+                    Box::pin(run_capturing_status(os2, &mut sub, &compound_cl)).await;
                 use bytes::Bytes;
                 if !output.is_empty() {
                     let _ = tx.send(Bytes::from(output.into_bytes())).await;
                 }
+                captured_status(result, sub.last_exit)
             });
             tasks.own(&handle);
 
             // Set stdin on proc so the tail pipeline inherits it.
             proc.set_channel_reader(0, rx);
             let mut exit = execute_pipeline(os, proc, tail).await;
-            let _ = handle.await;
+            let compound_exit = handle.await.unwrap_or(0);
             proc.close(0);
+            if proc.opt_pipefail && exit == 0 {
+                exit = compound_exit;
+            }
             if *negated {
                 exit = if exit == 0 { 1 } else { 0 };
             }
@@ -3396,10 +3406,17 @@ async fn run_pipeline(
 
     // Wait for all command tasks
     let mut last_exit = 0;
+    let mut last_failure = 0;
     for handle in handles {
         if let Ok(exit) = handle.await {
             last_exit = exit;
+            if exit != 0 {
+                last_failure = exit;
+            }
         }
+    }
+    if shell_proc.opt_pipefail {
+        last_exit = last_failure;
     }
 
     let stdout_str = if let Some(h) = stdout_drain {
