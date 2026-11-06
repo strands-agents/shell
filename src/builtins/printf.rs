@@ -1,5 +1,7 @@
 use std::future::Future;
+use std::iter::Peekable;
 use std::pin::Pin;
+use std::str::Chars;
 
 use crate::commands::CommandResult;
 use crate::os::{Kernel, Process};
@@ -18,13 +20,28 @@ pub fn builtin_printf<'a>(
         let params = &args[1..];
         let mut w = io::stdout()?;
         let output = format_string(fmt, params);
-        w.write_all(output.as_bytes()).await?;
+        w.write_all(&output).await?;
         Ok(0)
     })
 }
 
-fn format_string(fmt: &str, params: &[String]) -> String {
-    let mut out = String::new();
+/// printf output: raw bytes, since `\xHH` and octal escapes can emit
+/// bytes that are not valid UTF-8.
+#[derive(Default)]
+struct Out(Vec<u8>);
+
+impl Out {
+    fn push(&mut self, c: char) {
+        self.0
+            .extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+    }
+    fn push_str(&mut self, s: &str) {
+        self.0.extend_from_slice(s.as_bytes());
+    }
+}
+
+fn format_string(fmt: &str, params: &[String]) -> Vec<u8> {
+    let mut out = Out::default();
     let mut pi = 0; // parameter index across all iterations
 
     loop {
@@ -33,32 +50,7 @@ fn format_string(fmt: &str, params: &[String]) -> String {
 
         while let Some(c) = chars.next() {
             if c == '\\' {
-                match chars.next() {
-                    Some('n') => out.push('\n'),
-                    Some('t') => out.push('\t'),
-                    Some('r') => out.push('\r'),
-                    Some('\\') => out.push('\\'),
-                    Some('0') => {
-                        // Octal
-                        let mut val = 0u8;
-                        for _ in 0..3 {
-                            if let Some(&d) = chars.peek() {
-                                if ('0'..='7').contains(&d) {
-                                    val = val * 8 + (d as u8 - b'0');
-                                    chars.next();
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                        out.push(val as char);
-                    }
-                    Some(ch) => {
-                        out.push('\\');
-                        out.push(ch);
-                    }
-                    None => out.push('\\'),
-                }
+                escape(&mut chars, false, &mut out);
             } else if c == '%' {
                 match chars.peek() {
                     Some('%') => {
@@ -163,8 +155,11 @@ fn format_string(fmt: &str, params: &[String]) -> String {
                                 }
                             }
                             'b' => {
-                                // %b — interpret backslash escapes in the argument
-                                out.push_str(&expand_escapes(param));
+                                // %b — interpret backslash escapes in the argument;
+                                // `\c` stops all further output.
+                                if escape_all(param, &mut out) {
+                                    return out.0;
+                                }
                             }
                             _ => {
                                 out.push('%');
@@ -182,31 +177,104 @@ fn format_string(fmt: &str, params: &[String]) -> String {
             break;
         }
     }
-    out
+    out.0
 }
 
-fn expand_escapes(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars();
+/// Expand every backslash escape in a `%b` argument. Returns true on `\c`.
+fn escape_all(s: &str, out: &mut Out) -> bool {
+    let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some('\\') => out.push('\\'),
-                Some('0') => {
-                    out.push('\0');
+        if c != '\\' {
+            out.push(c);
+        } else if escape(&mut chars, true, out) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Interpret one escape, `chars` positioned just after the backslash, the
+/// way bash's printf does. `in_b` selects `%b` rules: `\0` takes up to
+/// three more octal digits and `\c` stops output (returns true).
+fn escape(chars: &mut Peekable<Chars<'_>>, in_b: bool, out: &mut Out) -> bool {
+    let Some(c) = chars.next() else {
+        out.push('\\');
+        return false;
+    };
+    match c {
+        'n' => out.push('\n'),
+        't' => out.push('\t'),
+        'r' => out.push('\r'),
+        '\\' => out.push('\\'),
+        'c' if in_b => return true,
+        '0'..='7' => {
+            let mut val = c as u32 - '0' as u32;
+            let more = if in_b && c == '0' { 3 } else { 2 };
+            for _ in 0..more {
+                match chars.peek().and_then(|d| d.to_digit(8)) {
+                    Some(d) => {
+                        val = val * 8 + d;
+                        chars.next();
+                    }
+                    None => break,
                 }
-                Some(ch) => {
-                    out.push('\\');
-                    out.push(ch);
-                }
-                None => out.push('\\'),
             }
-        } else {
+            out.0.push(val as u8); // bash keeps the low byte: `\400` is NUL
+        }
+        'x' | 'u' | 'U' => {
+            let max = match c {
+                'x' => 2,
+                'u' => 4,
+                _ => 8,
+            };
+            let mut val = 0u32;
+            let mut n = 0;
+            while n < max {
+                match chars.peek().and_then(|d| d.to_digit(16)) {
+                    Some(d) => {
+                        val = val * 16 + d;
+                        chars.next();
+                        n += 1;
+                    }
+                    None => break,
+                }
+            }
+            if n == 0 {
+                out.push('\\');
+                out.push(c);
+            } else if c == 'x' {
+                out.0.push(val as u8);
+            } else if let Some(ch) = char::from_u32(val) {
+                // Unlike bash, surrogates and values past U+10FFFF are
+                // skipped rather than encoded as invalid UTF-8.
+                out.push(ch);
+            }
+        }
+        _ => {
+            out.push('\\');
             out.push(c);
         }
     }
-    out
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_string;
+
+    fn fmt(f: &str, args: &[&str]) -> Vec<u8> {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        format_string(f, &args)
+    }
+
+    #[test]
+    fn escapes_emit_raw_bytes() {
+        assert_eq!(fmt(r"\xff\200\x00\400\777", &[]), b"\xff\x80\0\0\xff");
+        assert_eq!(fmt("%b", &[r"\xff\0200\0"]), b"\xff\x80\0");
+    }
+
+    #[test]
+    fn unicode_escapes_skip_invalid_code_points() {
+        assert_eq!(fmt(r"\u0041\uD800\U110000\u00e9", &[]), "Aé".as_bytes());
+    }
 }
