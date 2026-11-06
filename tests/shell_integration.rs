@@ -443,6 +443,153 @@ shell_test!(
     }
 );
 
+// ── set -o / pipefail ───────────────────────────────────────────────
+
+expect!(pipefail_off_by_default, "false | true; echo $?", "0");
+expect!(pipefail_on, "set -o pipefail; false | true; echo $?", "1");
+expect!(
+    pipefail_middle_stage,
+    "set -o pipefail; true | false | true; echo $?",
+    "1"
+);
+expect!(
+    pipefail_rightmost_failure,
+    "f() { return $1; }; set -o pipefail; f 3 | f 4 | true; echo $?",
+    "4"
+);
+expect!(
+    pipefail_all_succeed,
+    "set -o pipefail; echo a | cat | cat; echo $?",
+    "a\n0"
+);
+expect!(
+    pipefail_turned_off,
+    "set -o pipefail; set +o pipefail; false | true; echo $?",
+    "0"
+);
+expect!(
+    pipefail_negated,
+    "set -o pipefail; ! false | true; echo $?; ! true | true; echo $?",
+    "0\n1"
+);
+expect!(
+    pipefail_compound_left,
+    "set -o pipefail; { false; } | true; echo $?; { exit 3; } | cat; echo $?",
+    "1\n3"
+);
+expect!(
+    pipefail_compound_left_off,
+    "{ false; } | true; echo $?",
+    "0"
+);
+expect!(
+    pipefail_in_command_substitution,
+    "set -o pipefail; echo $(false | true; echo $?) $({ false; } | cat; echo $?)",
+    "1 1"
+);
+expect!(
+    pipefail_if_condition,
+    "set -o pipefail; if false | true; then echo yes; else echo no; fi",
+    "no"
+);
+expect!(
+    pipefail_in_function,
+    "f() { false | true; }; set -o pipefail; f; echo $?",
+    "1"
+);
+expect!(
+    set_euo_pipefail_continues,
+    "set -euo pipefail; echo next",
+    "next"
+);
+shell_test!(
+    set_euo_pipefail_aborts_on_failed_pipeline,
+    "set -euo pipefail; false | true; echo unreachable",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+    }
+);
+expect!(
+    set_eo_pipefail_tested_failure,
+    "set -eo pipefail; false | true || echo caught; echo end",
+    "caught\nend"
+);
+expect!(
+    set_o_long_names,
+    "set -o errexit -o nounset -o xtrace 2>/dev/null; echo $-; set +o errexit +o nounset +o xtrace; echo \"[$-]\"",
+    "eux\n[]"
+);
+expect!(
+    set_o_name_after_cluster,
+    "set -oe pipefail; echo $-; false | true || echo failed",
+    "e\nfailed"
+);
+expect!(
+    set_o_then_positional,
+    "set -o pipefail a b; echo $# $1 $2",
+    "2 a b"
+);
+expect!(
+    set_o_lists_options,
+    "set -o pipefail; set -o",
+    "errexit        \toff\nnounset        \toff\npipefail       \ton\nxtrace         \toff"
+);
+expect!(
+    set_plus_o_lists_commands,
+    "set -u; set +o",
+    "set +o errexit\nset -o nounset\nset +o pipefail\nset +o xtrace"
+);
+shell_test!(
+    set_o_invalid_name,
+    "set -o bogus; echo \"st=$?\"",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout.trim(), "st=2");
+        assert!(
+            out.stderr
+                .contains("strands-shell: set: bogus: invalid option name"),
+            "stderr: {:?}",
+            out.stderr
+        );
+    }
+);
+expect!(
+    set_o_invalid_name_changes_nothing,
+    "set -eo bogus 2>/dev/null; echo \"[$-]\"; set -o pipefail; set +o pipefail -o bogus 2>/dev/null; false | true; echo $?",
+    "[]\n1"
+);
+shell_test!(
+    set_o_invalid_name_under_errexit,
+    "set -e; set -o bogus; echo unreachable",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert!(
+            out.stderr.contains("set: bogus: invalid option name"),
+            "stderr: {:?}",
+            out.stderr
+        );
+        assert_eq!(out.status, 2);
+    }
+);
+expect!(
+    set_flags_still_toggle,
+    "set -e; echo $-; set +e; set -u; echo $-; set +u; false; echo \"[$-]\"",
+    "e\nu\n[]"
+);
+expect!(
+    set_positional_still_works,
+    "set -- a b; echo $# $1 $2; set x y z; echo $#",
+    "2 a b\n3"
+);
+shell_test!(
+    set_no_args_still_lists_vars,
+    "FOO=bar; set",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert!(out.stdout.contains("FOO=bar\n"), "stdout: {:?}", out.stdout);
+        assert_eq!(out.status, 0);
+    }
+);
+
 // ── Semicolons and multiple commands ────────────────────────────────
 
 expect!(semicolons, "echo a; echo b; echo c", "a\nb\nc");
