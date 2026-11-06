@@ -465,6 +465,17 @@ fn expand_part_split<'a>(
                     segments.last_mut().unwrap().push(&val, splittable, false);
                 }
             }
+            WordPart::VarOp(name, op, word, colon) if op == "-" || op == "+" => {
+                if uses_alternate_word(proc, name, op, *colon) {
+                    for p in word {
+                        expand_part_split(os.clone(), proc, p, segments, ifs, quoted).await;
+                    }
+                } else if op == "-"
+                    && let Some(v) = resolve_var(proc, name)
+                {
+                    segments.last_mut().unwrap().push(&v, !quoted, false);
+                }
+            }
             WordPart::VarOp(..)
             | WordPart::Backtick(_)
             | WordPart::DollarParen(_)
@@ -484,8 +495,36 @@ fn expand_part_split<'a>(
                     expand_part_split(os.clone(), proc, p, segments, ifs, true).await;
                 }
             }
+            WordPart::ArrayLiteral(_) => refuse_array(proc),
         }
     })
+}
+
+/// Whether `${name-word}` or `${name+word}` expands to `word` rather than to the value.
+fn uses_alternate_word(proc: &Process, name: &str, op: &str, colon: bool) -> bool {
+    let is_unset_or_null = match resolve_var(proc, name) {
+        None => true,
+        Some(v) => colon && v.is_empty(),
+    };
+    is_unset_or_null == (op == "-")
+}
+
+/// The variable and value that `key=value` sets, where `key+=value` appends.
+fn assignment(proc: &Process, key: String, value: String) -> (String, String) {
+    match key.strip_suffix('+') {
+        Some(base) => {
+            let mut joined = proc.env.get(base).cloned().unwrap_or_default();
+            joined.push_str(&value);
+            (base.to_string(), joined)
+        }
+        None => (key, value),
+    }
+}
+
+/// Arrays parse so that a function body holding one defines as in bash; running one is refused.
+fn refuse_array(proc: &mut Process) {
+    proc.err_msg("strands-shell: arrays are not supported");
+    proc.nounset_error = true;
 }
 
 /// Perform IFS field splitting on a single segment.
@@ -1234,8 +1273,19 @@ fn resolve_var(proc: &Process, name: &str) -> Option<String> {
                 None
             }
         }
-        _ => proc.env.get(name).cloned(),
+        _ => match split_subscript(name) {
+            Some((base, "@" | "*" | "0")) => proc.env.get(base).cloned(),
+            Some(_) => None,
+            None => proc.env.get(name).cloned(),
+        },
     }
+}
+
+/// `name[subscript]` split in two, or `None` for a plain name.
+fn split_subscript(name: &str) -> Option<(&str, &str)> {
+    let open = name.find('[')?;
+    let inner = name[open + 1..].strip_suffix(']')?;
+    Some((&name[..open], inner))
 }
 
 /// Check nounset: if `set -u` is active and the variable is unset, print error and set flag.
@@ -1250,7 +1300,7 @@ fn check_nounset(proc: &mut Process, name: &str) -> bool {
         n if n.len() == 1 && n.as_bytes()[0].is_ascii_digit() => return false,
         _ => {}
     }
-    if proc.env.get(name).is_none() {
+    if resolve_var(proc, name).is_none() {
         proc.err_msg(&format!("strands-shell: {name}: parameter not set"));
         proc.nounset_error = true;
         return true;
@@ -1283,7 +1333,10 @@ fn expand_part<'a>(
                 };
                 match op.as_str() {
                     "len" => {
-                        let len = val.as_deref().unwrap_or("").len();
+                        let len = match split_subscript(name) {
+                            Some((_, "@" | "*")) => usize::from(val.is_some()),
+                            _ => val.as_deref().unwrap_or("").len(),
+                        };
                         out.push_str(&len.to_string());
                     }
                     "-" => {
@@ -1376,8 +1429,18 @@ fn expand_part<'a>(
                     expand_part(os.clone(), proc, p, out).await;
                 }
             }
+            WordPart::ArrayLiteral(_) => refuse_array(proc),
         }
     })
+}
+
+/// A stdin channel that yields `text` and then ends.
+fn text_reader(text: String) -> tokio::sync::mpsc::Receiver<bytes::Bytes> {
+    let (tx, rx) = os::pipe(1);
+    if !text.is_empty() {
+        let _ = tx.try_send(bytes::Bytes::from(text.into_bytes()));
+    }
+    rx
 }
 
 /// Pattern trimming for ${var%pat}, ${var%%pat}, ${var#pat}, ${var##pat}.
@@ -1894,6 +1957,20 @@ async fn run_capturing_status(
                     proc.set_function(name, body.clone());
                     (0, String::new())
                 }
+                Item::PipelineIntoCompound {
+                    head,
+                    compound,
+                    negated,
+                } => {
+                    Box::pin(capture_pipeline_into_compound(
+                        os.clone(),
+                        proc,
+                        head,
+                        compound,
+                        *negated,
+                    ))
+                    .await
+                }
                 Item::CompoundRedirect { item, redirects } => {
                     let mut expanded = Vec::new();
                     for redir in redirects {
@@ -1977,6 +2054,62 @@ async fn run_capturing_status(
         }
     }
     (output, Ok(last_exit))
+}
+
+/// Run `head | compound` and capture the compound's stdout.
+async fn capture_pipeline_into_compound(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    head: &[parser::Command],
+    compound: &Item,
+    negated: bool,
+) -> (i32, String) {
+    let (_, input) = execute_pipeline_capture(os.clone(), proc, head).await;
+    let mut sub = proc.fork();
+    sub.depth += 1;
+    if let Some(msg) = sub.check_limits() {
+        sub.err_msg(msg);
+        return (1, String::new());
+    }
+    sub.set_channel_reader(STDIN, text_reader(input));
+    let compound_cl = vec![(compound.clone(), None)];
+    let (s, result) = run_capturing_status(os, &mut sub, &compound_cl).await;
+    let mut exit = captured_status(result, sub.last_exit);
+    if negated {
+        exit = if exit == 0 { 1 } else { 0 };
+    }
+    (exit, s)
+}
+
+/// Run `head | compound`: the head runs to its end, then the compound reads its output in a fork.
+async fn execute_pipeline_into_compound(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    head: &[parser::Command],
+    compound: &Item,
+    negated: bool,
+) -> Result<i32, ControlFlow> {
+    let (_, input) = execute_pipeline_capture(os.clone(), proc, head).await;
+    let mut sub = proc.fork();
+    sub.depth += 1;
+    if let Some(msg) = sub.check_limits() {
+        sub.err_msg(msg);
+        return Ok(1);
+    }
+    sub.set_channel_reader(STDIN, text_reader(input));
+    let r = execute_item(os, &mut sub, compound).await;
+    if proc.capture {
+        proc.captured_output.push_str(&sub.captured_output);
+        proc.captured_stderr.push_str(&sub.captured_stderr);
+    }
+    let mut exit = match r {
+        Ok(n) | Err(ControlFlow::Exit(n)) => n,
+        Err(e) => return Err(e),
+    };
+    if negated {
+        exit = if exit == 0 { 1 } else { 0 };
+    }
+    Ok(exit)
 }
 
 /// Inner execute that propagates ControlFlow.
@@ -2101,6 +2234,16 @@ async fn execute_item(
         Item::Function { name, body } => {
             proc.set_function(name, body.clone());
             Ok(0)
+        }
+        Item::PipelineIntoCompound {
+            head,
+            compound,
+            negated,
+        } => {
+            Box::pin(execute_pipeline_into_compound(
+                os, proc, head, compound, *negated,
+            ))
+            .await
         }
         Item::CompoundPipeline {
             compound,
@@ -2886,10 +3029,9 @@ async fn run_pipeline(
         expanded_args.push(expand_words(os.clone(), shell_proc, &cmd.args).await);
         let mut env = Vec::new();
         for (k, v) in &cmd.env {
-            env.push((
-                expand_word(os.clone(), shell_proc, k).await,
-                expand_word(os.clone(), shell_proc, v).await,
-            ));
+            let key = expand_word(os.clone(), shell_proc, k).await;
+            let value = expand_word(os.clone(), shell_proc, v).await;
+            env.push(assignment(shell_proc, key, value));
         }
         expanded_env.push(env);
         let mut redirs = Vec::new();
