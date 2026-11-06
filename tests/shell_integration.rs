@@ -4164,6 +4164,67 @@ expect!(
     "echo '{\"x\":1}' > /tmp/jq1.json; jq '.x' /tmp/jq1.json",
     "1"
 );
+expect!(
+    jq_arg_string,
+    "x=bob; echo '{\"name\":\"bob\"}' | jq --arg n \"$x\" '.name == $n'",
+    "true"
+);
+expect!(
+    jq_arg_after_filter,
+    "echo '{\"name\":\"bob\"}' | jq '.name == $n' --arg n bob",
+    "true"
+);
+expect!(
+    jq_arg_is_string,
+    "jq -n --arg v 1 '$v | type'",
+    "\"string\""
+);
+expect!(
+    jq_arg_dash_value,
+    "jq -n -r --arg v -x --arg w --y '$v + $w'",
+    "-x--y"
+);
+expect!(
+    jq_argjson_object,
+    "jq -n --argjson v '{\"a\":1}' '$v.a'",
+    "1"
+);
+expect!(
+    jq_arg_multiple,
+    "jq -n -c --arg a x --argjson b '[1,2]' '[$a, $b]'",
+    "[\"x\",[1,2]]"
+);
+expect!(jq_arg_first_wins, "jq -n --arg a 1 --arg a 2 '$a'", "\"1\"");
+expect!(
+    jq_arg_in_def,
+    "jq -n -r --arg a x 'def f: $a + \"y\"; f'",
+    "xy"
+);
+expect!(
+    jq_args_named,
+    "jq -n -c --arg a x --argjson b 2 '$ARGS'",
+    "{\"named\":{\"a\":\"x\",\"b\":2},\"positional\":[]}"
+);
+shell_test!(
+    jq_argjson_invalid,
+    "jq -n --argjson v '{bad' '$v'",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.stderr, "jq: invalid JSON text passed to --argjson\n");
+        assert_eq!(out.status, 2);
+    }
+);
+shell_test!(
+    jq_arg_missing_value,
+    "jq -n --arg v",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(
+            out.stderr,
+            "jq: --arg takes two parameters (e.g. --arg varname value)\n"
+        );
+        assert_eq!(out.status, 2);
+    }
+);
 
 // ── sed uncovered paths ───────────────────────────────────────────
 expect!(sed_quit, "printf 'a\\nb\\nc\\n' | sed '2q'", "a\nb");
