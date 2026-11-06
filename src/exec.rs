@@ -189,6 +189,7 @@ async fn run_script(
 /// Execute a full input line. `proc` is the shell's process — cd modifies it.
 /// Returns (exit_code, should_exit).
 pub async fn execute(os: Arc<dyn Kernel>, proc: &mut Process, input: &str) -> (i32, bool) {
+    proc.pending_exit = false;
     let result = if proc.max_input > 0 && input.len() > proc.max_input {
         proc.err_msg("strands-shell: input too large");
         (1, false)
@@ -229,6 +230,8 @@ pub async fn execute_with_reader(
     input: &str,
     read_line: &mut dyn FnMut(&str) -> Option<String>,
 ) -> (i32, bool) {
+    // Never carry a function's pending exit into a new top-level command.
+    proc.pending_exit = false;
     if proc.max_input > 0 && input.len() > proc.max_input {
         proc.err_msg("strands-shell: input too large");
         return (1, false);
@@ -1692,7 +1695,7 @@ async fn run_capturing_status(
     let mut last_exit = 0;
     let mut skip = false;
     let mut flow = None;
-    for (i, (item, _connector)) in command_line.iter().enumerate() {
+    for (i, (item, connector)) in command_line.iter().enumerate() {
         if i > 0 {
             match &command_line[i - 1].1 {
                 Some(Connector::And) => skip = last_exit != 0,
@@ -1717,7 +1720,13 @@ async fn run_capturing_status(
                 Item::Pipeline(pipeline, negated) => {
                     let (mut exit, out) =
                         execute_pipeline_capture(os.clone(), proc, pipeline).await;
-                    if *negated {
+                    // A background job runs here in the foreground, but its exit
+                    // must not end the substitution.
+                    if std::mem::take(&mut proc.pending_exit)
+                        && !matches!(connector, Some(Connector::Background))
+                    {
+                        flow = Some(ControlFlow::Exit(exit));
+                    } else if *negated {
                         exit = if exit == 0 { 1 } else { 0 };
                     }
                     (exit, out)
@@ -1883,6 +1892,8 @@ async fn run_capturing_status(
                     tasks.own(&handle);
                     proc.set_channel_reader(0, rx);
                     let (mut exit, out) = execute_pipeline_capture(os.clone(), proc, tail).await;
+                    // The tail is a pipeline stage, so `exit` in it ends only that stage.
+                    proc.pending_exit = false;
                     let _ = handle.await;
                     proc.close(0);
                     if *negated {
@@ -2127,6 +2138,8 @@ async fn execute_item(
             // Set stdin on proc so the tail pipeline inherits it.
             proc.set_channel_reader(0, rx);
             let mut exit = execute_pipeline(os, proc, tail).await;
+            // The tail is a pipeline stage, so `exit` in it ends only that stage.
+            proc.pending_exit = false;
             let _ = handle.await;
             proc.close(0);
             if *negated {
@@ -2732,6 +2745,7 @@ async fn execute_pipeline_checked(
                         redirects: pipeline[0].redirects.clone(),
                     };
                     let exit = execute_pipeline(os, proc, &[fake_cmd]).await;
+                    proc.pending_exit = false;
                     return Err(ControlFlow::Exit(exit));
                 }
                 "command" => {
@@ -2781,15 +2795,18 @@ async fn execute_pipeline_checked(
                         args: pipeline[0].args[1..].to_vec(),
                         redirects: pipeline[0].redirects.clone(),
                     };
-                    return Ok(execute_pipeline(os, proc, &[fake_cmd]).await);
+                    let exit = execute_pipeline(os, proc, &[fake_cmd]).await;
+                    proc.pending_exit = false;
+                    return Ok(exit);
                 }
                 _ => {}
             }
         }
     }
     let exit = execute_pipeline(os, proc, pipeline).await;
-    // nounset errors are fatal — abort the shell
-    if proc.nounset_error {
+    // nounset errors and `exit` inside a function are fatal — abort the shell
+    let function_exited = std::mem::take(&mut proc.pending_exit);
+    if proc.nounset_error || function_exited {
         proc.nounset_error = false;
         return Err(ControlFlow::Exit(exit));
     }
@@ -3119,10 +3136,8 @@ async fn run_pipeline(
                 Ok(code) => code,
                 Err(ControlFlow::Return(code)) => code,
                 Err(ControlFlow::Exit(code)) => {
-                    shell_proc.depth -= 1;
-                    shell_proc.pop_local_scope();
-                    shell_proc.args = saved_args;
-                    return (code, String::new());
+                    shell_proc.pending_exit = true;
+                    code
                 }
                 Err(_) => shell_proc.last_exit,
             };

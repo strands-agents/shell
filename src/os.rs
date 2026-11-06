@@ -145,6 +145,8 @@ pub struct Process {
     pub opt_xtrace: bool,
     /// Set when a nounset error occurs during expansion.
     pub nounset_error: bool,
+    /// Set when `exit` ran inside a function called by a single-command pipeline.
+    pub pending_exit: bool,
     /// PID of last background job (for $!).
     pub last_bg_pid: Option<u32>,
     /// Background job handles.
@@ -323,6 +325,7 @@ impl Process {
             opt_nounset: false,
             opt_xtrace: false,
             nounset_error: false,
+            pending_exit: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
@@ -365,6 +368,7 @@ impl Process {
             opt_nounset: false,
             opt_xtrace: false,
             nounset_error: false,
+            pending_exit: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
@@ -447,6 +451,7 @@ impl Process {
             opt_nounset: self.opt_nounset,
             opt_xtrace: self.opt_xtrace,
             nounset_error: false,
+            pending_exit: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
