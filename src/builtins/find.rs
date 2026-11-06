@@ -369,6 +369,7 @@ pub fn builtin_find<'a>(
 
         let default_print = !has_action(&expr);
         let mut w = io::stdout()?;
+        let mut ew = io::stderr().ok();
         let mut exec_plus_matches: Vec<String> = Vec::new();
         let mut exec_plus_cmd: Option<Vec<String>> = None;
 
@@ -377,6 +378,7 @@ pub fn builtin_find<'a>(
                 os,
                 proc,
                 &mut w,
+                &mut ew,
                 start_path,
                 &expr,
                 max_depth,
@@ -409,6 +411,9 @@ pub fn builtin_find<'a>(
             let mut sub = exec_fork(proc);
             let _ = Box::pin(crate::exec::execute(os_arc, &mut sub, &line)).await;
             w.write_all(sub.captured_output.as_bytes()).await?;
+            if let Some(ew) = ew.as_mut() {
+                ew.write_all(sub.captured_stderr.as_bytes()).await?;
+            }
         }
 
         Ok(0)
@@ -419,6 +424,7 @@ fn walk<'a>(
     os: &'a dyn Kernel,
     proc: &'a mut Process,
     w: &'a mut crate::os::FdWriter,
+    ew: &'a mut Option<crate::os::FdWriter>,
     path: &'a str,
     expr: &'a Expr,
     max_depth: Option<usize>,
@@ -448,7 +454,17 @@ fn walk<'a>(
             let (matched, has_act) = eval_expr(expr, path, name, &st, is_empty_dir);
             if matched {
                 if has_act {
-                    do_actions(os, proc, w, expr, path, exec_plus_matches, exec_plus_cmd).await?;
+                    do_actions(
+                        os,
+                        proc,
+                        w,
+                        ew,
+                        expr,
+                        path,
+                        exec_plus_matches,
+                        exec_plus_cmd,
+                    )
+                    .await?;
                 } else if default_print {
                     w.write_all(path.as_bytes()).await?;
                     w.write_all(b"\n").await?;
@@ -475,6 +491,7 @@ fn walk<'a>(
                         os,
                         proc,
                         w,
+                        ew,
                         &child,
                         expr,
                         max_depth,
@@ -492,10 +509,12 @@ fn walk<'a>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn do_actions<'a>(
     os: &'a dyn Kernel,
     proc: &'a mut Process,
     w: &'a mut crate::os::FdWriter,
+    ew: &'a mut Option<crate::os::FdWriter>,
     expr: &'a Expr,
     path: &'a str,
     exec_plus_matches: &'a mut Vec<String>,
@@ -535,14 +554,27 @@ fn do_actions<'a>(
                     let mut sub = exec_fork(proc);
                     let _ = Box::pin(crate::exec::execute(os_arc, &mut sub, &line)).await;
                     w.write_all(sub.captured_output.as_bytes()).await?;
+                    if let Some(ew) = ew.as_mut() {
+                        ew.write_all(sub.captured_stderr.as_bytes()).await?;
+                    }
                 }
             }
             Expr::And(a, b) | Expr::Or(a, b) => {
-                do_actions(os, proc, w, a, path, exec_plus_matches, exec_plus_cmd).await?;
-                do_actions(os, proc, w, b, path, exec_plus_matches, exec_plus_cmd).await?;
+                do_actions(os, proc, w, ew, a, path, exec_plus_matches, exec_plus_cmd).await?;
+                do_actions(os, proc, w, ew, b, path, exec_plus_matches, exec_plus_cmd).await?;
             }
             Expr::Not(inner) => {
-                do_actions(os, proc, w, inner, path, exec_plus_matches, exec_plus_cmd).await?;
+                do_actions(
+                    os,
+                    proc,
+                    w,
+                    ew,
+                    inner,
+                    path,
+                    exec_plus_matches,
+                    exec_plus_cmd,
+                )
+                .await?;
             }
             _ => {}
         }

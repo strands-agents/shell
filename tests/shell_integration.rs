@@ -4064,6 +4064,66 @@ expect!(
     "a\nb"
 );
 
+// ── find -exec forwards the child's stderr ──────────────────────────
+
+const FIND_CAT_NOPE: &str = "strands-shell: cat: no such file or directory: /nope\n";
+
+expect_streams!(
+    find_exec_child_stderr_forwarded,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\;",
+    "",
+    FIND_CAT_NOPE
+);
+expect_streams!(
+    find_exec_plus_child_stderr_forwarded,
+    "echo x > /tmp/fes; find /tmp/fes -exec nosuchcmd {} +",
+    "",
+    "strands-shell: nosuchcmd: command not found\n"
+);
+expect_streams!(
+    find_exec_command_not_found_reported,
+    "echo x > /tmp/fes; find /tmp/fes -exec nosuchcmd \\;",
+    "",
+    "strands-shell: nosuchcmd: command not found\n"
+);
+expect_streams!(
+    find_exec_child_stderr_to_dev_null,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\; 2>/dev/null; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    find_exec_plus_child_stderr_to_dev_null,
+    "echo x > /tmp/fes; find /tmp/fes -exec nosuchcmd {} + 2>/dev/null; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    find_exec_child_stderr_to_file,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\; 2>/tmp/fes_err; cat /tmp/fes_err",
+    FIND_CAT_NOPE,
+    ""
+);
+expect_streams!(
+    find_exec_child_stderr_keeps_order_across_execs,
+    "mkdir /tmp/feo; echo x > /tmp/feo/a; echo y > /tmp/feo/b; \
+     o=$(find /tmp/feo -type f -exec cat {} \\; -exec cat /nope \\; 2>&1); echo \"$o\"",
+    format!("x\n{FIND_CAT_NOPE}y\n{FIND_CAT_NOPE}"),
+    ""
+);
+expect_streams!(
+    find_exec_child_stderr_merged_into_pipe,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\; 2>&1 | grep -c nope",
+    "1\n",
+    ""
+);
+expect_streams!(
+    find_exec_child_stdout_unaffected,
+    "echo hi > /tmp/fes; find /tmp/fes -exec cat {} \\;",
+    "hi\n",
+    ""
+);
+
 // ── printf additional format specifiers ───────────────────────────
 shell_test!(
     printf_width_precision,
