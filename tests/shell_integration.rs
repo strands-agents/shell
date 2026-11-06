@@ -4714,6 +4714,125 @@ expect!(
     "{ echo a; } >/missing/dir/out; echo $?",
     "1"
 );
+
+// A redirect on a group delivers both of its streams.
+expect_output!(
+    group_stderr_dup_to_stdout,
+    "{ echo out; echo err >&2; } 2>&1",
+    "out\nerr\n",
+    "",
+    0
+);
+expect_output!(
+    group_stderr_to_file,
+    "{ echo out; echo err >&2; } 2>/tmp/e; cat /tmp/e",
+    "out\nerr\n",
+    "",
+    0
+);
+expect_output!(
+    group_stderr_to_dev_null_keeps_stdout,
+    "{ echo out; echo err >&2; } 2>/dev/null",
+    "out\n",
+    "",
+    0
+);
+expect_output!(
+    group_stdout_to_file_keeps_stderr,
+    "{ echo out; echo err >&2; } >/tmp/o; cat /tmp/o",
+    "out\n",
+    "err\n",
+    0
+);
+expect_output!(
+    group_redirects_apply_in_order,
+    "{ echo out; echo err >&2; } 2>&1 >/tmp/o; cat /tmp/o",
+    "err\nout\n",
+    "",
+    0
+);
+expect_output!(
+    group_both_streams_to_one_file,
+    "{ echo out; echo err >&2; } >/tmp/o 2>&1; cat /tmp/o",
+    "out\nerr\n",
+    "",
+    0
+);
+expect_output!(
+    group_stdout_dup_to_stderr,
+    "{ echo out; } >&2",
+    "",
+    "out\n",
+    0
+);
+expect_output!(
+    group_builtin_diagnostic_follows_stderr_redirect,
+    "{ cd /nope; } 2>/dev/null; echo $?",
+    "1\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_captures_group_stderr_dup,
+    "X=$({ echo out; cd /nope; } 2>&1); case \"$X\" in out?*cd*/nope*) echo yes;; esac",
+    "yes\n",
+    "",
+    0
+);
+expect_output!(
+    group_many_stderr_lines_to_stdout_keep_order,
+    "{ i=0; while [ $i -lt 300 ]; do echo e$i >&2; i=$((i+1)); done; } 2>&1 | tail -2",
+    "e298\ne299\n",
+    "",
+    0
+);
+
+#[test]
+fn group_redirects_from_cli() {
+    let dir = TestDir::new("group_redirect_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("{ echo out; echo err >&2; } 2>&1 >/tmp/o; { echo kept; echo gone >&2; } 2>/dev/null; { echo file; echo shown >&2; } >/tmp/f; cat /tmp/o /tmp/f")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "err\nkept\nout\nfile\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "shown\n");
+    assert!(out.status.success());
+}
+
+// Command substitution runs special builtins as a direct command does.
+expect_output!(
+    cmd_subst_captures_eval,
+    "X=$(eval 'echo a; echo b'); echo \"[$X]\"",
+    "[a\nb]\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_captures_source,
+    "echo 'echo sourced' > /tmp/s.sh; X=$(. /tmp/s.sh); echo \"[$X]\"",
+    "[sourced]\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_captures_command,
+    "X=$(command echo hi); echo \"[$X]\"",
+    "[hi]\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_eval_exit_stops_substitution,
+    "X=$(eval 'exit 3'; echo no); echo \"[$X]\"",
+    "[]\n",
+    "",
+    0
+);
 expect!(
     cmd_subst_exit_in_if_condition,
     "X=$(if exit 3; then echo yes; else echo no; fi; echo after); echo \"[$X]\"",
