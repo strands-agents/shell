@@ -1,14 +1,88 @@
 use crate::os::FileStat;
 use crate::prelude::*;
 
-const HELP: &str = "Usage: ls [-laR1] [FILE]...
+const HELP: &str = "Usage: ls [-laR1hrSt] [FILE]...
 List directory contents.
 
 Options:
   -l    long listing format
   -a    include entries starting with .
   -R    list subdirectories recursively
-  -1    one entry per line (default when not a terminal)";
+  -1    one entry per line (default when not a terminal)
+  -h, --human-readable  with -l, print sizes like 1K 234M 2G
+  -r, --reverse         reverse order while sorting
+  -S    sort by file size, largest first
+  -t    sort by modification time, newest first";
+
+#[derive(Clone, Copy, PartialEq)]
+enum SortBy {
+    Name,
+    Time,
+    Size,
+}
+
+struct Opts {
+    long: bool,
+    show_all: bool,
+    recursive: bool,
+    human: bool,
+    sort: SortBy,
+    reverse: bool,
+}
+
+/// Format a size like GNU `ls -lh`: powers of 1024, rounded up, with one
+/// decimal place when the scaled value is below 10.
+fn human_size(len: u64) -> String {
+    const BASE: u64 = 1024;
+    const SUFFIXES: &[char] = &['K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y'];
+    if len < BASE {
+        return len.to_string();
+    }
+    let mut amt = len;
+    let mut tenths = 0;
+    // Set when the value lost bits below the tenths digit.
+    let mut inexact = false;
+    let mut exp = 0;
+    while amt >= BASE && exp < SUFFIXES.len() {
+        let r10 = (amt % BASE) * 10 + tenths;
+        inexact |= !r10.is_multiple_of(BASE);
+        amt /= BASE;
+        tenths = r10 / BASE;
+        exp += 1;
+    }
+    let mut frac = String::new();
+    if amt < 10 {
+        if inexact {
+            tenths += 1;
+            inexact = false;
+            if tenths == 10 {
+                amt += 1;
+                tenths = 0;
+            }
+        }
+        if amt < 10 {
+            frac = format!(".{}", tenths);
+            tenths = 0;
+        }
+    }
+    if tenths > 0 || inexact {
+        amt += 1;
+        if amt == BASE && exp < SUFFIXES.len() {
+            exp += 1;
+            amt = 1;
+            frac = ".0".into();
+        }
+    }
+    format!("{}{}{}", amt, frac, SUFFIXES[exp - 1])
+}
+
+fn format_size(len: u64, human: bool) -> String {
+    if human {
+        human_size(len)
+    } else {
+        len.to_string()
+    }
+}
 
 fn format_mode(mode: u32) -> String {
     let mut s = String::with_capacity(10);
@@ -97,14 +171,41 @@ async fn list_one(
     w: &mut crate::os::FdWriter,
     path: &str,
     name_prefix: &str,
-    long: bool,
-    show_all: bool,
-    recursive: bool,
+    opts: &Opts,
     multi: bool,
     now: &std::time::SystemTime,
 ) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
+    let Opts {
+        long,
+        show_all,
+        recursive,
+        human,
+        sort,
+        reverse,
+    } = *opts;
     let mut entries = io::list_dir(os, path).await?;
     entries.sort_by(|a, b| a.name.cmp(&b.name));
+    if sort != SortBy::Name {
+        let mut keyed = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let full = if path == "." {
+                entry.name.clone()
+            } else {
+                format!("{}/{}", path, entry.name)
+            };
+            let st = io::lstat(os, &full).await;
+            keyed.push((st.modified, st.len, entry));
+        }
+        // Stable sort keeps name order for ties.
+        keyed.sort_by(|a, b| match sort {
+            SortBy::Time => b.0.cmp(&a.0),
+            _ => b.1.cmp(&a.1),
+        });
+        entries = keyed.into_iter().map(|(_, _, e)| e).collect();
+    }
+    if reverse {
+        entries.reverse();
+    }
 
     if multi {
         wprintln!(w, "{}:", name_prefix)?;
@@ -134,7 +235,7 @@ async fn list_one(
                 w,
                 "{} {:>8} {} {}{}",
                 format_mode(st.mode),
-                st.len,
+                format_size(st.len, human),
                 format_time(&st, now),
                 entry.name,
                 link
@@ -153,10 +254,7 @@ async fn list_one(
     }
     for (sub_path, sub_name) in subdirs {
         wprintln!(w)?;
-        Box::pin(list_one(
-            os, w, &sub_path, &sub_name, long, show_all, recursive, true, now,
-        ))
-        .await?;
+        Box::pin(list_one(os, w, &sub_path, &sub_name, opts, true, now)).await?;
     }
     Ok(0)
 }
@@ -167,6 +265,9 @@ async fn cmd_ls(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut long = false;
     let mut show_all = false;
     let mut recursive = false;
+    let mut human = false;
+    let mut sort = SortBy::Name;
+    let mut reverse = false;
     let mut paths = Vec::new();
     while let Some(arg) = parser.next()? {
         match arg {
@@ -174,7 +275,11 @@ async fn cmd_ls(os: &dyn Kernel, args: &[String]) -> CommandResult {
             Short('a') => show_all = true,
             Short('R') => recursive = true,
             Short('1') => {} // already one-per-line
-            Short('h') | Long("help") => {
+            Short('h') | Long("human-readable") => human = true,
+            Short('r') | Long("reverse") => reverse = true,
+            Short('S') => sort = SortBy::Size,
+            Short('t') => sort = SortBy::Time,
+            Long("help") => {
                 let mut w = io::stdout()?;
                 wprintln!(w, "{}", HELP)?;
                 return Ok(0);
@@ -187,6 +292,14 @@ async fn cmd_ls(os: &dyn Kernel, args: &[String]) -> CommandResult {
         paths.push(".".into());
     }
     let multi = paths.len() > 1 || recursive;
+    let opts = Opts {
+        long,
+        show_all,
+        recursive,
+        human,
+        sort,
+        reverse,
+    };
     let now = os.now();
     let mut w = io::stdout()?;
     let mut code = 0;
@@ -211,11 +324,7 @@ async fn cmd_ls(os: &dyn Kernel, args: &[String]) -> CommandResult {
             lst.is_dir
         };
         if is_dir_target && !(long && lst.is_symlink) {
-            if let Err(err) = list_one(
-                os, &mut w, path, path, long, show_all, recursive, multi, &now,
-            )
-            .await
-            {
+            if let Err(err) = list_one(os, &mut w, path, path, &opts, multi, &now).await {
                 let mut e = io::stderr()?;
                 wprintln!(e, "ls: {}: {}", path, err)?;
                 code = 2;
@@ -233,7 +342,7 @@ async fn cmd_ls(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 w,
                 "{} {:>8} {} {}{}",
                 format_mode(lst.mode),
-                lst.len,
+                format_size(lst.len, human),
                 format_time(&lst, &now),
                 path,
                 link
@@ -243,4 +352,42 @@ async fn cmd_ls(os: &dyn Kernel, args: &[String]) -> CommandResult {
         }
     }
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::human_size;
+
+    #[test]
+    fn human_size_matches_gnu() {
+        // Expected values from GNU coreutils `ls -lh`.
+        let cases: &[(u64, &str)] = &[
+            (0, "0"),
+            (999, "999"),
+            (1000, "1000"),
+            (1023, "1023"),
+            (1024, "1.0K"),
+            (1025, "1.1K"),
+            (1536, "1.5K"),
+            (10239, "10K"),
+            (10240, "10K"),
+            (10241, "11K"),
+            (104857, "103K"),
+            (1022976, "999K"),
+            (1022977, "1000K"),
+            (1047552, "1023K"),
+            (1047553, "1.0M"),
+            (1048575, "1.0M"),
+            (1048576, "1.0M"),
+            (5000000, "4.8M"),
+            (10485759, "10M"),
+            (10485760, "10M"),
+            (1073741824, "1.0G"),
+            (1610612736, "1.5G"),
+            (1099511627776, "1.0T"),
+        ];
+        for &(len, want) in cases {
+            assert_eq!(human_size(len), want, "size {}", len);
+        }
+    }
 }
