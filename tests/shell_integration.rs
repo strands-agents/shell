@@ -7310,6 +7310,36 @@ fn builder_bind_direct_readonly_host() {
     }));
 }
 
+// Uses std::os::unix::fs::symlink to plant a host symlink
+#[cfg(unix)]
+#[test]
+fn ln_force_keeps_direct_bind_files_when_linking_fails() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_ln_force_direct");
+        std::fs::write(dir.join("old"), "old").unwrap();
+        std::fs::write(dir.join("plain"), "plain").unwrap();
+        std::os::unix::fs::symlink("old", dir.join("link")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/w")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("cd /mnt/w; ln -sf missing link; ln -sf missing plain")
+            .await;
+        assert_ne!(out.status, 0);
+        let out = shell.run("cd /mnt/w; ln -sf plain old").await;
+        assert_ne!(out.status, 0);
+        assert!(!out.stderr.contains("same file"), "{}", out.stderr);
+        assert_eq!(std::fs::read_to_string(dir.join("old")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(dir.join("plain")).unwrap(), "plain");
+        assert_eq!(
+            std::fs::read_link(dir.join("link")).unwrap().to_str(),
+            Some("old")
+        );
+    }));
+}
+
 #[test]
 fn bind_direct_write_lands_before_the_status() {
     let (rt, local) = rt();
@@ -8837,6 +8867,78 @@ expect_status!(
     symlink_loop_error,
     "ln -s /tmp/a /tmp/b && ln -s /tmp/b /tmp/a && cat /tmp/a",
     1
+);
+expect_output!(
+    ln_force_replaces_only_the_link,
+    "cd /tmp && echo old > old && echo new > new && ln -s old l && ln -sf new l && readlink l && cat old",
+    "new\nold\n",
+    "",
+    0
+);
+expect!(
+    ln_force_replaces_a_file,
+    "cd /tmp && echo a > a && echo b > b && ln -sf a b && readlink b && cat b",
+    "a\na"
+);
+expect!(
+    ln_force_long_option,
+    "cd /tmp && echo a > a && echo b > b && ln -s --force a b && readlink b",
+    "a"
+);
+expect!(
+    ln_force_missing_destination,
+    "cd /tmp && ln -sf a fresh && readlink fresh",
+    "a"
+);
+expect_output!(
+    ln_without_force_keeps_destination,
+    "cd /tmp && echo b > b && ln -s a b; echo $?; cat b",
+    "1\nb\n",
+    "strands-shell: ln: b: already exists\n",
+    0
+);
+expect!(
+    ln_into_directory,
+    "cd /tmp && mkdir d && ln -s ../a d && readlink d/a && ln -sf ../b d/ && readlink d/b",
+    "../a\n../b"
+);
+expect!(
+    ln_force_through_symlink_to_directory,
+    "cd /tmp && mkdir d && ln -s d ld && ln -sf a ld && readlink ld && readlink d/a",
+    "d\na"
+);
+expect!(
+    ln_force_replaces_link_inside_directory,
+    "cd /tmp && mkdir d && ln -s a d/a && ln -sf b d/a && ln -sf b d && readlink d/b",
+    "b"
+);
+expect_output!(
+    ln_force_same_file,
+    "cd /tmp && echo a > a && ln -sf ./a a; echo $?; ln -f a a; echo $?; cat a",
+    "1\n1\na\n",
+    "strands-shell: ln: './a' and 'a' are the same file\nstrands-shell: ln: 'a' and 'a' are the same file\n",
+    0
+);
+expect_output!(
+    ln_force_trailing_slash_keeps_file,
+    "cd /tmp && printf 'B\\n' > b && ln -s b bl && ln -sf a b/; echo $?; ln -sf a bl/; echo $?; cat b; readlink bl",
+    "1\n1\nB\nb\n",
+    "strands-shell: ln: failed to access 'b/': Not a directory\nstrands-shell: ln: failed to access 'bl/': Not a directory\n",
+    0
+);
+expect_output!(
+    ln_trailing_slash_missing_destination,
+    "cd /tmp && ln -sf a nx/; echo $?; test -e nx || echo absent",
+    "1\nabsent\n",
+    "strands-shell: ln: failed to create symbolic link 'nx/': No such file or directory\n",
+    0
+);
+expect_output!(
+    ln_force_refuses_directory,
+    "cd /tmp && mkdir -p h/a && ln -sf a h; echo $?",
+    "1\n",
+    "strands-shell: ln: h/a: cannot overwrite directory\n",
+    0
 );
 
 // ── VFS canonicalize ────────────────────────────────────────────────
