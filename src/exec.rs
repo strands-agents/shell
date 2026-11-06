@@ -3320,7 +3320,7 @@ async fn run_pipeline(
             let stdout_drain = if capture {
                 Drain::Capture(tokio::task::spawn_local(async move {
                     let mut reader = FdReader::from_receiver(out_rx);
-                    os::read_to_string_limited(&mut reader, max_output)
+                    os::read_to_string_lossy_limited(&mut reader, max_output)
                         .await
                         .unwrap_or_default()
                 }))
@@ -3343,7 +3343,7 @@ async fn run_pipeline(
             let stderr_drain = if capture {
                 Drain::Capture(tokio::task::spawn_local(async move {
                     let mut reader = FdReader::from_receiver(err_rx);
-                    os::read_to_string_limited(&mut reader, max_output)
+                    os::read_to_string_lossy_limited(&mut reader, max_output)
                         .await
                         .unwrap_or_default()
                 }))
@@ -3693,7 +3693,7 @@ async fn run_pipeline(
     let stdout_drain = if capture {
         let handle = tokio::spawn(async move {
             let mut reader = FdReader::from_receiver(last_rx);
-            os::read_to_string_limited(&mut reader, max_output)
+            os::read_to_string_lossy_limited(&mut reader, max_output)
                 .await
                 .unwrap_or_default()
         });
@@ -3734,7 +3734,7 @@ async fn run_pipeline(
                 let mut reader = FdReader::from_receiver(rx);
                 if capture {
                     all.push_str(
-                        &os::read_to_string_limited(&mut reader, max_output)
+                        &os::read_to_string_lossy_limited(&mut reader, max_output)
                             .await
                             .unwrap_or_default(),
                     );

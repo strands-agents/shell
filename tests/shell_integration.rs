@@ -6356,6 +6356,67 @@ fn stdout_max_output_truncate_multibyte() {
     }));
 }
 
+// ── captured output with invalid UTF-8 keeps its valid parts ───────
+
+fn invalid_utf8_run(tag: &str, max_output: usize, cmd: &str) -> strands_shell::Output {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new(&format!("lsh_invalid_utf8_{tag}"));
+        std::fs::write(dir.join("bin"), b"ok\xffbad\n").unwrap();
+        let mut shell = Shell::builder()
+            .max_output(max_output)
+            .bind_direct(dir.to_str().unwrap(), "/g")
+            .build()
+            .unwrap();
+        shell.run(cmd).await
+    }))
+}
+
+#[test]
+fn subst_invalid_utf8_is_replaced_not_dropped() {
+    let out = invalid_utf8_run(
+        "subst",
+        0,
+        "x=$(cat /g/bin); printf '[%s]\\n' \"$x\"; echo tail",
+    );
+    assert_eq!(out.stdout, "[ok\u{FFFD}bad]\ntail\n");
+    assert_eq!(out.status, 0);
+    let out = invalid_utf8_run("pipe", 0, "x=$(cat /g/bin | cat); printf '[%s]\\n' \"$x\"");
+    assert_eq!(out.stdout, "[ok\u{FFFD}bad]\n");
+}
+
+#[test]
+fn run_output_invalid_utf8_is_replaced_not_dropped() {
+    let out = invalid_utf8_run("run", 0, "cat /g/bin; echo tail");
+    assert_eq!(out.stdout, "ok\u{FFFD}bad\ntail\n");
+    let out = invalid_utf8_run("runpipe", 0, "cat /g/bin | cat; echo tail");
+    assert_eq!(out.stdout, "ok\u{FFFD}bad\ntail\n");
+    let out = invalid_utf8_run("runerr", 0, "cat /g/bin >&2; echo tail");
+    assert_eq!(out.stdout, "tail\n");
+    assert_eq!(out.stderr, "ok\u{FFFD}bad\n");
+}
+
+#[test]
+fn invalid_utf8_bytes_stay_raw_in_pipes_and_files() {
+    let out = invalid_utf8_run(
+        "raw",
+        0,
+        "cat /g/bin | wc -c; cat /g/bin > /g/out; wc -c < /g/out",
+    );
+    let counts: Vec<&str> = out.stdout.split_whitespace().collect();
+    assert_eq!(counts, ["7", "7"]);
+}
+
+#[test]
+fn invalid_utf8_capture_still_enforces_max_output() {
+    // Over-limit output is still dropped as before. That drop is silent,
+    // which is pre-existing behaviour and not something this test pins.
+    let out = invalid_utf8_run("limit", 4, "x=$(cat /g/bin); echo \"[$x]\"");
+    assert_eq!(out.stdout, "[]\n");
+    let out = invalid_utf8_run("limitrun", 4, "cat /g/bin");
+    assert_eq!(out.stdout, "");
+}
+
 // ── exec.rs coverage: exit inside function ─────────────────────────
 
 expect_status!(func_exit_code, "f() { exit 42; }; f", 42);

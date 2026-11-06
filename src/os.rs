@@ -810,6 +810,17 @@ pub async fn read_to_string_limited<R: tokio::io::AsyncRead + Unpin>(
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Like [`read_to_string_limited`], but replaces invalid UTF-8 with U+FFFD
+/// instead of failing. Still returns Err if the limit is exceeded.
+pub async fn read_to_string_lossy_limited<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+) -> io::Result<String> {
+    let buf = read_to_end_limited(reader, limit).await?;
+    Ok(String::from_utf8(buf)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+}
+
 /// Return the largest char boundary in `s` at or below `index`.
 pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
     if index >= s.len() {
