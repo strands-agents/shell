@@ -850,7 +850,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
 
                 while let Some(&ch) = chars.peek() {
-                    if " \t\n\r|;&<>()#".contains(ch) {
+                    if " \t\n\r|;&<>()".contains(ch) {
                         break;
                     }
                     match ch {

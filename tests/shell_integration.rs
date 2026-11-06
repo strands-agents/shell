@@ -534,6 +534,37 @@ expect!(comment_only, "# this is a comment", "");
 expect!(trailing_semicolon, "echo hello;", "hello");
 expect!(whitespace_only, "   ", "");
 
+// `#` starts a comment only at the start of a word.
+#[test]
+fn hash_inside_word_is_literal() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (cmd, want) in [
+            ("echo a#b", "a#b\n"),
+            (r##"echo "issue"#123"##, "issue#123\n"),
+            ("x=a#b; echo $x", "a#b\n"),
+            ("x=1; echo $x#y", "1#y\n"),
+            ("echo $(echo a)#b", "a#b\n"),
+            ("case a#b in a#b) echo ok;; esac", "ok\n"),
+            ("for i in 1#2 3; do echo $i; done", "1#2\n3\n"),
+            ("echo $#x", "0x\n"),
+            ("echo #c", "\n"),
+            ("echo a;#c", "a\n"),
+            ("cat <<E#F\nbody\nE#F\necho after", "body\nafter\n"),
+            (
+                "# leading\nx=a#b # trailing\n  # indented\necho $x#c\n\
+                 echo one && # after and\necho two\nf() { echo in#f; } # after brace\nf",
+                "a#b#c\none\ntwo\nin#f\n",
+            ),
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, want, "{cmd:?}");
+            assert_eq!(out.status, 0, "{cmd:?}: status");
+        }
+    }));
+}
+
 // ── Shell builder env ───────────────────────────────────────────────
 
 #[test]
