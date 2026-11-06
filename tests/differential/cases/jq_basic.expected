@@ -1,0 +1,10 @@
+status: 0
+stderr: empty
+--- stdout
+3
+text
+[2,4,6]
+true
+1
+2
+3
