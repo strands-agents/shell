@@ -4084,6 +4084,136 @@ expect!(printf_o_format, "printf '%o' 8", "10");
 expect!(printf_x_format, "printf '%x' 255", "ff");
 expect!(printf_X_format, "printf '%X' 255", "FF");
 
+// Expected outputs are those of bash's builtin printf.
+#[test]
+fn printf_number_formatting_matches_bash() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let cases: &[(&str, &str)] = &[
+            // Flags, width and precision on integers
+            ("printf '%03d' 7", "007"),
+            ("printf '%5d|' 7", "    7|"),
+            ("printf '%-5d|' 7", "7    |"),
+            ("printf '%-05d|' 7", "7    |"),
+            ("printf '%+d' 7", "+7"),
+            ("printf '% d' 7", " 7"),
+            ("printf '%+ d' 7", "+7"),
+            ("printf '% 05d|' 3", " 0003|"),
+            ("printf '%+05d|' 3", "+0003|"),
+            ("printf '%+5d|' -3", "   -3|"),
+            ("printf '%3d|' 12345", "12345|"),
+            ("printf '%.3d' 7", "007"),
+            ("printf '%.3d' -7", "-007"),
+            ("printf '%05.3d' 7", "  007"),
+            ("printf '%5.3d|' -3", " -003|"),
+            ("printf '%.0d|' 0", "|"),
+            ("printf '%5.0d|' 0", "     |"),
+            ("printf '%i %d' 42 +5", "42 5"),
+            // Unsigned conversions
+            ("printf '%u' 5", "5"),
+            ("printf '%+u % x' 5 5", "5 5"),
+            ("printf '%#o %#o %#.3o' 8 0 8", "010 0 010"),
+            ("printf '%#.0o|%.0o|' 0 0", "0||"),
+            ("printf '%#x %#X %#x' 255 255 0", "0xff 0XFF 0"),
+            ("printf '%#.0x|' 0", "|"),
+            ("printf '%08.3x|%#5x|' 255 0", "     0ff|    0|"),
+            ("printf '%#010x' 255", "0x000000ff"),
+            ("printf '%u' -1", "18446744073709551615"),
+            ("printf '%x' -1", "ffffffffffffffff"),
+            ("printf '%o' -1", "1777777777777777777777"),
+            ("printf '%X' -255", "FFFFFFFFFFFFFF01"),
+            ("printf '%d' 9223372036854775807", "9223372036854775807"),
+            ("printf '%d' -9223372036854775808", "-9223372036854775808"),
+            // Floats
+            ("printf '%5.2f' 3.14159", " 3.14"),
+            ("printf '%f' 1e3", "1000.000000"),
+            ("printf '%f' .5", "0.500000"),
+            ("printf '%f' -.5e1", "-5.000000"),
+            ("printf '%f' 1.", "1.000000"),
+            ("printf '%010.3f' -3.14159", "-00003.142"),
+            ("printf '%5.1f' -0", " -0.0"),
+            ("printf '%#.0f' 3", "3."),
+            ("printf '%.0f %.0f' 2.5 3.5", "2 4"),
+            ("printf '%.2f' 2.675", "2.67"),
+            ("printf '%.1f %.1f' 0.05 0.25", "0.1 0.2"),
+            ("printf '%.3f' 1e-7", "0.000"),
+            ("printf '%5.2f%%' 99.5", "99.50%"),
+            ("printf '%f|%e|' ", "0.000000|0.000000e+00|"),
+            ("printf '%e' 1234.5", "1.234500e+03"),
+            ("printf '%E' 0.000123", "1.230000E-04"),
+            ("printf '%e %.0e' 0 0", "0.000000e+00 0e+00"),
+            ("printf '%.0e %#.0e' 12345 12345", "1e+04 1.e+04"),
+            ("printf '%+.2e' 3", "+3.00e+00"),
+            ("printf '%.2e' 9.999", "1.00e+01"),
+            ("printf '%-10.2e|' 31415.9", "3.14e+04  |"),
+            ("printf '%e %e' 1e-300 1e300", "1.000000e-300 1.000000e+300"),
+            (
+                "printf '%g %g %g' 1234.5 0.0001 1e10",
+                "1234.5 0.0001 1e+10",
+            ),
+            ("printf '%g %g' 100000 1000000", "100000 1e+06"),
+            (
+                "printf '%g %g' 0.00009999 0.00001234",
+                "9.999e-05 1.234e-05",
+            ),
+            ("printf '%g %g' 0 123456789", "0 1.23457e+08"),
+            ("printf '%G %G' 1e-10 1e100", "1E-10 1E+100"),
+            ("printf '%.3g %.3g' 3.14159 9999", "3.14 1e+04"),
+            ("printf '%.0g %.15g' 0.5 0.1", "0.5 0.1"),
+            ("printf '%#g %#g %#.3g' 1 0 1", "1.00000 0.00000 1.00"),
+            ("printf '%10.4g|' 3.14159265", "     3.142|"),
+            ("printf '%f %f %f' inf -inf nan", "inf -inf nan"),
+            ("printf '%f %f' infinity INF", "inf inf"),
+            ("printf '%F %E %f' inf nan -nan", "INF NAN -nan"),
+            ("printf '%05f|' inf", "  inf|"),
+            // Unchanged conversions and format reuse
+            ("printf '%d %o %x %X' 42 8 255 255", "42 10 ff FF"),
+            ("printf '%s %s' hello world", "hello world"),
+            ("printf '%5s|%-5s|%.1s|' a b abc", "    a|b    |a|"),
+            ("printf '%05s|' ab", "   ab|"),
+            ("printf '%s %d|' a", "a 0|"),
+            ("printf '%b' 'a\\tb\\n'", "a\tb\n"),
+            ("printf '%c%c' x yz", "xy"),
+            ("printf '%%d' 5", "%d"),
+            ("printf '%d %d\\n' 1 2 3", "1 2\n3 0\n"),
+            ("printf '%s-%s\\n' a b c", "a-b\nc-\n"),
+        ];
+        for (cmd, want) in cases {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, *want, "{cmd}: stdout");
+            assert_eq!(out.stderr, "", "{cmd}: stderr");
+            assert_eq!(out.status, 0, "{cmd}: status");
+        }
+    }));
+}
+
+// A huge width or precision is clamped instead of exhausting memory.
+#[test]
+fn printf_number_huge_field_is_capped() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, len) in [
+            ("printf '%99999999999d|' 1", 65536),
+            ("printf '%-99999999999999999999999x|' 1", 65536),
+            ("printf '%.99999999999d|' 1", 65536),
+            ("printf '%.99999999999f|' 1", 65538),
+            ("printf '%099999999999.99999999999e|' 1", 65542),
+            ("printf '%.70000g|' 1", 2),
+            ("printf '%.65535g|' 0.001", 63),
+            ("printf '%.65534g|' 0.001", 63),
+            ("printf '%#.65535g|' 0.001", 65537),
+            ("printf '%.99999999G|' 0.0002", 68),
+            ("printf '%#.99999999G|' 0.0002", 65538),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: status");
+            assert_eq!(out.stdout.len(), len, "{cmd}: length");
+        }
+    }));
+}
+
 // ── heredoc with tab strip ────────────────────────────────────────
 expect!(
     heredoc_tab_strip2,
