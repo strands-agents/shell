@@ -359,6 +359,9 @@ fn read_heredoc_body(
 enum Token {
     Word(String),    // plain text for matching reserved words / operators
     WordParts(Word), // rich word with quoting/expansion info
+    /// An unquoted single digit written directly before `<` or `>` (`2>`):
+    /// the fd of the redirect token that follows.
+    IoNumber(u32),
     Pipe,
     Semi,
     DoubleSemi, // ;;
@@ -391,6 +394,7 @@ fn tok_name(tok: &Token) -> &str {
     match tok {
         Token::Word(w) => w,
         Token::WordParts(_) => "<word>",
+        Token::IoNumber(fd) => &"0123456789"[*fd as usize..*fd as usize + 1],
         Token::Pipe => "|",
         Token::Semi => ";",
         Token::DoubleSemi => ";;",
@@ -993,6 +997,16 @@ fn tokenize(input: &str, more_input: bool) -> Result<Vec<Token>, String> {
                         }
                     }
                 }
+                // POSIX IO_NUMBER: an unquoted digit delimited by `<` or `>`
+                // (`2>err`). `2 > err` stays a word followed by `> err`.
+                if parts.is_empty()
+                    && c.is_ascii_digit()
+                    && literal.len() == 1
+                    && matches!(chars.peek(), Some('<' | '>'))
+                {
+                    tokens.push(Token::IoNumber((c as u8 - b'0') as u32));
+                    continue;
+                }
                 if !literal.is_empty() {
                     parts.push(WordPart::Literal(literal));
                 }
@@ -1127,18 +1141,9 @@ fn collect_compound_pipe(
     // Collect any redirects after the compound command (e.g. `done < file`)
     let mut redirects: Vec<Redirect> = Vec::new();
     while *i < tokens.len() {
-        let fd_prefix: Option<u32> = if let Token::Word(w) = &tokens[*i] {
-            if w.len() == 1
-                && w.as_bytes()[0].is_ascii_digit()
-                && *i + 1 < tokens.len()
-                && is_redirect_token(&tokens[*i + 1])
-            {
-                let fd = (w.as_bytes()[0] - b'0') as u32;
-                *i += 1;
-                Some(fd)
-            } else {
-                break;
-            }
+        let fd_prefix: Option<u32> = if let Token::IoNumber(fd) = tokens[*i] {
+            *i += 1;
+            Some(fd)
         } else if is_redirect_token(&tokens[*i]) {
             None
         } else {
@@ -1763,19 +1768,10 @@ fn build_pipeline(tokens: &[&Token]) -> Result<Pipeline, String> {
 
     let mut i = 0;
     while i < tokens.len() {
-        // Check for fd prefix: single digit word followed by redirect token
-        let fd_prefix: Option<u32> = if let Token::Word(w) = tokens[i] {
-            if w.len() == 1
-                && w.as_bytes()[0].is_ascii_digit()
-                && i + 1 < tokens.len()
-                && is_redirect_token(tokens[i + 1])
-            {
-                let fd = (w.as_bytes()[0] - b'0') as u32;
-                i += 1; // skip the digit, fall through to redirect handling
-                Some(fd)
-            } else {
-                None
-            }
+        // Check for fd prefix: an IO number token before the redirect token
+        let fd_prefix: Option<u32> = if let Token::IoNumber(fd) = *tokens[i] {
+            i += 1; // skip the digit, fall through to redirect handling
+            Some(fd)
         } else {
             None
         };

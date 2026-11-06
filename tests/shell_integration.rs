@@ -962,6 +962,53 @@ fn redir_fd_close() {
     }));
 }
 
+// A digit is a redirect's fd only when written right before `<` or `>`;
+// `echo 3 > f` writes `3`. Expected outputs are bash's.
+#[test]
+fn redir_fd_only_when_digit_touches_operator() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, stdout, stderr) in [
+            // A separated digit is an argument.
+            ("echo 3 > /tmp/n; cat /tmp/n", "3\n", ""),
+            ("echo 1 > /tmp/n; cat /tmp/n", "1\n", ""),
+            ("echo a 2 > /tmp/n; cat /tmp/n", "a 2\n", ""),
+            ("printf '%s\\n' 42 > /tmp/n; cat /tmp/n", "42\n", ""),
+            ("echo 0 > /tmp/n; cat /tmp/n", "0\n", ""),
+            ("echo 4 >> /tmp/a; cat /tmp/a", "4\n", ""),
+            ("echo 5 < /dev/null", "5\n", ""),
+            ("echo 2 >| /tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo 7 <> /tmp/rw; cat /tmp/rw", "7\n", ""),
+            ("echo 2 >& 1", "2\n", ""),
+            ("echo 3 2 >&2", "", "3 2\n"),
+            // A quoted or escaped digit is an argument too.
+            ("echo \"2\">/tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo '2'>/tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo \\2>/tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo a2>/tmp/n; cat /tmp/n", "a2\n", ""),
+            // A digit touching the operator is the fd.
+            ("echo 3>/tmp/n; cat /tmp/n", "\n", ""),
+            ("echo x 2>/tmp/n; cat /tmp/n", "x\n", ""),
+            ("echo x 2> /tmp/n; cat /tmp/n", "x\n", ""),
+            ("echo hi 1>&2", "", "hi\n"),
+            ("echo a 9>&-; echo b", "a\nb\n", ""),
+            ("printf 'in\\n' > /tmp/n; cat 0</tmp/n", "in\n", ""),
+            ("2>/dev/null echo hi", "hi\n", ""),
+            ("cat 0<<EOF\nhd\nEOF", "hd\n", ""),
+            ("if true; then echo i; fi 1>/tmp/n; cat /tmp/n", "i\n", ""),
+            // Other uses of digits and `>` are untouched.
+            ("echo $((3>2))", "1\n", ""),
+            ("[ 3 -gt 2 ] && echo yes", "yes\n", ""),
+            ("test 3 \\> 2 && echo yes", "yes\n", ""),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, stdout, "{cmd}: stdout");
+            assert_eq!(out.stderr, stderr, "{cmd}: stderr");
+        }
+    }));
+}
+
 // Redirect in variable expansion
 expect!(
     redir_var_filename,
