@@ -2121,13 +2121,29 @@ async fn execute_item(
                 if !output.is_empty() {
                     let _ = tx.send(Bytes::from(output.into_bytes())).await;
                 }
+                std::mem::take(&mut sub.captured_stderr)
             });
             tasks.own(&handle);
 
             // Set stdin on proc so the tail pipeline inherits it.
             proc.set_channel_reader(0, rx);
             let mut exit = execute_pipeline(os, proc, tail).await;
-            let _ = handle.await;
+            let mut stderr = handle.await.unwrap_or_default();
+            // The compound's stderr is not piped; pass it on without dropping any,
+            // except a limit message that this process will report itself.
+            if let Some(msg) = proc.check_limits()
+                && stderr.ends_with(&format!("{msg}\n"))
+            {
+                stderr.truncate(stderr.len() - msg.len() - 1);
+            }
+            if !stderr.is_empty() {
+                if let Some(tx) = proc.take_err_tx() {
+                    let _ = tx.send(bytes::Bytes::from(stderr)).await;
+                    proc.set_err_tx(tx);
+                } else {
+                    proc.write_stderr(&stderr);
+                }
+            }
             proc.close(0);
             if *negated {
                 exit = if exit == 0 { 1 } else { 0 };
