@@ -1,0 +1,5 @@
+status: 0
+stderr: non-empty
+--- stdout
+status=1
+force=0
