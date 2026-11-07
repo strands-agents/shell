@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -1071,4 +1071,19 @@ pub trait Kernel: Send + Sync {
     fn command_fallback(&self) -> Option<&dyn CommandFallback> {
         None
     }
+    /// Decide whether a command that Shell implements may run.
+    ///
+    /// Shell calls this for each pipeline stage that names a builtin,
+    /// function, registered command, or script, after expansion and
+    /// resolution, and before any stage starts. Commands that `eval`,
+    /// `source`, traps, `find -exec`, `xargs`, and Lua run come here too.
+    /// Commands for [`Kernel::command_fallback`] do not. An `Err` stops the
+    /// pipeline: Shell writes the error to stderr and returns 126. The
+    /// default allows every command.
+    async fn check_command(&self, _program: &str, _args: &[String], _cwd: &Path) -> io::Result<()> {
+        Ok(())
+    }
+    /// Report the status of a command that [`Kernel::check_command`] allowed
+    /// and Shell ran.
+    fn command_finished(&self, _program: &str, _args: &[String], _cwd: &Path, _status: i32) {}
 }

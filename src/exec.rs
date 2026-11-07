@@ -2863,6 +2863,15 @@ async fn settle_host_writes(proc: &mut Process, exit: i32) -> i32 {
     }
 }
 
+/// Whether Shell runs `name` itself rather than through the command fallback.
+fn runs_in_shell(proc: &Process, name: &str) -> bool {
+    builtins::lookup(name).is_some()
+        || proc.get_function(name).is_some()
+        || commands::lookup(name).is_some()
+        || name == "lash"
+        || name == "sh"
+}
+
 async fn run_pipeline(
     os: Arc<dyn Kernel>,
     shell_proc: &mut Process,
@@ -2976,6 +2985,30 @@ async fn run_pipeline(
             }
         }
     }
+
+    // Ask the kernel about each command Shell runs itself, before any stage starts.
+    let cwd = shell_proc.cwd.clone();
+    let mut checked = vec![false; len];
+    for (i, words) in expanded_args.iter().enumerate() {
+        let Some((program, args)) = words.split_first() else {
+            continue;
+        };
+        if !runs_in_shell(shell_proc, program) {
+            continue;
+        }
+        if let Err(e) = os.check_command(program, args, &cwd).await {
+            shell_proc.err_msg(&format!("strands-shell: {program}: {e}"));
+            return (126, String::new());
+        }
+        checked[i] = true;
+    }
+    let finished = |stage: usize, status: i32| {
+        if checked[stage] {
+            let (program, args) = expanded_args[stage].split_first().unwrap();
+            os.command_finished(program, args, &cwd, status);
+        }
+        status
+    };
 
     // Single command: check for builtins
     if len == 1 {
@@ -3100,8 +3133,8 @@ async fn run_pipeline(
             }
 
             return match result {
-                Ok(code) => (code, stdout_str),
-                Err(_) => (1, stdout_str),
+                Ok(code) => (finished(0, code), stdout_str),
+                Err(_) => (finished(0, 1), stdout_str),
             };
         }
 
@@ -3124,7 +3157,7 @@ async fn run_pipeline(
                     shell_proc.depth -= 1;
                     shell_proc.pop_local_scope();
                     shell_proc.args = saved_args;
-                    return (code, String::new());
+                    return (finished(0, code), String::new());
                 }
                 Err(_) => shell_proc.last_exit,
             };
@@ -3136,7 +3169,7 @@ async fn run_pipeline(
             } else {
                 String::new()
             };
-            return (exit, func_output);
+            return (finished(0, exit), func_output);
         }
     }
 
@@ -3285,7 +3318,7 @@ async fn run_pipeline(
                 }),
             ));
             tasks.own(&handle);
-            handles.push(handle);
+            handles.push((i, handle));
         } else {
             // External commands
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
@@ -3330,7 +3363,7 @@ async fn run_pipeline(
                 }),
             ));
             tasks.own(&handle);
-            handles.push(handle);
+            handles.push((i, handle));
         }
     }
 
@@ -3407,9 +3440,9 @@ async fn run_pipeline(
 
     // Wait for all command tasks
     let mut last_exit = 0;
-    for handle in handles {
+    for (stage, handle) in handles {
         if let Ok(exit) = handle.await {
-            last_exit = exit;
+            last_exit = finished(stage, exit);
         }
     }
 
