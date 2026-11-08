@@ -1,0 +1,6 @@
+status: 0
+stderr: empty
+--- stdout
+first=x
+got x
+got y
