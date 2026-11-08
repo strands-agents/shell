@@ -1,0 +1,10 @@
+status: 0
+stderr: empty
+--- stdout
+file.tar.gz
+dir/sub
+dir/sub/file.tar
+dir/sub/file
+19
+default
+alt

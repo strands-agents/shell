@@ -1,0 +1,9 @@
+status: 0
+stderr: empty
+--- stdout
+1
+4
+3
+4
+keep
+keep2
