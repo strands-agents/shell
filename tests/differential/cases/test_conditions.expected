@@ -1,0 +1,11 @@
+status: 0
+stderr: empty
+--- stdout
+is-file
+is-dir
+no-missing
+empty
+non-empty
+equal
+greater
+status=1

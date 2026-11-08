@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -125,10 +125,28 @@ impl VfsKernel {
         None
     }
 
+    /// Resolve the host path of `abs_path` without following its last component.
+    fn resolve_host_nofollow(vfs: &Vfs, abs_path: &str) -> Option<(PathBuf, bool)> {
+        let (parent, name) = match abs_path.rfind('/') {
+            Some(i) if i + 1 < abs_path.len() => (&abs_path[..i.max(1)], &abs_path[i + 1..]),
+            _ => return None,
+        };
+        let mut components = Path::new(name).components();
+        let (Some(Component::Normal(leaf)), None) = (components.next(), components.next()) else {
+            return None;
+        };
+        if leaf != name {
+            return None;
+        }
+        let (host_parent, ro, _) = Self::resolve_host(vfs, parent)?;
+        Some((host_parent.join(leaf), ro))
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     async fn open_host(
         &self,
         proc: &mut Process,
+        virtual_path: &str,
         host_path: &std::path::Path,
         flags: &OpenFlags,
         canon_base: &std::path::Path,
@@ -168,6 +186,7 @@ impl VfsKernel {
             })
         } else if flags.write {
             let (tx, rx) = crate::os::pipe(8192);
+            let writers = tx.downgrade();
             let size_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let fd = proc.alloc_fd(FdKind::ChannelWriter {
                 tx,
@@ -176,7 +195,7 @@ impl VfsKernel {
             let path = host_path.to_path_buf();
             let append = flags.append;
             let max_file_size = self.vfs.lock().await.max_file_size;
-            tokio::task::spawn_local(async move {
+            let drain = tokio::task::spawn_local(async move {
                 let mut rx = rx;
                 let mut buf = if append {
                     tokio::fs::read(&path).await.unwrap_or_default()
@@ -190,8 +209,9 @@ impl VfsKernel {
                     }
                     buf.extend_from_slice(&chunk);
                 }
-                let _ = tokio::fs::write(&path, &buf).await;
+                tokio::fs::write(&path, &buf).await
             });
+            proc.track_host_write(virtual_path.to_string(), writers, drain);
             Ok(fd)
         } else {
             Err(io::Error::new(
@@ -205,6 +225,7 @@ impl VfsKernel {
     async fn open_host(
         &self,
         proc: &mut Process,
+        virtual_path: &str,
         host_path: &std::path::Path,
         flags: &OpenFlags,
         _canon_base: &std::path::Path,
@@ -223,6 +244,7 @@ impl VfsKernel {
             })
         } else if flags.write {
             let (tx, rx) = crate::os::pipe(8192);
+            let writers = tx.downgrade();
             let size_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let fd = proc.alloc_fd(FdKind::ChannelWriter {
                 tx,
@@ -231,7 +253,7 @@ impl VfsKernel {
             let path = host_path.to_path_buf();
             let append = flags.append;
             let max_file_size = self.vfs.lock().await.max_file_size;
-            tokio::task::spawn_local(async move {
+            let drain = tokio::task::spawn_local(async move {
                 let mut rx = rx;
                 let mut buf = if append {
                     std::fs::read(&path).unwrap_or_default()
@@ -245,8 +267,9 @@ impl VfsKernel {
                     }
                     buf.extend_from_slice(&chunk);
                 }
-                let _ = std::fs::write(&path, &buf);
+                std::fs::write(&path, &buf)
             });
+            proc.track_host_write(virtual_path.to_string(), writers, drain);
             Ok(fd)
         } else {
             Err(io::Error::new(
@@ -283,7 +306,9 @@ impl Kernel for VfsKernel {
                         "read-only bind mount",
                     ));
                 }
-                return self.open_host(proc, &host_path, &flags, &canon_base).await;
+                return self
+                    .open_host(proc, path, &host_path, &flags, &canon_base)
+                    .await;
             }
         }
 
@@ -703,6 +728,12 @@ impl Kernel for VfsKernel {
     async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String> {
         let abs = Self::abs(proc, path);
         let vfs = self.vfs.lock().await;
+        if let Some((host_path, _ro)) = Self::resolve_host_nofollow(&vfs, &abs) {
+            drop(vfs);
+            return Ok(std::fs::read_link(host_path)?
+                .to_string_lossy()
+                .into_owned());
+        }
         let ino = vfs.resolve(&abs, false)?;
         match &vfs.get(ino)?.data {
             InodeData::Symlink(target) => Ok(target.clone()),
@@ -716,6 +747,16 @@ impl Kernel for VfsKernel {
     async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()> {
         let abs = Self::abs(proc, path);
         let mut vfs = self.vfs.lock().await;
+        if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
+            drop(vfs);
+            if ro {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "read-only bind mount",
+                ));
+            }
+            return host_set_permissions(&host_path, mode);
+        }
         let ino = vfs.resolve(&abs, true)?;
         let inode = vfs.get_mut(ino)?;
         // Only the file owner can chmod
@@ -1053,6 +1094,20 @@ impl Kernel for VfsKernel {
 }
 
 // --- host stat helper ---
+
+#[cfg(unix)]
+fn host_set_permissions(path: &std::path::Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777))
+}
+
+#[cfg(not(unix))]
+fn host_set_permissions(_path: &std::path::Path, _mode: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "chmod is not supported on this host",
+    ))
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn host_stat(path: &std::path::Path) -> FileStat {

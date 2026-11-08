@@ -1,0 +1,9 @@
+status: 0
+stderr: empty
+--- stdout
+d/a/y.txt
+d/x.txt
+d
+d/a
+d/a/b
+d/a/b/z.log

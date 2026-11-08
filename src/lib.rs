@@ -142,6 +142,7 @@
 pub mod builtins;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod cli;
+mod command_fallback;
 pub mod commands;
 pub mod exec;
 pub mod io;

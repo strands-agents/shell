@@ -1,0 +1,7 @@
+status: 0
+stderr: empty
+--- stdout
+src/a.txt:1:TODO one
+src/lib/c.txt:1:TODO two
+src/a.txt
+src/lib/c.txt
