@@ -1,0 +1,8 @@
+status: 0
+stderr: empty
+--- stdout
+[yes] yes
+[Y] yes
+[no] no
+[maybe] unknown
+[] empty
