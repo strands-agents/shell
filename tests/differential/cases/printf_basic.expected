@@ -1,0 +1,9 @@
+status: 0
+stderr: empty
+--- stdout
+a-5
+[   ab|cd   ]
+one
+two
+three
+no newline
