@@ -3130,14 +3130,26 @@ async fn run_pipeline(
             shell_proc.transfer_fd(STDIN, &mut io_proc);
             let (out_tx, out_rx) = os::pipe(64);
             let (err_tx, err_rx) = os::pipe(64);
-            io_proc.set_channel_writer(STDOUT, out_tx);
-            io_proc.set_channel_writer(STDERR, err_tx.clone());
+            // A writer the caller installed takes the place of the local pipe.
+            if shell_proc.inherit_channel_writer(STDOUT, &mut io_proc) {
+                drop(out_tx);
+            } else {
+                io_proc.set_channel_writer(STDOUT, out_tx);
+            }
+            let caller_stderr = shell_proc.inherit_channel_writer(STDERR, &mut io_proc);
+            if !caller_stderr {
+                io_proc.set_channel_writer(STDERR, err_tx.clone());
+            }
             shell_proc.set_err_tx(err_tx);
 
             // Apply redirects to the io_proc so builtins see them
             if let Err(e) = apply_redirects(&os, &mut io_proc, &expanded_redirects[0]).await {
                 shell_proc.clear_err_tx();
+                if caller_stderr && let Some(tx) = shell_proc.stderr_channel() {
+                    shell_proc.set_err_tx(tx);
+                }
                 shell_proc.err_msg(&format!("strands-shell: {e}"));
+                shell_proc.clear_err_tx();
                 return (1, String::new());
             }
             // Builtin diagnostics follow the command's own stderr redirection.
@@ -3307,16 +3319,22 @@ async fn run_pipeline(
         procs[i + 1].set_channel_reader(STDIN, rx);
     }
 
-    // Last stage stdout: channel back to us
+    // Last stage stdout: the caller's writer, or a channel back to us
     let (last_tx, last_rx) = os::pipe(64);
-    procs[len - 1].set_channel_writer(STDOUT, last_tx);
+    if shell_proc.inherit_channel_writer(STDOUT, &mut procs[len - 1]) {
+        drop(last_tx);
+    } else {
+        procs[len - 1].set_channel_writer(STDOUT, last_tx);
+    }
 
-    // Every stage gets a stderr channel back to us
+    // Every stage gets the caller's stderr writer, or a stderr channel back to us
     let mut stderr_rxs = Vec::with_capacity(len);
     for p in &mut procs {
         let (tx, rx) = os::pipe(64);
-        p.set_err_tx(tx.clone());
-        p.set_channel_writer(STDERR, tx);
+        if !shell_proc.inherit_channel_writer(STDERR, p) {
+            p.set_channel_writer(STDERR, tx.clone());
+        }
+        p.set_err_tx(tx);
         stderr_rxs.push(rx);
     }
 
