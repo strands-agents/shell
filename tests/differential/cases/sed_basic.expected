@@ -1,0 +1,10 @@
+status: 0
+stderr: empty
+--- stdout
+qux bar
+qux baz
+foo baz
+foo [bar]
+foo [baz]
+foo BAR
+foo baz

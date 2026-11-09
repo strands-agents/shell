@@ -1,0 +1,9 @@
+status: 0
+stderr: empty
+--- stdout
+x y
+x   y
+$a
+$a
+it's
+say "hi"
