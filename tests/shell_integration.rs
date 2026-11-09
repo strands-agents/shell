@@ -4714,6 +4714,125 @@ expect!(
     "{ echo a; } >/missing/dir/out; echo $?",
     "1"
 );
+
+// A redirect on a group delivers both of its streams.
+expect_output!(
+    group_stderr_dup_to_stdout,
+    "{ echo out; echo err >&2; } 2>&1",
+    "out\nerr\n",
+    "",
+    0
+);
+expect_output!(
+    group_stderr_to_file,
+    "{ echo out; echo err >&2; } 2>/tmp/e; cat /tmp/e",
+    "out\nerr\n",
+    "",
+    0
+);
+expect_output!(
+    group_stderr_to_dev_null_keeps_stdout,
+    "{ echo out; echo err >&2; } 2>/dev/null",
+    "out\n",
+    "",
+    0
+);
+expect_output!(
+    group_stdout_to_file_keeps_stderr,
+    "{ echo out; echo err >&2; } >/tmp/o; cat /tmp/o",
+    "out\n",
+    "err\n",
+    0
+);
+expect_output!(
+    group_redirects_apply_in_order,
+    "{ echo out; echo err >&2; } 2>&1 >/tmp/o; cat /tmp/o",
+    "err\nout\n",
+    "",
+    0
+);
+expect_output!(
+    group_both_streams_to_one_file,
+    "{ echo out; echo err >&2; } >/tmp/o 2>&1; cat /tmp/o",
+    "out\nerr\n",
+    "",
+    0
+);
+expect_output!(
+    group_stdout_dup_to_stderr,
+    "{ echo out; } >&2",
+    "",
+    "out\n",
+    0
+);
+expect_output!(
+    group_builtin_diagnostic_follows_stderr_redirect,
+    "{ cd /nope; } 2>/dev/null; echo $?",
+    "1\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_captures_group_stderr_dup,
+    "X=$({ echo out; cd /nope; } 2>&1); case \"$X\" in out?*cd*/nope*) echo yes;; esac",
+    "yes\n",
+    "",
+    0
+);
+expect_output!(
+    group_many_stderr_lines_to_stdout_keep_order,
+    "{ i=0; while [ $i -lt 300 ]; do echo e$i >&2; i=$((i+1)); done; } 2>&1 | tail -2",
+    "e298\ne299\n",
+    "",
+    0
+);
+
+#[test]
+fn group_redirects_from_cli() {
+    let dir = TestDir::new("group_redirect_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("{ echo out; echo err >&2; } 2>&1 >/tmp/o; { echo kept; echo gone >&2; } 2>/dev/null; { echo file; echo shown >&2; } >/tmp/f; cat /tmp/o /tmp/f")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "err\nkept\nout\nfile\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "shown\n");
+    assert!(out.status.success());
+}
+
+// Command substitution runs special builtins as a direct command does.
+expect_output!(
+    cmd_subst_captures_eval,
+    "X=$(eval 'echo a; echo b'); echo \"[$X]\"",
+    "[a\nb]\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_captures_source,
+    "echo 'echo sourced' > /tmp/s.sh; X=$(. /tmp/s.sh); echo \"[$X]\"",
+    "[sourced]\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_captures_command,
+    "X=$(command echo hi); echo \"[$X]\"",
+    "[hi]\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_eval_exit_stops_substitution,
+    "X=$(eval 'exit 3'; echo no); echo \"[$X]\"",
+    "[]\n",
+    "",
+    0
+);
 expect!(
     cmd_subst_exit_in_if_condition,
     "X=$(if exit 3; then echo yes; else echo no; fi; echo after); echo \"[$X]\"",
@@ -9704,5 +9823,146 @@ fn uniq_skip_chars_multibyte_no_panic() {
         assert_eq!(out.status, 0, "stderr: {}", out.stderr);
         // Skipping the leading `é` leaves `x`/`y`, which differ → both kept.
         assert_eq!(out.stdout, "éx\néy\n");
+    }));
+}
+
+// ── output writers installed by the caller ────────────────────────
+
+/// Run `cmd` with channel writers on the shell's stdout and stderr, and return what each received.
+async fn run_with_writers(shell: &mut Shell, cmd: &str) -> (strands_shell::Output, String, String) {
+    use strands_shell::os::{STDERR, STDOUT, pipe};
+    fn drain(rx: &mut tokio::sync::mpsc::Receiver<bytes::Bytes>) -> String {
+        let mut text = String::new();
+        while let Ok(chunk) = rx.try_recv() {
+            text.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        text
+    }
+    let (out_tx, mut out_rx) = pipe(1024);
+    let (err_tx, mut err_rx) = pipe(1024);
+    shell.proc.set_channel_writer(STDOUT, out_tx);
+    shell.proc.set_channel_writer(STDERR, err_tx);
+    let output = shell.run(cmd).await;
+    (output, drain(&mut out_rx), drain(&mut err_rx))
+}
+
+macro_rules! expect_writers {
+    ($name:ident, $cmd:expr, $stdout:expr, $stderr:expr) => {
+        #[test]
+        fn $name() {
+            let (rt, local) = rt();
+            rt.block_on(local.run_until(async {
+                let mut shell = Shell::builder().build().unwrap();
+                let (output, stdout, stderr) = run_with_writers(&mut shell, $cmd).await;
+                assert_eq!(stdout, $stdout, "stdout writer mismatch");
+                #[allow(clippy::redundant_closure_call)]
+                ($stderr)(&stderr);
+                assert_eq!(output.stdout, "", "captured stdout must be empty");
+                assert_eq!(output.stderr, "", "captured stderr must be empty");
+            }));
+        }
+    };
+}
+
+expect_writers!(
+    writer_receives_builtin_stdout,
+    "printf A; echo B; printf C",
+    "AB\nC",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    writer_receives_builtin_stderr,
+    "printf OOPS >&2",
+    "",
+    |stderr: &str| assert_eq!(stderr, "OOPS")
+);
+expect_writers!(
+    writer_receives_builtin_diagnostic,
+    "cd /nope",
+    "",
+    |stderr: &str| assert!(stderr.contains("cd: /nope"), "stderr: {stderr:?}")
+);
+expect_writers!(
+    writer_receives_failed_redirect_reason,
+    "printf x > /nope/f",
+    "",
+    |stderr: &str| assert!(stderr.contains("/nope/f"), "stderr: {stderr:?}")
+);
+expect_writers!(
+    writer_receives_command_stdout,
+    "printf FILE > /tmp/w.txt; cat /tmp/w.txt",
+    "FILE",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    writer_receives_command_stderr,
+    "ls /nope",
+    "",
+    |stderr: &str| assert!(stderr.contains("/nope"), "stderr: {stderr:?}")
+);
+expect_writers!(
+    writer_receives_last_pipeline_stage_stdout,
+    "echo a | cat",
+    "a\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    writer_receives_every_pipeline_stage_stderr,
+    "ls /first | ls /second",
+    "",
+    |stderr: &str| assert!(
+        stderr.contains("/first") && stderr.contains("/second"),
+        "stderr: {stderr:?}"
+    )
+);
+expect_writers!(
+    redirect_takes_output_away_from_writer,
+    "printf x > /tmp/r.txt; cat /tmp/r.txt >/dev/null; ls /nope 2>/dev/null",
+    "",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+
+#[test]
+fn writer_receives_bytes_that_are_not_utf8() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("writer_not_utf8");
+        std::fs::write(dir.join("f"), [b'a', 0x80, b'b']).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/w")
+            .build()
+            .unwrap();
+        let (out_tx, mut out_rx) = strands_shell::os::pipe(16);
+        shell
+            .proc
+            .set_channel_writer(strands_shell::os::STDOUT, out_tx);
+        let output = shell.run("cat /w/f").await;
+        let mut bytes = Vec::new();
+        while let Ok(chunk) = out_rx.try_recv() {
+            bytes.extend_from_slice(&chunk);
+        }
+        assert_eq!(bytes, [b'a', 0x80, b'b'], "status {}", output.status);
+    }));
+}
+
+#[test]
+fn output_is_captured_when_no_writer_is_installed() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let output = shell
+            .run("printf A; printf B >&2; echo c | cat; ls /nope")
+            .await;
+        assert_eq!(output.stdout, "Ac\n");
+        assert!(
+            output.stderr.starts_with('B'),
+            "stderr: {:?}",
+            output.stderr
+        );
+        assert!(
+            output.stderr.contains("/nope"),
+            "stderr: {:?}",
+            output.stderr
+        );
     }));
 }

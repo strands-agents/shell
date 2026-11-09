@@ -499,6 +499,23 @@ impl Process {
         );
     }
 
+    /// Copy the channel writer on `fd` into `target`. Returns `false` when `fd` holds no channel writer.
+    pub(crate) fn inherit_channel_writer(&self, fd: Fd, target: &mut Process) -> bool {
+        match self.fds.get(&fd) {
+            Some(FdKind::ChannelWriter { tx, error_flag }) => {
+                target.fds.insert(
+                    fd,
+                    FdKind::ChannelWriter {
+                        tx: tx.clone(),
+                        error_flag: error_flag.clone(),
+                    },
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Remove an fd from this process and install it in another.
     /// Used to pass stdin across fork boundaries (e.g. CompoundPipeline).
     pub fn transfer_fd(&mut self, fd: Fd, target: &mut Process) {
@@ -647,6 +664,29 @@ impl Process {
             self.captured_output.push('\n');
         } else {
             println!("{msg}");
+        }
+    }
+
+    /// Write text to stdout by the route [`out_msg`](Self::out_msg) takes, without adding a newline.
+    pub(crate) fn write_stdout(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(FdKind::ChannelWriter { tx, .. }) = self.fds.get(&STDOUT) {
+            let _ = tx.try_send(Bytes::from(text.to_string()));
+        } else if self.capture {
+            if self.max_output > 0 && self.captured_output.len() + text.len() > self.max_output {
+                self.captured_stderr
+                    .push_str("strands-shell: output size limit exceeded\n");
+                self.last_exit = 1;
+                return;
+            }
+            self.captured_output.push_str(text);
+        } else {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(text.as_bytes());
+            let _ = out.flush();
         }
     }
 
