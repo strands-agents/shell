@@ -1,0 +1,5 @@
+status: 0
+stderr: empty
+--- stdout
+id=42
+id=7

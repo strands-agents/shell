@@ -129,6 +129,8 @@ impl FdKind {
     }
 }
 
+const OUTPUT_LIMIT_MESSAGE: &str = "strands-shell: output size limit exceeded\n";
+
 /// Per-process state. Each shell/subshell gets its own.
 pub struct Process {
     /// Virtual PID (not the real OS PID).
@@ -497,6 +499,23 @@ impl Process {
         );
     }
 
+    /// Copy the channel writer on `fd` into `target`. Returns `false` when `fd` holds no channel writer.
+    pub(crate) fn inherit_channel_writer(&self, fd: Fd, target: &mut Process) -> bool {
+        match self.fds.get(&fd) {
+            Some(FdKind::ChannelWriter { tx, error_flag }) => {
+                target.fds.insert(
+                    fd,
+                    FdKind::ChannelWriter {
+                        tx: tx.clone(),
+                        error_flag: error_flag.clone(),
+                    },
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Remove an fd from this process and install it in another.
     /// Used to pass stdin across fork boundaries (e.g. CompoundPipeline).
     pub fn transfer_fd(&mut self, fd: Fd, target: &mut Process) {
@@ -619,6 +638,11 @@ impl Process {
         }
     }
 
+    /// Whether the last captured stderr line already reports the output limit.
+    pub(crate) fn output_limit_reported(&self) -> bool {
+        self.capture && self.captured_stderr.ends_with(OUTPUT_LIMIT_MESSAGE)
+    }
+
     /// Remove the stderr channel and return it.
     pub(crate) fn take_err_tx(&mut self) -> Option<mpsc::Sender<Bytes>> {
         self.err_tx.take()
@@ -630,8 +654,9 @@ impl Process {
             let _ = tx.try_send(Bytes::from(format!("{msg}\n")));
         } else if self.capture {
             if self.max_output > 0 && self.captured_output.len() + msg.len() > self.max_output {
-                self.captured_stderr
-                    .push_str("strands-shell: output size limit exceeded\n");
+                if !self.output_limit_reported() {
+                    self.captured_stderr.push_str(OUTPUT_LIMIT_MESSAGE);
+                }
                 self.last_exit = 1;
                 return;
             }
@@ -639,6 +664,29 @@ impl Process {
             self.captured_output.push('\n');
         } else {
             println!("{msg}");
+        }
+    }
+
+    /// Write text to stdout by the route [`out_msg`](Self::out_msg) takes, without adding a newline.
+    pub(crate) fn write_stdout(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(FdKind::ChannelWriter { tx, .. }) = self.fds.get(&STDOUT) {
+            let _ = tx.try_send(Bytes::from(text.to_string()));
+        } else if self.capture {
+            if self.max_output > 0 && self.captured_output.len() + text.len() > self.max_output {
+                self.captured_stderr
+                    .push_str("strands-shell: output size limit exceeded\n");
+                self.last_exit = 1;
+                return;
+            }
+            self.captured_output.push_str(text);
+        } else {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(text.as_bytes());
+            let _ = out.flush();
         }
     }
 
