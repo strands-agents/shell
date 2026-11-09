@@ -1,0 +1,9 @@
+status: 0
+stderr: empty
+--- stdout
+b
+2
+a,c
+HELLO
+a b c
+hey

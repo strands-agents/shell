@@ -1,0 +1,6 @@
+status: 5
+stderr: empty
+--- stdout
+false=1
+subshell=3
+negated=1

@@ -1,0 +1,7 @@
+status: 0
+stderr: empty
+--- stdout
+hello world
+sum=3
+literal $name
+tab stripped

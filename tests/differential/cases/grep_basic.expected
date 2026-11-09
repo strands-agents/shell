@@ -1,0 +1,13 @@
+status: 0
+stderr: empty
+--- stdout
+apple
+apricot
+2:Banana
+3
+Banana
+cherry
+apple
+cherry
+apricot
+nomatch=1
