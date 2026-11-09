@@ -9,7 +9,7 @@ Options:
 
 #[command("head")]
 async fn cmd_head(os: &dyn Kernel, args: &[String]) -> CommandResult {
-    let mut parser = lexopt::Parser::from_args(args);
+    let mut parser = lexopt::Parser::from_args(legacy_line_count(args));
     let mut n: usize = 10;
     let mut bytes: Option<u64> = None;
     let mut file = None;
@@ -50,4 +50,23 @@ async fn cmd_head(os: &dyn Kernel, args: &[String]) -> CommandResult {
         w.write_all(line.as_bytes()).await?;
     }
     Ok(0)
+}
+
+/// Rewrites a leading obsolete `-N` count into `-n N`, as GNU `head` and `tail` accept it.
+///
+/// Only the first argument is considered, so an operand after `--` or an option's value is
+/// never taken for a count.
+pub(super) fn legacy_line_count(args: &[String]) -> Vec<String> {
+    let count = args
+        .first()
+        .and_then(|first| first.strip_prefix('-'))
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()));
+    match count {
+        Some(digits) => ["-n", digits]
+            .into_iter()
+            .map(String::from)
+            .chain(args[1..].iter().cloned())
+            .collect(),
+        None => args.to_vec(),
+    }
 }

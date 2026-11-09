@@ -12,10 +12,12 @@ pub fn builtin_unset<'a>(
     Box::pin(async move {
         let mut func_mode = false;
         let mut names = Vec::new();
+        let mut options_ended = false;
         for a in args {
             match a.as_str() {
-                "-f" => func_mode = true,
-                "-v" => func_mode = false,
+                "--" if !options_ended => options_ended = true,
+                "-f" if !options_ended => func_mode = true,
+                "-v" if !options_ended => func_mode = false,
                 _ => names.push(a.as_str()),
             }
         }

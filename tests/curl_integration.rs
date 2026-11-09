@@ -17,6 +17,36 @@ fn rt() -> (tokio::runtime::Runtime, tokio::task::LocalSet) {
     (rt, local)
 }
 
+/// A host directory unique to this test, removed on drop.
+struct TestDir(std::path::PathBuf);
+
+impl TestDir {
+    fn new(name: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("{name}_{}_{n}", std::process::id()));
+        std::fs::create_dir(&path).unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        Self(path)
+    }
+}
+
+impl std::ops::Deref for TestDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.0)
+            && !std::thread::panicking()
+        {
+            panic!("remove {}: {e}", self.0.display());
+        }
+    }
+}
+
 async fn start_server() -> String {
     let app = Router::new()
         .route("/hello", get(|| async { "Hello, World!" }))
@@ -45,8 +75,18 @@ async fn start_server() -> String {
             }),
         )
         .route(
-            "/redirect-slow",
-            get(|| async { Redirect::temporary("/slow") }),
+            "/slow-hop",
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Redirect::temporary("/slow-hop-end")
+            }),
+        )
+        .route(
+            "/slow-hop-end",
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                "late"
+            }),
         )
         .route(
             "/tricky-content-type",
@@ -531,8 +571,7 @@ fn curl_allowed_url_via_toml_config() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
         let base = start_server().await;
-        let dir = std::env::temp_dir().join("lsh_curl_toml_allow_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_curl_toml_allow_test");
         let config_path = dir.join("allow.toml");
         std::fs::write(&config_path, format!("allowed_urls = [\"{base}/\"]\n")).unwrap();
 
@@ -548,8 +587,6 @@ fn curl_allowed_url_via_toml_config() {
             out.stdout, "Hello, World!",
             "TOML allowed_urls should permit the in-list loopback URL"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -608,38 +645,57 @@ fn curl_blocked_scheme() {
     }));
 }
 
-// Verify SafeResolver blocks DNS resolution to loopback at connect time.
-// This test starts a server on 127.0.0.1 and tries to reach it via a
-// hostname. The SafeResolver filters the resolved IP, preventing the
-// connection even though check_url_safe passes the hostname.
+// `localhost.` is refused before any connection, like `localhost`.
 #[test]
-fn curl_safe_resolver_blocks_loopback_dns() {
+fn curl_localhost_with_trailing_dot_denied() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
+        let base = start_server().await;
+        let port = base.rsplit(':').next().unwrap();
+        tokio::net::TcpStream::connect(format!("localhost.:{port}"))
+            .await
+            .expect("localhost. must resolve to the loopback server");
         let mut shell = Shell::builder().build().unwrap();
-        // "localhost" is caught by check_url_safe's string check, so use
-        // a direct IP-based URL to verify the resolver path works.
-        // 127.0.0.1 is caught by check_url_safe as an IP literal.
-        // Both paths should block — this confirms defense in depth.
-        let out = shell.run("curl http://127.0.0.1:19999/").await;
+        let out = shell
+            .run(&format!("curl http://localhost.:{port}/hello"))
+            .await;
         assert_ne!(out.status, 0);
-        assert!(out.stderr.contains("denied"));
+        assert!(out.stderr.contains("access denied"), "{}", out.stderr);
+        assert_eq!(out.stdout, "");
     }));
 }
 
-// Verify that the SafeResolver is used for non-allowed URLs by confirming
-// that a redirect from an allowed server to a blocked IP is caught.
 #[test]
 fn curl_redirect_to_blocked_ip_denied() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let base = start_server().await;
+        // `base` is allowlisted and redirects to `target`, which deliberately is not.
+        let target = start_server().await;
+        let location = format!("{target}/hello");
+        let app = Router::new().route(
+            "/away",
+            get(move || async move { Redirect::temporary(&location) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::task::spawn_local(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         let mut shell = Shell::builder().allow_url(&base).build().unwrap();
-        // The server redirects to /hello, but if we craft a redirect to
-        // a blocked IP, it should be caught. Test that a direct attempt
-        // to curl a blocked IP after allowing the server still fails.
-        let out = shell.run("curl http://10.0.0.1:12345/").await;
-        assert_ne!(out.status, 0);
+        let out = shell.run(&format!("curl -v -L {base}/away")).await;
+        assert_eq!(out.status, 1);
+        assert_eq!(out.stdout, "");
+        assert!(
+            out.stderr
+                .contains(&format!("Redirecting to {target}/hello")),
+            "{}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("access denied: 127.0.0.1"),
+            "{}",
+            out.stderr
+        );
     }));
 }
 
@@ -683,8 +739,7 @@ fn curl_query_credential_injection() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
         let base = start_server().await;
-        let dir = std::env::temp_dir().join("lsh_query_cred_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_query_cred_test");
         let config_path = dir.join("query_cred.toml");
         std::fs::write(
             &config_path,
@@ -711,7 +766,6 @@ param = "api_key"
             "stdout: {}",
             out.stdout
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -720,8 +774,7 @@ fn curl_query_credential_appends_to_existing_query() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
         let base = start_server().await;
-        let dir = std::env::temp_dir().join("lsh_query_cred_append_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_query_cred_append_test");
         let config_path = dir.join("query_cred.toml");
         std::fs::write(
             &config_path,
@@ -753,7 +806,6 @@ param = "token"
             "stdout: {}",
             out.stdout
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -761,8 +813,7 @@ param = "token"
 fn curl_query_credential_requires_param() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_query_cred_no_param_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_query_cred_no_param_test");
         let config_path = dir.join("query_cred.toml");
         std::fs::write(
             &config_path,
@@ -782,7 +833,6 @@ api_key = "secret"
             "error: {}",
             err
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -1095,10 +1145,19 @@ fn curl_max_time_spans_redirect_hops() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
         let (mut shell, base) = shell_with_server().await;
+        let started = std::time::Instant::now();
         let out = shell
-            .run(&format!("curl -sL -m 0.3 {base}/redirect-slow"))
+            .run(&format!(
+                "curl -sL -m 0.8 -w '%{{url_effective}}' {base}/slow-hop"
+            ))
             .await;
         assert_eq!(out.status, 28);
+        assert_eq!(out.stdout, format!("{base}/slow-hop-end"));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(800),
+            "the deadline spans both hops, so it must be >= 800ms, got {elapsed:?}"
+        );
     }));
 }
 

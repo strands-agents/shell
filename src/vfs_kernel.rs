@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -73,49 +73,80 @@ impl VfsKernel {
                 _ => {}
             }
         }
-        // Walk components looking for a HostDir ancestor
-        let components: Vec<&str> = abs_path.split('/').filter(|c| !c.is_empty()).collect();
-        for i in (0..components.len()).rev() {
-            let prefix = format!("/{}", components[..=i].join("/"));
-            if let Ok(ino) = vfs.resolve(&prefix, true)
-                && let Ok(inode) = vfs.get(ino)
-                && let InodeData::HostDir(host_base, ro) = &inode.data
-            {
-                let rest = &components[i + 1..];
-                let mut host = PathBuf::from(host_base);
-                for c in rest {
-                    host.push(c);
-                }
-                // Canonicalize and verify the path stays within the bind mount
-                let canon_base =
-                    std::fs::canonicalize(host_base).unwrap_or_else(|_| PathBuf::from(host_base));
-                if let Ok(canon_host) = std::fs::canonicalize(&host) {
-                    if !canon_host.starts_with(&canon_base) {
-                        return None; // symlink escape — block access
-                    }
-                    return Some((canon_host, *ro, canon_base));
-                }
-                // canonicalize failed — check if path is a dangling symlink
-                if host.symlink_metadata().is_ok() {
-                    return None; // dangling symlink pointing outside mount
-                }
-                // Path truly doesn't exist — verify parent is safe
-                if let Some(parent) = host.parent()
-                    && let Ok(canon_parent) = std::fs::canonicalize(parent)
-                    && !canon_parent.starts_with(&canon_base)
-                {
-                    return None;
-                }
-                return Some((host, *ro, canon_base));
+        // Nothing resolves past a HostDir, and a prefix of a normalized path resolves whenever a
+        // longer one does, so only the longest prefix that resolves can be the HostDir ancestor.
+        let normalized = vfs::normalize(abs_path);
+        let components: Vec<&str> = normalized.split('/').filter(|c| !c.is_empty()).collect();
+        let resolves = |length: usize| {
+            vfs.resolve(&format!("/{}", components[..length].join("/")), true)
+                .ok()
+        };
+        let (mut low, mut high) = (0, components.len());
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if resolves(middle).is_some() {
+                low = middle;
+            } else {
+                high = middle - 1;
             }
         }
+        if low > 0
+            && let Some(ino) = resolves(low)
+            && let Ok(inode) = vfs.get(ino)
+            && let InodeData::HostDir(host_base, ro) = &inode.data
+        {
+            let rest = &components[low..];
+            let mut host = PathBuf::from(host_base);
+            for c in rest {
+                host.push(c);
+            }
+            // Canonicalize and verify the path stays within the bind mount
+            let canon_base =
+                std::fs::canonicalize(host_base).unwrap_or_else(|_| PathBuf::from(host_base));
+            if let Ok(canon_host) = std::fs::canonicalize(&host) {
+                if !canon_host.starts_with(&canon_base) {
+                    return None; // symlink escape — block access
+                }
+                return Some((canon_host, *ro, canon_base));
+            }
+            // canonicalize failed — check if path is a dangling symlink
+            if host.symlink_metadata().is_ok() {
+                return None; // dangling symlink pointing outside mount
+            }
+            // Path truly doesn't exist — verify parent is safe
+            if let Some(parent) = host.parent()
+                && let Ok(canon_parent) = std::fs::canonicalize(parent)
+                && !canon_parent.starts_with(&canon_base)
+            {
+                return None;
+            }
+            return Some((host, *ro, canon_base));
+        }
         None
+    }
+
+    /// Resolve the host path of `abs_path` without following its last component.
+    fn resolve_host_nofollow(vfs: &Vfs, abs_path: &str) -> Option<(PathBuf, bool)> {
+        let (parent, name) = match abs_path.rfind('/') {
+            Some(i) if i + 1 < abs_path.len() => (&abs_path[..i.max(1)], &abs_path[i + 1..]),
+            _ => return None,
+        };
+        let mut components = Path::new(name).components();
+        let (Some(Component::Normal(leaf)), None) = (components.next(), components.next()) else {
+            return None;
+        };
+        if leaf != name {
+            return None;
+        }
+        let (host_parent, ro, _) = Self::resolve_host(vfs, parent)?;
+        Some((host_parent.join(leaf), ro))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     async fn open_host(
         &self,
         proc: &mut Process,
+        virtual_path: &str,
         host_path: &std::path::Path,
         flags: &OpenFlags,
         canon_base: &std::path::Path,
@@ -155,6 +186,7 @@ impl VfsKernel {
             })
         } else if flags.write {
             let (tx, rx) = crate::os::pipe(8192);
+            let writers = tx.downgrade();
             let size_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let fd = proc.alloc_fd(FdKind::ChannelWriter {
                 tx,
@@ -163,7 +195,7 @@ impl VfsKernel {
             let path = host_path.to_path_buf();
             let append = flags.append;
             let max_file_size = self.vfs.lock().await.max_file_size;
-            tokio::task::spawn_local(async move {
+            let drain = tokio::task::spawn_local(async move {
                 let mut rx = rx;
                 let mut buf = if append {
                     tokio::fs::read(&path).await.unwrap_or_default()
@@ -177,8 +209,9 @@ impl VfsKernel {
                     }
                     buf.extend_from_slice(&chunk);
                 }
-                let _ = tokio::fs::write(&path, &buf).await;
+                tokio::fs::write(&path, &buf).await
             });
+            proc.track_host_write(virtual_path.to_string(), writers, drain);
             Ok(fd)
         } else {
             Err(io::Error::new(
@@ -192,6 +225,7 @@ impl VfsKernel {
     async fn open_host(
         &self,
         proc: &mut Process,
+        virtual_path: &str,
         host_path: &std::path::Path,
         flags: &OpenFlags,
         _canon_base: &std::path::Path,
@@ -210,6 +244,7 @@ impl VfsKernel {
             })
         } else if flags.write {
             let (tx, rx) = crate::os::pipe(8192);
+            let writers = tx.downgrade();
             let size_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let fd = proc.alloc_fd(FdKind::ChannelWriter {
                 tx,
@@ -218,7 +253,7 @@ impl VfsKernel {
             let path = host_path.to_path_buf();
             let append = flags.append;
             let max_file_size = self.vfs.lock().await.max_file_size;
-            tokio::task::spawn_local(async move {
+            let drain = tokio::task::spawn_local(async move {
                 let mut rx = rx;
                 let mut buf = if append {
                     std::fs::read(&path).unwrap_or_default()
@@ -232,8 +267,9 @@ impl VfsKernel {
                     }
                     buf.extend_from_slice(&chunk);
                 }
-                let _ = std::fs::write(&path, &buf);
+                std::fs::write(&path, &buf)
             });
+            proc.track_host_write(virtual_path.to_string(), writers, drain);
             Ok(fd)
         } else {
             Err(io::Error::new(
@@ -270,7 +306,9 @@ impl Kernel for VfsKernel {
                         "read-only bind mount",
                     ));
                 }
-                return self.open_host(proc, &host_path, &flags, &canon_base).await;
+                return self
+                    .open_host(proc, path, &host_path, &flags, &canon_base)
+                    .await;
             }
         }
 
@@ -690,6 +728,12 @@ impl Kernel for VfsKernel {
     async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String> {
         let abs = Self::abs(proc, path);
         let vfs = self.vfs.lock().await;
+        if let Some((host_path, _ro)) = Self::resolve_host_nofollow(&vfs, &abs) {
+            drop(vfs);
+            return Ok(std::fs::read_link(host_path)?
+                .to_string_lossy()
+                .into_owned());
+        }
         let ino = vfs.resolve(&abs, false)?;
         match &vfs.get(ino)?.data {
             InodeData::Symlink(target) => Ok(target.clone()),
@@ -703,6 +747,16 @@ impl Kernel for VfsKernel {
     async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()> {
         let abs = Self::abs(proc, path);
         let mut vfs = self.vfs.lock().await;
+        if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
+            drop(vfs);
+            if ro {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "read-only bind mount",
+                ));
+            }
+            return host_set_permissions(&host_path, mode);
+        }
         let ino = vfs.resolve(&abs, true)?;
         let inode = vfs.get_mut(ino)?;
         // Only the file owner can chmod
@@ -1040,6 +1094,20 @@ impl Kernel for VfsKernel {
 }
 
 // --- host stat helper ---
+
+#[cfg(unix)]
+fn host_set_permissions(path: &std::path::Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777))
+}
+
+#[cfg(not(unix))]
+fn host_set_permissions(_path: &std::path::Path, _mode: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "chmod is not supported on this host",
+    ))
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn host_stat(path: &std::path::Path) -> FileStat {
@@ -1387,7 +1455,8 @@ pub fn check_url_safe(url: &str) -> io::Result<()> {
             }
         }
         Some(url::Host::Domain(d)) => {
-            if d == "localhost" || d.ends_with(".localhost") {
+            let name = d.strip_suffix('.').unwrap_or(d);
+            if name == "localhost" || name.ends_with(".localhost") {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     format!("access denied: {d}"),
@@ -1461,6 +1530,9 @@ mod url_safety_tests {
             "http://10.0.0.1/",        // private
             "http://localhost/",       // localhost domain
             "http://x.localhost/",     // .localhost subdomain
+            "http://localhost./",      // root-dotted localhost
+            "http://LOCALHOST./",      // mixed case, root-dotted
+            "http://a.localhost./",    // root-dotted .localhost subdomain
             "ftp://example.com/",      // non-http scheme
         ] {
             assert!(check_url_safe(u).is_err(), "{u} should be blocked");
@@ -1472,10 +1544,20 @@ mod url_safety_tests {
         for u in [
             "http://example.com/",
             "https://example.com/path",
+            "http://example.com./",           // root-dotted public host
             "http://[2606:4700:4700::1111]/", // public IPv6 (Cloudflare DNS)
         ] {
             assert!(check_url_safe(u).is_ok(), "{u} should be allowed");
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn safe_resolver_refuses_a_name_that_resolves_to_loopback() {
+        use reqwest::dns::Resolve;
+        use std::str::FromStr;
+        let name = reqwest::dns::Name::from_str("localhost").unwrap();
+        assert!(super::SafeResolver.resolve(name).await.is_err());
     }
 
     fn matches(url: &str, prefix: &str) -> bool {
@@ -1535,5 +1617,117 @@ mod url_safety_tests {
         assert!(!matches("http://h.example.com/", "https://h.example.com"));
         // Different host.
         assert!(!matches("http://evil.example.com/", "http://h.example.com"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod resolve_host_tests {
+    use std::path::PathBuf;
+
+    use super::VfsKernel;
+    use crate::vfs::{InodeData, LASH_GID, LASH_UID, Vfs};
+
+    struct Fixture {
+        vfs: Vfs,
+        workspace: PathBuf,
+        canonical: PathBuf,
+    }
+
+    // A bind at /mnt/deep/ws, reached directly, through /alias, and through /chain -> alias.
+    fn fixture(name: &str) -> Fixture {
+        let base = std::env::temp_dir().join(format!("resolve-host-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let workspace = base.join("ws");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(workspace.join("real.txt"), "in mount").unwrap();
+        std::os::unix::fs::symlink(base.join("absent"), workspace.join("dangle")).unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("escape")).unwrap();
+
+        let mut vfs = Vfs::new();
+        vfs.mkdir_p("/mnt/deep", 0o755, LASH_UID, LASH_GID).unwrap();
+        let source = workspace.to_str().unwrap().to_string();
+        vfs.mknod(
+            "/mnt/deep/ws",
+            InodeData::HostDir(source, false),
+            0o100644,
+            LASH_UID,
+            LASH_GID,
+        )
+        .unwrap();
+        vfs.symlink("/alias", "/mnt/deep/ws", LASH_UID, LASH_GID)
+            .unwrap();
+        vfs.symlink("/chain", "alias", LASH_UID, LASH_GID).unwrap();
+        let canonical = std::fs::canonicalize(&workspace).unwrap();
+        Fixture {
+            vfs,
+            workspace,
+            canonical,
+        }
+    }
+
+    fn host(fixture: &Fixture, path: &str) -> Option<PathBuf> {
+        VfsKernel::resolve_host(&fixture.vfs, path).map(|(host, _, _)| host)
+    }
+
+    #[test]
+    fn existing_and_missing_paths_under_a_bind() {
+        let f = fixture("under");
+        assert_eq!(host(&f, "/mnt/deep/ws"), Some(f.workspace.clone()));
+        assert_eq!(
+            host(&f, "/mnt/deep/ws/real.txt"),
+            Some(f.canonical.join("real.txt"))
+        );
+        assert_eq!(
+            host(&f, "/mnt/deep/ws/a/b/c"),
+            Some(f.workspace.join("a/b/c"))
+        );
+        assert_eq!(
+            host(&f, "/mnt/deep/ws/sub/missing"),
+            Some(f.workspace.join("sub/missing"))
+        );
+    }
+
+    #[test]
+    fn dot_dot_across_a_missing_component() {
+        let f = fixture("dotdot");
+        assert_eq!(
+            host(&f, "/mnt/deep/ws/missing/../real.txt"),
+            Some(f.canonical.join("real.txt"))
+        );
+        assert_eq!(
+            host(&f, "/mnt/deep/absent/../ws/real.txt"),
+            Some(f.canonical.join("real.txt"))
+        );
+        assert_eq!(host(&f, "/mnt/deep/ws/missing/../../x"), None);
+    }
+
+    #[test]
+    fn symlinks_before_a_missing_tail() {
+        let f = fixture("symlinked");
+        assert_eq!(
+            host(&f, "/alias/real.txt"),
+            Some(f.canonical.join("real.txt"))
+        );
+        assert_eq!(host(&f, "/alias/sub/x"), Some(f.workspace.join("sub/x")));
+        assert_eq!(host(&f, "/chain/a/b"), Some(f.workspace.join("a/b")));
+    }
+
+    #[test]
+    fn host_symlinks_that_dangle_or_leave_the_bind_are_refused() {
+        let f = fixture("refused");
+        assert_eq!(host(&f, "/mnt/deep/ws/dangle"), None);
+        assert_eq!(host(&f, "/mnt/deep/ws/escape"), None);
+        assert_eq!(host(&f, "/mnt/deep/ws/escape/f"), None);
+    }
+
+    #[test]
+    fn paths_without_a_bind_ancestor_have_no_host_path() {
+        let f = fixture("virtual");
+        assert_eq!(host(&f, "/"), None);
+        assert_eq!(host(&f, "/mnt/deep"), None);
+        assert_eq!(host(&f, "/mnt/deep/x/y"), None);
+        assert_eq!(host(&f, "/absent/ws/real.txt"), None);
     }
 }

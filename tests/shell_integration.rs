@@ -9,6 +9,36 @@ fn rt() -> (tokio::runtime::Runtime, tokio::task::LocalSet) {
     (rt, local)
 }
 
+/// A host directory unique to this test, removed on drop.
+struct TestDir(std::path::PathBuf);
+
+impl TestDir {
+    fn new(name: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("{name}_{}_{n}", std::process::id()));
+        std::fs::create_dir(&path).unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        Self(path)
+    }
+}
+
+impl std::ops::Deref for TestDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.0)
+            && !std::thread::panicking()
+        {
+            panic!("remove {}: {e}", self.0.display());
+        }
+    }
+}
+
 macro_rules! shell_test {
     ($name:ident, $cmd:expr, $check:expr) => {
         #[test]
@@ -531,6 +561,90 @@ fn source_script() {
     }));
 }
 
+#[test]
+fn multiline_reports_first_parse_error_with_line() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("echo one\n)\necho \"two").await;
+        assert_eq!(out.stdout, "one\n");
+        assert_eq!(out.stderr, "strands-shell: line 2: unexpected ')'\n");
+        assert_eq!(out.status, 1);
+    }));
+}
+
+#[test]
+fn multiline_stops_at_parse_error() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("echo a\nfi\necho b\necho c").await;
+        assert_eq!(out.stdout, "a\n");
+        assert_eq!(out.stderr, "strands-shell: line 2: unexpected 'fi'\n");
+        assert_eq!(out.status, 1);
+    }));
+}
+
+#[test]
+fn sourced_parse_error_stops_file_and_names_line() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .run("printf 'echo one\\necho two\\n)\\necho \"three\\n' > /tmp/bad.sh")
+            .await;
+        let out = shell.run(". /tmp/bad.sh; echo \"after $?\"").await;
+        assert_eq!(out.stdout, "one\ntwo\nafter 1\n");
+        assert_eq!(out.stderr, "strands-shell: line 3: unexpected ')'\n");
+    }));
+}
+
+#[test]
+fn multiline_incomplete_input_at_end_keeps_its_error() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("echo a\necho \"b\nc").await;
+        assert_eq!(out.stdout, "a\n");
+        assert_eq!(out.stderr, "strands-shell: unterminated double quote\n");
+        assert_eq!(out.status, 1);
+    }));
+}
+
+#[test]
+fn multiline_line_continuation_before_keyword() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("for i in a; \\\ndo echo $i; done\nf() \\\n{ echo f; }\nf")
+            .await;
+        assert_eq!(out.stdout, "a\nf\n");
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.status, 0);
+    }));
+}
+
+#[test]
+fn multiline_constructs_still_continue() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run(concat!(
+                "case x in\nx)\necho case\n;;\nesac\n",
+                "echo pipe |\ntr a-z A-Z\n",
+                "if true\nthen\necho if\nfi\n",
+                "cat <<EOF\nbody )\nEOF\n",
+                "echo \"multi\nline\"",
+            ))
+            .await;
+        assert_eq!(out.stdout, "case\nPIPE\nif\nbody )\nmulti\nline\n");
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.status, 0);
+    }));
+}
+
 // Compound commands can now be piped
 #[test]
 fn for_loop_glob() {
@@ -553,7 +667,7 @@ fn readonly_prevents_unset() {
     rt.block_on(local.run_until(async {
         let mut shell = Shell::builder().build().unwrap();
         shell.run("readonly X=1").await;
-        let out = shell.run("unset X 2>&1; echo $X").await;
+        let out = shell.run("unset X 2>/dev/null; echo $X").await;
         assert_eq!(out.stdout.trim(), "1");
     }));
 }
@@ -748,6 +862,43 @@ fn redir_stderr_to_file() {
             "stderr should be empty, got: {:?}",
             out.stderr
         );
+    }));
+}
+
+// A redirect that cannot open reports why, for a builtin and for a command alike.
+#[test]
+fn redir_open_failure_reports_on_stderr() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, written) in [
+            ("echo hi", "hi\n"),
+            ("printf x", "x"),
+            ("cat /dev/null", ""),
+        ] {
+            let out = shell.run(&format!("{cmd} > /nonexistent/x")).await;
+            assert_eq!(out.status, 1, "{cmd}: status");
+            assert!(out.stdout.is_empty(), "{cmd}: stdout {:?}", out.stdout);
+            assert!(
+                out.stderr.contains("/nonexistent/x")
+                    && out.stderr.to_lowercase().contains("no such file"),
+                "{cmd}: stderr {:?}",
+                out.stderr
+            );
+
+            let out = shell.run(&format!("{cmd} > /tmp/redir_ok")).await;
+            assert_eq!(out.status, 0, "{cmd}: control status");
+            assert!(
+                out.stderr.is_empty(),
+                "{cmd}: control stderr {:?}",
+                out.stderr
+            );
+            let out = shell
+                .run("test -f /tmp/redir_ok && cat /tmp/redir_ok")
+                .await;
+            assert_eq!(out.status, 0, "{cmd}: control file missing");
+            assert_eq!(out.stdout, written, "{cmd}: control file");
+        }
     }));
 }
 
@@ -1075,6 +1226,191 @@ expect!(
     eval_preserves_env,
     "eval \"X=from_eval\"; echo $X",
     "from_eval"
+);
+
+// ── eval and source redirections ────────────────────────────────────
+
+macro_rules! expect_output {
+    ($name:ident, $cmd:expr, $stdout:expr, $stderr:expr, $status:expr) => {
+        shell_test!(
+            $name,
+            $cmd,
+            |_shell: &mut Shell, out: strands_shell::Output| {
+                assert_eq!(out.stdout, $stdout, "stdout mismatch");
+                assert_eq!(out.stderr, $stderr, "stderr mismatch");
+                assert_eq!(out.status, $status, "exit status mismatch");
+            }
+        );
+    };
+}
+
+expect_output!(
+    eval_stdout_redirect,
+    "eval 'echo hi' > /tmp/f; echo \"[$(cat /tmp/f)]\"",
+    "[hi]\n",
+    "",
+    0
+);
+expect_output!(
+    eval_append_redirect,
+    "echo a > /tmp/f; eval 'echo b' >> /tmp/f; cat /tmp/f",
+    "a\nb\n",
+    "",
+    0
+);
+expect_output!(
+    eval_stderr_redirect,
+    "eval 'echo e >&2; echo o' 2> /tmp/g; echo \"[$(cat /tmp/g)]\"",
+    "o\n[e]\n",
+    "",
+    0
+);
+expect_output!(
+    eval_stdin_redirect,
+    "printf 'line1\\n' > /tmp/in; eval 'read x; echo \"x=$x\"' < /tmp/in",
+    "x=line1\n",
+    "",
+    0
+);
+expect_output!(
+    eval_stdin_dev_null,
+    "eval 'read y; echo \"y=$y\"' < /dev/null",
+    "y=\n",
+    "",
+    0
+);
+expect_output!(
+    eval_heredoc_redirect,
+    "eval cat <<EOF\nfrom heredoc\nEOF",
+    "from heredoc\n",
+    "",
+    0
+);
+expect_output!(
+    eval_redirect_order,
+    "eval 'echo a; echo b >&2' 2>&1 > /tmp/h; echo \"[$(cat /tmp/h)]\"",
+    "b\n[a]\n",
+    "",
+    0
+);
+expect_output!(
+    eval_redirect_both_to_file,
+    "eval 'echo a; echo b >&2' > /tmp/h 2>&1; cat /tmp/h",
+    "a\nb\n",
+    "",
+    0
+);
+expect_output!(
+    eval_redirect_keeps_state,
+    "eval 'V=set; cd /tmp' > /dev/null; echo \"$V $PWD\"",
+    "set /tmp\n",
+    "",
+    0
+);
+expect_output!(
+    eval_parse_error_redirected,
+    "eval 'if' 2> /dev/null; echo done",
+    "done\n",
+    "",
+    0
+);
+expect_output!(
+    builtin_eval_redirect,
+    "builtin eval 'echo hi' > /tmp/f; cat /tmp/f",
+    "hi\n",
+    "",
+    0
+);
+
+#[test]
+fn eval_redirect_failure_skips_body() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("eval 'echo ran' > /nonexistent/z; echo \"status=$?\"")
+            .await;
+        assert_eq!(out.stdout, "status=1\n");
+        assert!(out.stderr.contains("/nonexistent/z"), "{}", out.stderr);
+    }));
+}
+
+#[test]
+fn eval_exit_flushes_redirected_output() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("eval 'echo bye; exit 4' > /tmp/f; echo no").await;
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 4);
+        let out = shell.run("cat /tmp/f").await;
+        assert_eq!(out.stdout, "bye\n");
+    }));
+}
+
+#[test]
+fn source_redirects() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .run("printf 'echo out\\nread l\\necho \"got:$l\"\\necho err >&2\\nS=sourced\\n' > /tmp/s.sh; printf 'line1\\n' > /tmp/in")
+            .await;
+        let out = shell
+            .run("source /tmp/s.sh > /tmp/o 2> /tmp/e < /tmp/in; echo \"$S\"; cat /tmp/o /tmp/e")
+            .await;
+        assert_eq!(out.stdout, "sourced\nout\ngot:line1\nerr\n");
+        assert_eq!(out.stderr, "");
+        let out = shell
+            .run(". /tmp/s.sh > /tmp/o 2>&1 < /tmp/in; cat /tmp/o")
+            .await;
+        assert_eq!(out.stdout, "out\ngot:line1\nerr\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+expect_output!(
+    eval_self_dup_keeps_caller_stdin,
+    "printf '1\\n2\\n3\\n4\\n' > /tmp/q; while read l; do eval 'read m' <&0; echo \"$l$m\"; done < /tmp/q",
+    "12\n34\n",
+    "",
+    0
+);
+expect_output!(
+    nested_eval_redirects,
+    "eval \"eval 'echo inner; echo e >&2' 2> /tmp/e\" > /tmp/o; echo \"o=$(cat /tmp/o) e=$(cat /tmp/e)\"",
+    "o=inner e=e\n",
+    "",
+    0
+);
+expect_output!(
+    source_args_with_redirect,
+    "printf 'echo \"$1 $#\"\\n' > /tmp/a.sh; set -- x; . /tmp/a.sh a b > /tmp/o; cat /tmp/o; echo \"$1 $#\"",
+    "a 2\nx 1\n",
+    "",
+    0
+);
+
+#[test]
+fn eval_redirect_from_cli() {
+    let dir = TestDir::new("eval_redirect_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("eval 'echo out; echo err >&2' > /tmp/o 2> /tmp/e; eval 'echo terminal'; cat /tmp/o /tmp/e")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "terminal\nout\nerr\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert!(out.status.success());
+}
+
+expect_output!(
+    source_missing_file_stderr_redirect,
+    ". /nonexistent/file.sh 2> /dev/null; echo $?",
+    "1\n",
+    "",
+    0
 );
 
 // ── find builtin ────────────────────────────────────────────────────
@@ -1482,12 +1818,137 @@ expect!(
     "1"
 );
 
+// ── builtin builtin ─────────────────────────────────────────────────
+
+expect!(builtin_runs_echo, "builtin echo hello", "hello");
+expect!(builtin_passes_args, "builtin printf '%s-%s\\n' a b", "a-b");
+expect!(builtin_keeps_status, "builtin false; echo $?", "1");
+expect!(builtin_no_args, "builtin", "");
+expect!(
+    builtin_bypasses_function,
+    "echo() { printf 'shadowed\\n'; }; builtin echo real",
+    "real"
+);
+expect!(
+    builtin_in_wrapper_function,
+    "go() { builtin cd \"$@\"; }; go /tmp; pwd",
+    "/tmp"
+);
+expect!(
+    builtin_special_return,
+    "f() { builtin return 4; echo unreachable; }; f; echo $?",
+    "4"
+);
+expect_status!(builtin_special_exit, "builtin exit 3; echo unreachable", 3);
+
+shell_test!(
+    builtin_rejects_command,
+    "builtin cat /dev/null",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert_eq!(
+            out.stderr.trim(),
+            "strands-shell: builtin: cat: not a shell builtin"
+        );
+    }
+);
+
+shell_test!(
+    builtin_rejects_unknown,
+    "builtin nosuch_xyz",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert_eq!(
+            out.stderr.trim(),
+            "strands-shell: builtin: nosuch_xyz: not a shell builtin"
+        );
+    }
+);
+
 // ── Redirections: read-write, dup, close ────────────────────────────
 
 expect!(
     redir_readwrite,
     "echo hello > /tmp/rw; cat <> /tmp/rw",
     "hello"
+);
+
+// ── Builtin diagnostics follow stderr redirections ──────────────────
+
+macro_rules! expect_streams {
+    ($name:ident, $cmd:expr, $stdout:expr, $stderr:expr) => {
+        shell_test!(
+            $name,
+            $cmd,
+            |_shell: &mut Shell, out: strands_shell::Output| {
+                assert_eq!(out.stdout, $stdout, "stdout mismatch");
+                assert_eq!(out.stderr, $stderr, "stderr mismatch");
+            }
+        );
+    };
+}
+
+const CD_NOPE: &str = "strands-shell: cd: /nope: no such file or directory: /nope\n";
+
+expect_streams!(
+    builtin_diagnostic_captured_by_substitution,
+    "x=$(cd /nope 2>&1); echo \"[$x]\"",
+    format!("[{}]\n", CD_NOPE.trim_end()),
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_to_dev_null,
+    "cd /nope 2>/dev/null; echo \"status=$?\"",
+    "status=1\n",
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_to_file,
+    "cd /nope 2>/tmp/err; cat /tmp/err",
+    CD_NOPE,
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_dup_order,
+    "x=$(cd /nope 2>&1 >/dev/null); echo \"[$x]\"",
+    format!("[{}]\n", CD_NOPE.trim_end()),
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_into_pipe,
+    "cd /nope 2>&1 | grep -c nope",
+    "1\n",
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_closed_stderr,
+    "cd /nope 2>&-; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_in_pipeline_stage,
+    "echo x | cd /nope 2>/dev/null; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    builtin_usage_error_follows_redirect,
+    "x=$(printf 2>&1); echo \"[${x%%:*}]\"; printf 2>/dev/null; echo done",
+    "[strands-shell]\ndone\n",
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_keeps_order_with_stdout,
+    "x=$(echo a; cd /nope 2>&1; echo b); echo \"$x\"",
+    format!("a\n{CD_NOPE}b\n"),
+    ""
+);
+expect_streams!(
+    builtin_diagnostic_without_redirect,
+    "x=$(cd /nope); echo \"[$x]\"",
+    "[]\n",
+    CD_NOPE
 );
 
 // ── Heredoc expansion ───────────────────────────────────────────────
@@ -1683,6 +2144,16 @@ fn readonly_var() {
 // ── unset ───────────────────────────────────────────────────────────
 
 expect!(unset_var, "X=hello; unset X; echo \"${X:-gone}\"", "gone");
+expect!(
+    unset_option_terminator_treats_dash_f_as_name,
+    "X=hello; unset -- -f X; echo \"${X:-gone}\"",
+    "gone"
+);
+expect!(
+    unset_func_option_terminator,
+    "f() { echo hi; }; unset -f -- f; f 2>/dev/null; echo $?",
+    "127"
+);
 #[test]
 fn unset_func() {
     let (rt, local) = rt();
@@ -1998,9 +2469,7 @@ expect!(
 fn grep_binary_run(tag: &str, cmd: &str) -> strands_shell::Output {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join(format!("lsh_grep_bin_{tag}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new(&format!("lsh_grep_bin_{tag}"));
         std::fs::write(dir.join("a.txt"), b"needle\n").unwrap();
         std::fs::write(dir.join("b.txt"), b"needle b\n").unwrap();
         std::fs::write(dir.join("bin.dat"), b"\0\xffneedle\n").unwrap();
@@ -2060,9 +2529,7 @@ fn grep_binary_run(tag: &str, cmd: &str) -> strands_shell::Output {
             .bind_direct(dir.to_str().unwrap(), "/g")
             .build()
             .unwrap();
-        let out = shell.run(cmd).await;
-        let _ = std::fs::remove_dir_all(&dir);
-        out
+        shell.run(cmd).await
     }))
 }
 
@@ -2630,6 +3097,21 @@ expect!(
     "printf 'a\\nb\\nc\\nd\\ne\\n' | tail -n +3",
     "c\nd\ne"
 );
+expect!(
+    tail_legacy_count_stdin,
+    "printf 'a\\nb\\nc\\n' | tail -1",
+    "c"
+);
+expect!(
+    tail_legacy_count_from_file,
+    "printf 'a\\nb\\nc\\nd\\n' > /tmp/tl; tail -2 /tmp/tl",
+    "c\nd"
+);
+expect!(
+    tail_dash_operand_after_terminator,
+    "printf 'a\\nb\\n' > /tmp/-2; cd /tmp; tail -n1 -- -2",
+    "b"
+);
 
 // ── uniq coverage ───────────────────────────────────────────────────
 
@@ -2684,6 +3166,31 @@ shell_test!(
         assert_eq!(out.stdout, "ab\n\n");
         assert_eq!(out.status, 0);
     }
+);
+expect!(
+    head_legacy_count_stdin,
+    "printf 'a\\nb\\nc\\n' | head -2",
+    "a\nb"
+);
+expect!(
+    head_legacy_count_from_file,
+    "printf 'a\\nb\\nc\\nd\\n' > /tmp/hl; head -3 /tmp/hl",
+    "a\nb\nc"
+);
+expect!(
+    head_legacy_count_then_lines_last_wins,
+    "printf 'a\\nb\\nc\\n' | head -2 -n1",
+    "a"
+);
+expect!(
+    head_dash_operand_after_terminator,
+    "printf 'a\\nb\\n' > /tmp/-3; cd /tmp; head -n1 -- -3",
+    "a"
+);
+expect!(
+    head_bytes_after_legacy_count,
+    "printf 'abcdef' | head -3 -c 2",
+    "ab"
 );
 expect!(head_bytes_stdin, "printf 'abcdef' | head -c 3", "abc");
 expect!(head_bytes_long, "printf 'abcdef' | head --bytes=2", "ab");
@@ -2889,6 +3396,16 @@ expect!(
     unalias_all,
     "alias a=1; alias b=2; unalias -a; alias; echo done",
     "done"
+);
+expect!(
+    unalias_option_terminator,
+    "alias ll=ls; unalias -- ll; echo $?; alias ll 2>/dev/null; echo $?",
+    "0\n1"
+);
+expect!(
+    unalias_option_terminator_keeps_dash_a_as_name,
+    "alias a=1; unalias -- -a 2>/dev/null; echo $?; alias a",
+    "1\na='1'"
 );
 
 // ── hash builtin ────────────────────────────────────────────────────
@@ -3292,8 +3809,7 @@ expect!(
 // ── shell builder coverage ─────────────────────────────────────────
 #[test]
 fn builder_bind_readonly() {
-    let dir = std::env::temp_dir().join("lash_test_bind_ro");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = TestDir::new("lash_test_bind_ro");
     std::fs::write(dir.join("hello.txt"), "hi").unwrap();
 
     let (rt, local) = rt();
@@ -3306,8 +3822,6 @@ fn builder_bind_readonly() {
         assert_eq!(out.status, 0);
         assert!(out.stdout.contains("hello.txt"));
     }));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -3348,8 +3862,7 @@ fn builder_zero_timeout_rejected() {
 // Same guard reached through the TOML `[limits]` surface.
 #[test]
 fn config_zero_timeout_rejected() {
-    let dir = std::env::temp_dir().join("lsh_zero_timeout_test");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = TestDir::new("lsh_zero_timeout_test");
     let config_path = dir.join("zero_timeout.toml");
     std::fs::write(&config_path, "[limits]\ntimeout = 0\n").unwrap();
     let result = Shell::builder().config_file(&config_path).unwrap().build();
@@ -3357,7 +3870,6 @@ fn config_zero_timeout_rejected() {
         result.is_err(),
         "TOML timeout = 0 should be rejected at build"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // Regression: the per-command deadline must be reset on every run().
@@ -3383,8 +3895,6 @@ fn timeout_is_per_command_not_cumulative() {
 
 // And the deadline must still actually fire mid-command for slow
 // commands — refreshing on entry shouldn't disable enforcement.
-// Uses a busy `while true` loop because the `sleep` builtin races
-// the deadline silently and exits 0.
 #[test]
 fn timeout_still_fires_within_a_command() {
     let (rt, local) = rt();
@@ -3400,6 +3910,41 @@ fn timeout_still_fires_within_a_command() {
             "expected timeout error, got: {:?}",
             out.stderr
         );
+    }));
+}
+
+// A sleep cut short by the deadline did not happen, so it must fail
+// with the timeout error rather than exit 0.
+#[test]
+fn timeout_interrupts_sleep_with_failure() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let out = shell.run("sleep 5").await;
+        assert_ne!(out.status, 0, "sleep past the deadline must fail");
+        assert_eq!(
+            out.stderr.trim(),
+            "strands-shell: execution timeout exceeded",
+            "stderr={:?}",
+            out.stderr
+        );
+    }));
+}
+
+#[test]
+fn sleep_within_timeout_succeeds() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = shell.run("sleep 0.05").await;
+        assert_eq!(out.status, 0, "stderr={:?}", out.stderr);
+        assert!(out.stderr.is_empty(), "stderr={:?}", out.stderr);
     }));
 }
 
@@ -3762,6 +4307,653 @@ expect!(
     "x y z"
 );
 
+// ── exec: compound status in command substitution ──────────────────
+expect!(
+    cmd_subst_group_false_and,
+    "X=$({ false; } && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_group_false_or,
+    "X=$({ false; } || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_group_false_status,
+    "X=$({ false; }; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_group_true_and,
+    "X=$({ true; } && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_group_true_or,
+    "X=$({ true; } || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_subshell_false_and,
+    "X=$( (false) && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_subshell_false_or,
+    "X=$( (false) || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_subshell_false_status,
+    "X=$( (false); echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_subshell_true_and,
+    "X=$( (true) && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_subshell_true_or,
+    "X=$( (true) || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_if_false_and,
+    "X=$(if true; then false; fi && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_if_false_or,
+    "X=$(if true; then false; fi || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_if_false_status,
+    "X=$(if true; then false; fi; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_if_true_and,
+    "X=$(if true; then true; fi && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_if_true_or,
+    "X=$(if true; then true; fi || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_for_false_and,
+    "X=$(for i in 1; do false; done && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_for_false_or,
+    "X=$(for i in 1; do false; done || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_for_false_status,
+    "X=$(for i in 1; do false; done; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_for_true_and,
+    "X=$(for i in 1; do true; done && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_for_true_or,
+    "X=$(for i in 1; do true; done || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_while_false_and,
+    "X=$(n=0; while [ $n -lt 1 ]; do n=1; false; done && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_while_false_or,
+    "X=$(n=0; while [ $n -lt 1 ]; do n=1; false; done || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_while_false_status,
+    "X=$(n=0; while [ $n -lt 1 ]; do n=1; false; done; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_while_true_and,
+    "X=$(n=0; while [ $n -lt 1 ]; do n=1; true; done && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_while_true_or,
+    "X=$(n=0; while [ $n -lt 1 ]; do n=1; true; done || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_until_false_and,
+    "X=$(n=0; until [ $n -ge 1 ]; do n=1; false; done && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_until_false_or,
+    "X=$(n=0; until [ $n -ge 1 ]; do n=1; false; done || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_until_false_status,
+    "X=$(n=0; until [ $n -ge 1 ]; do n=1; false; done; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_until_true_and,
+    "X=$(n=0; until [ $n -ge 1 ]; do n=1; true; done && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_until_true_or,
+    "X=$(n=0; until [ $n -ge 1 ]; do n=1; true; done || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_case_false_and,
+    "X=$(case a in (a) false;; esac && echo yes); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_case_false_or,
+    "X=$(case a in (a) false;; esac || echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    cmd_subst_case_false_status,
+    "X=$(case a in (a) false;; esac; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_case_true_and,
+    "X=$(case a in (a) true;; esac && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_case_true_or,
+    "X=$(case a in (a) true;; esac || echo no); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_group_last_status_wins,
+    "X=$({ false; true; } && echo yes; { true; false; } || echo no); echo \"[$X]\"",
+    "[yes\nno]"
+);
+expect!(
+    cmd_subst_if_unmatched_is_success,
+    "X=$(if false; then false; fi && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_empty_loop_is_success,
+    "X=$(false; for i in; do false; done && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_case_unmatched_is_success,
+    "X=$(false; case a in (b) false;; esac && echo yes); echo \"[$X]\"",
+    "[yes]"
+);
+expect!(
+    cmd_subst_pipeline_status,
+    "X=$(false; echo $?); echo \"[$X]\"",
+    "[1]"
+);
+
+// ── exec: loop control and exit in command substitution ────────────
+expect!(
+    cmd_subst_for_break,
+    "X=$(for i in 1 2; do echo $i; break; done); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_while_break,
+    "X=$(n=0; while [ $n -lt 3 ]; do n=$((n+1)); echo $n; break; done); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_until_break,
+    "X=$(n=0; until [ $n -ge 3 ]; do n=$((n+1)); echo $n; break; done); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_for_continue,
+    "X=$(for i in 1 2 3; do if [ $i = 2 ]; then continue; fi; echo $i; done); echo \"[$X]\"",
+    "[1\n3]"
+);
+expect!(
+    cmd_subst_break_n,
+    "X=$(for i in 1 2; do for j in a b; do echo $i$j; break 2; done; done); echo \"[$X]\"",
+    "[1a]"
+);
+expect!(
+    cmd_subst_continue_n,
+    "X=$(for i in 1 2; do for j in a b; do echo $i$j; continue 2; done; done); echo \"[$X]\"",
+    "[1a\n2a]"
+);
+expect!(
+    cmd_subst_break_in_case,
+    "X=$(for i in 1 2; do case $i in (*) echo $i; break;; esac; done); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_break_in_subshell_stays_in_subshell,
+    "X=$(for i in 1 2; do (break); echo $i; done); echo \"[$X]\"",
+    "[1\n2]"
+);
+expect!(
+    cmd_subst_exit_stops_substitution,
+    "X=$(echo a; exit 3; echo b); echo \"[$X]\"; echo after",
+    "[a]\nafter"
+);
+expect!(
+    cmd_subst_exit_in_loop_and_group,
+    "X=$(for i in 1 2; do { echo $i; exit 5; }; done; echo end); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_exit_in_subshell_status,
+    "X=$(echo a; (exit 2); echo \"s$?\"); echo \"[$X]\"",
+    "[a\ns2]"
+);
+expect!(
+    cmd_subst_while_continue,
+    "X=$(n=0; while [ $n -lt 3 ]; do n=$((n+1)); [ $n = 2 ] && continue; echo $n; done); echo \"[$X]\"",
+    "[1\n3]"
+);
+expect!(
+    cmd_subst_builtin_break,
+    "X=$(for i in 1 2; do echo $i; builtin break; done); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_break_status,
+    "X=$(for i in 1; do false; break; done; echo \"s$?\"); echo \"[$X]\"",
+    "[s0]"
+);
+expect!(
+    cmd_subst_break_in_redirected_group,
+    "X=$(for i in 1 2; do { echo $i; break; } </dev/null; echo m$i; done); echo \"[$X]\"",
+    "[1]"
+);
+expect!(
+    cmd_subst_return_in_function,
+    "f() { echo $(for i in 1 2; do echo $i; return 3; done; echo e); }; f",
+    "1"
+);
+expect!(
+    cmd_subst_break_does_not_leave_substitution,
+    "for i in 1 2; do X=$(break); echo $i; done",
+    "1\n2"
+);
+expect!(
+    cmd_subst_exit_does_not_end_script,
+    "X=$(exit 3); echo after",
+    "after"
+);
+expect!(
+    compound_pipeline_break,
+    "for i in 1 2; do echo $i; break; done | cat",
+    "1"
+);
+
+// Redirection failures must prevent the control-flow command from executing.
+expect!(
+    cmd_subst_control_redirect_break_failure,
+    "X=$(for i in 1 2; do break </missing || echo failed; echo $i; done); echo \"[$X]\"",
+    "[failed\n1\nfailed\n2]"
+);
+expect!(
+    cmd_subst_control_redirect_continue_failure,
+    "X=$(for i in 1 2; do continue </missing || echo failed; echo $i; done); echo \"[$X]\"",
+    "[failed\n1\nfailed\n2]"
+);
+expect!(
+    cmd_subst_control_redirect_exit_failure,
+    "X=$(exit 3 >/missing/dir/out || echo failed; echo after); echo \"[$X]\"",
+    "[failed\nafter]"
+);
+expect!(
+    cmd_subst_control_redirect_return_failure,
+    "f() { X=$(return 3 </missing || echo failed; echo after); echo \"[$X]\"; }; f",
+    "[failed\nafter]"
+);
+expect!(
+    cmd_subst_control_redirect_builtin_failure,
+    "X=$(for i in 1 2; do builtin break </missing || echo failed; echo $i; done); echo \"[$X]\"",
+    "[failed\n1\nfailed\n2]"
+);
+expect!(
+    cmd_subst_control_redirect_negated_failure,
+    "X=$(! exit 3 </missing && echo recovered; echo after); echo \"[$X]\"",
+    "[recovered\nafter]"
+);
+expect!(
+    cmd_subst_control_redirect_create,
+    "X=$(exit 3 >/tmp/marker); test -f /tmp/marker; echo $?; echo after",
+    "0\nafter"
+);
+expect!(
+    cmd_subst_control_redirect_truncate,
+    "echo old >/tmp/out; X=$(exit 3 >/tmp/out); test ! -s /tmp/out; echo $?",
+    "0"
+);
+expect!(
+    cmd_subst_control_redirect_append,
+    "echo old >/tmp/out; X=$(exit 3 >>/tmp/out); cat /tmp/out",
+    "old"
+);
+expect!(
+    cmd_subst_control_redirect_dup,
+    "X=$(for i in 1 2; do echo $i; builtin break 3>/tmp/out 1>&3 2>&1; done); echo \"[$X]\"; test -f /tmp/out; echo $?",
+    "[1]\n0"
+);
+expect!(
+    cmd_subst_control_redirect_expansion,
+    "X=$(for i in 1 2; do echo $i; break >\"/tmp/out$i\"; done); echo \"[$X]\"; test -f /tmp/out1; echo $?",
+    "[1]\n0"
+);
+expect!(
+    cmd_subst_control_redirect_stays_local,
+    "X=$(for i in 1 2; do continue >/tmp/out; done; echo after); echo \"[$X]\"; test ! -s /tmp/out; echo $?",
+    "[after]\n0"
+);
+
+// Control flow must pass through output redirections and conditions.
+expect!(
+    cmd_subst_break_in_output_redirected_group,
+    "X=$(for i in 1 2; do { echo $i; break; } >/tmp/out; echo m$i; done); echo \"[$X]\"; cat /tmp/out",
+    "[]\n1"
+);
+expect!(
+    cmd_subst_continue_in_output_redirected_group,
+    "X=$(for i in 1 2; do { echo $i; continue; } >/tmp/out; echo m$i; done); echo \"[$X]\"; cat /tmp/out",
+    "[]\n2"
+);
+expect!(
+    cmd_subst_break_in_append_redirected_group,
+    "echo old >/tmp/out; X=$(for i in 1 2; do { echo $i; break; } >>/tmp/out; echo m$i; done); echo \"[$X]\"; cat /tmp/out",
+    "[]\nold\n1"
+);
+expect!(
+    cmd_subst_break_n_in_output_redirected_group,
+    "X=$(for i in 1 2; do for j in a b; do { echo $j; break 2; } >/tmp/out; done; echo m$i; done); echo \"[$X]\"; cat /tmp/out",
+    "[]\na"
+);
+expect!(
+    cmd_subst_break_in_output_redirected_if,
+    "X=$(for i in 1 2; do if true; then echo $i; break; fi >/tmp/out; echo m$i; done); echo \"[$X]\"; cat /tmp/out",
+    "[]\n1"
+);
+expect!(
+    cmd_subst_exit_in_output_redirected_group,
+    "X=$({ echo a; exit 4; } >/tmp/out; echo after); echo \"[$X]\"; cat /tmp/out",
+    "[]\na"
+);
+expect!(
+    break_in_output_redirected_group,
+    "for i in 1 2; do { echo $i; break; } >/tmp/out; echo m$i; done; cat /tmp/out",
+    "1"
+);
+expect!(
+    cmd_subst_output_redirect_failure_skips_group,
+    "X=$(for i in 1 2; do { echo $i; break; } >/missing/dir/out; echo m$i; done); echo \"[$X]\"",
+    "[m1\nm2]"
+);
+expect!(
+    output_redirect_failure_skips_group,
+    "{ echo a; } >/missing/dir/out; echo $?",
+    "1"
+);
+
+// A redirect on a group delivers both of its streams.
+expect_output!(
+    group_stderr_dup_to_stdout,
+    "{ echo out; echo err >&2; } 2>&1",
+    "out\nerr\n",
+    "",
+    0
+);
+expect_output!(
+    group_stderr_to_file,
+    "{ echo out; echo err >&2; } 2>/tmp/e; cat /tmp/e",
+    "out\nerr\n",
+    "",
+    0
+);
+expect_output!(
+    group_stderr_to_dev_null_keeps_stdout,
+    "{ echo out; echo err >&2; } 2>/dev/null",
+    "out\n",
+    "",
+    0
+);
+expect_output!(
+    group_stdout_to_file_keeps_stderr,
+    "{ echo out; echo err >&2; } >/tmp/o; cat /tmp/o",
+    "out\n",
+    "err\n",
+    0
+);
+expect_output!(
+    group_redirects_apply_in_order,
+    "{ echo out; echo err >&2; } 2>&1 >/tmp/o; cat /tmp/o",
+    "err\nout\n",
+    "",
+    0
+);
+expect_output!(
+    group_both_streams_to_one_file,
+    "{ echo out; echo err >&2; } >/tmp/o 2>&1; cat /tmp/o",
+    "out\nerr\n",
+    "",
+    0
+);
+expect_output!(
+    group_stdout_dup_to_stderr,
+    "{ echo out; } >&2",
+    "",
+    "out\n",
+    0
+);
+expect_output!(
+    group_builtin_diagnostic_follows_stderr_redirect,
+    "{ cd /nope; } 2>/dev/null; echo $?",
+    "1\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_captures_group_stderr_dup,
+    "X=$({ echo out; cd /nope; } 2>&1); case \"$X\" in out?*cd*/nope*) echo yes;; esac",
+    "yes\n",
+    "",
+    0
+);
+expect_output!(
+    group_many_stderr_lines_to_stdout_keep_order,
+    "{ i=0; while [ $i -lt 300 ]; do echo e$i >&2; i=$((i+1)); done; } 2>&1 | tail -2",
+    "e298\ne299\n",
+    "",
+    0
+);
+
+#[test]
+fn group_redirects_from_cli() {
+    let dir = TestDir::new("group_redirect_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("{ echo out; echo err >&2; } 2>&1 >/tmp/o; { echo kept; echo gone >&2; } 2>/dev/null; { echo file; echo shown >&2; } >/tmp/f; cat /tmp/o /tmp/f")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "err\nkept\nout\nfile\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "shown\n");
+    assert!(out.status.success());
+}
+
+// Command substitution runs special builtins as a direct command does.
+expect_output!(
+    cmd_subst_captures_eval,
+    "X=$(eval 'echo a; echo b'); echo \"[$X]\"",
+    "[a\nb]\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_captures_source,
+    "echo 'echo sourced' > /tmp/s.sh; X=$(. /tmp/s.sh); echo \"[$X]\"",
+    "[sourced]\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_captures_command,
+    "X=$(command echo hi); echo \"[$X]\"",
+    "[hi]\n",
+    "",
+    0
+);
+expect_output!(
+    cmd_subst_eval_exit_stops_substitution,
+    "X=$(eval 'exit 3'; echo no); echo \"[$X]\"",
+    "[]\n",
+    "",
+    0
+);
+expect!(
+    cmd_subst_exit_in_if_condition,
+    "X=$(if exit 3; then echo yes; else echo no; fi; echo after); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_exit_in_elif_condition,
+    "X=$(if false; then echo yes; elif exit 3; then echo elif; else echo no; fi; echo after); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_exit_in_while_condition,
+    "X=$(while exit 3; do echo body; done; echo after); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_exit_in_until_condition,
+    "X=$(until exit 3; do echo body; done; echo after); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_exit_in_condition_list,
+    "X=$(if true && exit 3; then echo yes; fi; echo after); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_exit_in_while_condition_list,
+    "X=$(while false || exit 3; do echo body; done; echo after); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_break_in_if_condition,
+    "X=$(for i in 1 2; do if break; then echo y; fi; echo $i; done); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    cmd_subst_break_in_while_condition,
+    "X=$(for i in 1 2; do while break; do :; done; echo $i; done); echo \"[$X]\"",
+    "[1\n2]"
+);
+expect!(
+    cmd_subst_break_in_until_condition,
+    "X=$(for i in 1 2; do until break; do :; done; echo $i; done); echo \"[$X]\"",
+    "[1\n2]"
+);
+expect!(
+    cmd_subst_break_n_in_while_condition,
+    "X=$(for i in 1 2; do while break 2; do :; done; echo $i; done; echo end); echo \"[$X]\"",
+    "[end]"
+);
+expect!(
+    cmd_subst_continue_in_until_condition,
+    "X=$(for i in 1 2; do until continue; do echo w; done; echo $i; done); echo \"[$X]\"",
+    "[1\n2]"
+);
+expect!(
+    cmd_subst_continue_n_in_while_condition,
+    "X=$(for i in 1 2; do while continue 2; do echo w; done; echo $i; done; echo end); echo \"[$X]\"",
+    "[end]"
+);
+expect!(
+    cmd_subst_return_in_if_condition,
+    "f() { X=$(if return 3; then echo y; fi; echo after); echo \"[$X]\"; }; f",
+    "[]"
+);
+expect!(
+    break_in_while_condition,
+    "for i in 1 2; do while break; do :; done; echo $i; done",
+    "1\n2"
+);
+expect!(
+    break_n_in_while_condition,
+    "for i in 1 2; do while break 2; do :; done; echo $i; done; echo end",
+    "end"
+);
+expect!(
+    continue_in_until_condition,
+    "for i in 1 2; do until continue; do echo w; done; echo $i; done; echo end",
+    "1\n2\nend"
+);
+expect!(
+    continue_n_in_while_condition,
+    "for i in 1 2; do while continue 2; do echo w; done; echo $i; done; echo end",
+    "end"
+);
+expect!(
+    errexit_false_while_condition_in_redirected_loop,
+    "set -e; i=0; while [ $i -lt 2 ]; do i=$((i+1)); done >/tmp/out; echo ok $i",
+    "ok 2"
+);
+expect!(
+    errexit_false_if_condition_in_redirected_group,
+    "set -e; { if false; then :; fi; echo in; } >/tmp/out; echo ok; cat /tmp/out",
+    "ok\nin"
+);
+expect!(
+    cmd_subst_errexit_false_elif_condition,
+    "set -e; X=$(if false; then :; elif true; then echo elif; fi); echo \"[$X]\"",
+    "[elif]"
+);
+expect!(
+    cmd_subst_errexit_false_until_condition,
+    "set -e; X=$(n=0; until [ $n -ge 1 ]; do n=1; done; echo ok); echo \"[$X]\"",
+    "[ok]"
+);
+expect!(
+    continue_in_negated_while_condition,
+    "for i in 1 2; do while ! continue; do echo w; done; echo $i; done; echo end",
+    "1\n2\nend"
+);
+expect!(
+    cmd_subst_continue_in_negated_while_condition,
+    "X=$(for i in 1 2; do while ! continue; do echo w; done; echo $i; done; echo end); echo \"[$X]\"",
+    "[1\n2\nend]"
+);
+expect!(
+    break_in_negated_until_condition,
+    "for i in 1 2; do until ! break; do echo w; done; echo $i; done; echo end",
+    "1\n2\nend"
+);
+
 // ── exec: shebang / script execution ──────────────────────────────
 expect!(
     script_shebang_source,
@@ -4055,11 +5247,31 @@ fn builder_max_input() {
 }
 
 #[test]
+fn max_input_applies_to_whole_multiline_input() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().max_input(16).build().unwrap();
+        // Each line is under the limit, but the whole input is not
+        let out = shell.run("echo aaaa\necho bbbb\necho cccc").await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (1, "", "strands-shell: input too large\n")
+        );
+        // Multiline input within the limit still runs
+        let out = shell.run("echo a\necho b").await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "a\nb\n", "")
+        );
+    }));
+}
+
+#[test]
 fn builder_max_file_size() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
         let mut shell = Shell::builder().max_file_size(5).build().unwrap();
-        // Writing more than 5 bytes — the write-back task truncates
+        // Writing more than 5 bytes is refused
         shell.run("echo 'hello world' > /tmp/big").await;
         let out = shell.run("wc -c < /tmp/big").await;
         let size: usize = out.stdout.trim().parse().unwrap_or(999);
@@ -4090,11 +5302,28 @@ fn builder_max_inodes() {
 fn builder_max_fds() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let mut shell = Shell::builder().max_fds(3).build().unwrap();
-        let out = shell.run("echo ok").await;
-        // With very few fds, basic commands may still work or fail
-        // Just verify the builder method works
-        assert!(out.status == 0 || out.stderr.contains("file descriptor"));
+        let mut shell = Shell::builder().max_fds(4).build().unwrap();
+        shell.run("echo data > /tmp/fds_in").await;
+        let under = "cat /tmp/fds_in 3>/tmp/fds_a 4>/tmp/fds_b";
+        let out = shell.run(under).await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "data\n", "")
+        );
+        let out = shell
+            .run("cat /tmp/fds_in 3>/tmp/fds_a 4>/tmp/fds_b 5>/tmp/fds_c")
+            .await;
+        assert_eq!(out.status, 1);
+        assert_eq!(out.stdout, "");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: /tmp/fds_c: too many open file descriptors\n"
+        );
+        let out = shell.run(under).await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "data\n", "")
+        );
     }));
 }
 
@@ -4212,10 +5441,26 @@ fn max_output_truncates_subst() {
 fn max_input_in_subst() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let mut shell = Shell::builder().max_input(5).build().unwrap();
-        // Short command should work
-        let out = shell.run("true").await;
-        assert_eq!(out.status, 0);
+        // The sourced script's first command is `cat <<EOF`, which is under
+        // the limit. The heredoc body reaches capture_output, which checks
+        // the limit again.
+        let mut shell = Shell::builder().max_input(12).build().unwrap();
+        shell
+            .write_file("/tmp/s", b"cat <<EOF\n$(echo short)\nEOF\n")
+            .await
+            .unwrap();
+        shell
+            .write_file("/tmp/l", b"cat <<EOF\n$(echo aaaaaaaaaaaaaaaaaaaa)\nEOF\n")
+            .await
+            .unwrap();
+        let out = shell.run(". /tmp/s").await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "short\n", "")
+        );
+        let out = shell.run(". /tmp/l").await;
+        assert_eq!(out.stdout, "\n");
+        assert_eq!(out.stderr, "strands-shell: input too large\n");
     }));
 }
 
@@ -4413,6 +5658,41 @@ fn subst_max_output_truncate() {
             .await;
         let len: usize = out.stdout.trim().parse().unwrap_or(999);
         assert!(len <= 10, "expected truncated, got len {}", len);
+    }));
+}
+
+// ── max_output truncation keeps multibyte characters whole ─────────
+
+async fn run_with_max_output(max: usize, script: &str) -> strands_shell::Output {
+    let mut shell = Shell::builder().max_output(max).build().unwrap();
+    shell.run(script).await
+}
+
+#[test]
+fn subst_max_output_truncate_multibyte() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_max_output(4, "X=$(printf abc; printf é); printf %s \"$X\"").await;
+        assert_eq!(out.stdout, "abc");
+        let out = run_with_max_output(4, "X=$(printf ab; printf é); printf %s \"$X\"").await;
+        assert_eq!(out.stdout, "abé");
+        let out = run_with_max_output(4, "X=$(printf abc; printf de); printf %s \"$X\"").await;
+        assert_eq!(out.stdout, "abcd");
+    }));
+}
+
+#[test]
+fn stdout_max_output_truncate_multibyte() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_max_output(4, "printf abc; printf é").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abc", 1));
+        let out = run_with_max_output(4, "printf ab; printf cé").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abc", 1));
+        let out = run_with_max_output(4, "printf abé").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abé", 0));
+        let out = run_with_max_output(4, "printf ab; printf cde").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abcd", 1));
     }));
 }
 
@@ -4622,8 +5902,7 @@ expect_status!(command_v_notfound_exit, "command -v nonexistent_cmd_xyz", 1);
 fn builder_bind_direct_host() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_bind_direct_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_bind_direct_test");
         std::fs::write(dir.join("hello.txt"), "direct_content").unwrap();
         let mut shell = Shell::builder()
             .bind_direct(dir.to_str().unwrap(), "/mnt/direct")
@@ -4631,7 +5910,6 @@ fn builder_bind_direct_host() {
             .unwrap();
         let out = shell.run("cat /mnt/direct/hello.txt").await;
         assert_eq!(out.stdout.trim(), "direct_content");
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -4639,8 +5917,7 @@ fn builder_bind_direct_host() {
 fn builder_bind_direct_readonly_host() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_bind_dro_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_bind_dro_test");
         std::fs::write(dir.join("data.txt"), "ro_direct").unwrap();
         let mut shell = Shell::builder()
             .bind_direct_readonly(dir.to_str().unwrap(), "/mnt/dro")
@@ -4650,7 +5927,104 @@ fn builder_bind_direct_readonly_host() {
         assert_eq!(out.stdout.trim(), "ro_direct");
         let out2 = shell.run("echo x > /mnt/dro/newfile").await;
         assert_ne!(out2.status, 0);
-        let _ = std::fs::remove_dir_all(&dir);
+    }));
+}
+
+#[test]
+fn bind_direct_write_lands_before_the_status() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_direct_settle");
+        std::fs::write(dir.join("src"), "hello world\n").unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/w")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("cat /mnt/w/src > /mnt/w/d; cat /mnt/w/d; echo hi > /mnt/w/e; cat /mnt/w/e")
+            .await;
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "hello world\nhi\n", "")
+        );
+        let out = shell
+            .run("{ echo g; } > /mnt/w/g; echo a >> /mnt/w/e")
+            .await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(std::fs::read_to_string(dir.join("g")).unwrap(), "g\n");
+        assert_eq!(std::fs::read_to_string(dir.join("e")).unwrap(), "hi\na\n");
+    }));
+}
+
+#[test]
+fn bind_direct_write_waits_only_for_closed_writers() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_direct_live");
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/w")
+            .build()
+            .unwrap();
+        let run = shell.run(
+            "{ while [ ! -e /mnt/w/go ]; do sleep 0.01; done; echo late; } > /mnt/w/live & \
+                 echo fg > /mnt/w/fg; cat /mnt/w/fg; echo > /mnt/w/go; wait; cat /mnt/w/live",
+        );
+        let out = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+            .await
+            .expect("a live background writer blocked the foreground");
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "fg\nlate\n", "")
+        );
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_write_error_fails_the_command() {
+    use std::os::unix::fs::PermissionsExt;
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_direct_write_error");
+        let ro = dir.join("ro");
+        std::fs::write(&ro, "x\n").unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o444)).unwrap();
+        if std::fs::OpenOptions::new().write(true).open(&ro).is_ok() {
+            eprintln!("skipping: a 0444 file is writable for this user");
+            return;
+        }
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/w")
+            .build()
+            .unwrap();
+        for cmd in [
+            "echo hi > /mnt/w/ro",
+            "echo hi >> /mnt/w/ro",
+            "{ echo g; } > /mnt/w/ro",
+            "echo hi | tee /mnt/w/ro",
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.status, 1, "{cmd}: stderr: {}", out.stderr);
+            assert!(
+                out.stderr.contains("/mnt/w/ro: Permission denied"),
+                "{cmd}: stderr: {}",
+                out.stderr
+            );
+        }
+        let out = shell.run("echo hi > /mnt/w/ro | true; echo $?").await;
+        assert_eq!(out.stdout, "0\n");
+        assert!(
+            out.stderr.contains("/mnt/w/ro: Permission denied"),
+            "stderr: {}",
+            out.stderr
+        );
+        let out = shell
+            .run("{ echo x; } > /mnt/w/ro & true || echo stolen; wait")
+            .await;
+        assert_eq!(out.stdout, "");
+        let out = shell.run("echo hi > /mnt/w/ok; echo $?").await;
+        assert_eq!((out.stdout.as_str(), out.stderr.as_str()), ("0\n", ""));
+        assert_eq!(std::fs::read_to_string(&ro).unwrap(), "x\n");
     }));
 }
 
@@ -4661,9 +6035,8 @@ fn builder_bind_direct_readonly_host() {
 fn bind_direct_symlink_escape_blocked() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_symlink_escape_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("mount")).unwrap();
+        let dir = TestDir::new("lsh_symlink_escape_test");
+        std::fs::create_dir(dir.join("mount")).unwrap();
         std::fs::write(dir.join("mount/safe.txt"), "safe").unwrap();
         std::fs::write(dir.join("secret.txt"), "ESCAPED").unwrap();
         // Create a symlink inside the mount pointing outside it
@@ -4682,7 +6055,102 @@ fn bind_direct_symlink_escape_blocked() {
             "symlink escape should be blocked; stdout: {}",
             out.stdout
         );
-        let _ = std::fs::remove_dir_all(&dir);
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_readlink_prints_stored_link_text() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_test");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("f"), "x").unwrap();
+        std::os::unix::fs::symlink("f", dir.join("rel")).unwrap();
+        std::os::unix::fs::symlink("../f", dir.join("sub/up")).unwrap();
+        std::os::unix::fs::symlink("nowhere", dir.join("dangling")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("absolute")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("readlink /b/rel; readlink /b/sub/up; readlink /b/dangling; readlink /b/absolute; cd /b/sub && readlink up")
+            .await;
+        assert_eq!(out.stdout, "f\n../f\nnowhere\n/etc/passwd\n../f\n");
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        for path in ["/b/f", "/b/missing"] {
+            let out = shell.run(&format!("readlink {path}")).await;
+            assert_eq!(out.stdout, "", "{path}");
+            assert_eq!(out.status, 1, "{path}");
+        }
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_readlink_does_not_follow_a_directory_out_of_the_bind() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_escape_test");
+        std::fs::create_dir_all(dir.join("mount")).unwrap();
+        std::fs::create_dir_all(dir.join("outside")).unwrap();
+        std::os::unix::fs::symlink("ESCAPED", dir.join("outside/inner")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside"), dir.join("mount/escape")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.join("mount").to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        let out = shell.run("readlink /b/escape/inner").await;
+        assert!(!out.stdout.contains("ESCAPED"), "stdout: {}", out.stdout);
+        assert_ne!(out.status, 0);
+    }));
+}
+
+#[cfg(windows)]
+#[test]
+fn bind_direct_readlink_reads_only_one_host_name_on_windows() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_windows_test");
+        let mount = dir.join("mount");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(mount.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(mount.join("f"), "x").unwrap();
+        std::os::windows::fs::symlink_file("OUTSIDE_TARGET", outside.join("link")).unwrap();
+        std::os::windows::fs::symlink_file("f", mount.join("rel")).unwrap();
+        std::os::windows::fs::symlink_file("nowhere", mount.join("dangling")).unwrap();
+        std::os::windows::fs::symlink_file(mount.join("f"), mount.join("absolute")).unwrap();
+        let absolute = std::fs::read_link(mount.join("absolute")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(mount.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("readlink /b/rel; readlink /b/dangling; readlink /b/absolute")
+            .await;
+        assert_eq!(
+            out.stdout,
+            format!("f\nnowhere\n{}\n", absolute.display()),
+            "stderr: {}",
+            out.stderr
+        );
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        let leaves = [
+            outside.join("link").display().to_string(),
+            r"..\outside\link".to_string(),
+            r"sub\..\..\outside\link".to_string(),
+        ];
+        for leaf in leaves {
+            let out = shell.run(&format!("readlink '/b/{leaf}'")).await;
+            assert!(
+                !out.stdout.contains("OUTSIDE_TARGET"),
+                "{leaf}: stdout: {}",
+                out.stdout
+            );
+            assert_ne!(out.status, 0, "{leaf}");
+        }
     }));
 }
 
@@ -4738,15 +6206,13 @@ fn builder_credential_from_env_missing_var() {
 fn builder_config_file_toml() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_config_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_config_test");
         let config_path = dir.join("test.toml");
         std::fs::write(&config_path, "umask = \"077\"\n").unwrap();
         let shell = Shell::builder().config_file(&config_path);
         assert!(shell.is_ok());
         let shell = shell.unwrap().build();
         assert!(shell.is_ok());
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -4754,8 +6220,7 @@ fn builder_config_file_toml() {
 fn config_file_limits_applied() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_limits_config_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_limits_config_test");
         let config_path = dir.join("limits.toml");
         std::fs::write(
             &config_path,
@@ -4797,8 +6262,6 @@ timeout = 5
         // timeout=5: command should complete within timeout
         let out = shell.run("echo fast").await;
         assert_eq!(out.stdout.trim(), "fast");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -4808,8 +6271,7 @@ fn config_file_vfs_caps_applied() {
     // TOML [limits] table so a config-driven (MCP) deployment can set them.
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_vfs_caps_config_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_vfs_caps_config_test");
         let config_path = dir.join("vfs.toml");
         std::fs::write(
             &config_path,
@@ -4826,8 +6288,7 @@ max_file_size = 16
             .unwrap();
 
         // Writing past the 16-byte cap is bounded: the over-cap content does
-        // not land in full. (Shell redirection truncates at the cap rather
-        // than failing the command, unlike the binding's write_file.)
+        // not land in full.
         shell
             .run("printf '%s' 0123456789abcdefXYZ > /tmp/big.txt")
             .await;
@@ -4843,8 +6304,6 @@ max_file_size = 16
             .run("printf 'ok' > /tmp/ok.txt && cat /tmp/ok.txt")
             .await;
         assert_eq!(out.stdout.trim(), "ok");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -4858,8 +6317,7 @@ fn config_file_allowed_urls_applied() {
     // live server in tests/curl_integration.rs::curl_allowed_url_via_toml_config.
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_allowed_urls_config_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_allowed_urls_config_test");
         let config_path = dir.join("urls.toml");
         std::fs::write(
             &config_path,
@@ -4880,7 +6338,6 @@ allowed_urls = ["https://example.com/"]
             out.status, 0,
             "address outside TOML allowed_urls should stay blocked"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -4889,8 +6346,7 @@ fn config_file_env_applied() {
     // A [env] table seeds environment variables into the shell.
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_env_config_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_env_config_test");
         let config_path = dir.join("env.toml");
         std::fs::write(
             &config_path,
@@ -4913,7 +6369,6 @@ DEPLOY_TARGET = "staging"
             "demo staging",
             "TOML [env] should seed env vars"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -4926,8 +6381,7 @@ fn config_file_combined_all_sections() {
     // top-level array placed after a [table] is silently absorbed into it.
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_combined_config_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_combined_config_test");
         let config_path = dir.join("all.toml");
         std::fs::write(
             &config_path,
@@ -4974,8 +6428,6 @@ max_inodes = 10000
             n <= 32,
             "max_file_size from combined config should bound the write; wrote {n}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -4983,8 +6435,7 @@ max_inodes = 10000
 fn config_file_unknown_limit_key_errors() {
     // An unknown [limits] key (e.g. the old `timeout_seconds` typo) must fail
     // loudly rather than being silently ignored — deny_unknown_fields.
-    let dir = std::env::temp_dir().join("lsh_bad_limit_key_test");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = TestDir::new("lsh_bad_limit_key_test");
     let config_path = dir.join("bad.toml");
     std::fs::write(
         &config_path,
@@ -4999,7 +6450,6 @@ timeout_seconds = 30
         result.is_err(),
         "unknown [limits] key should be rejected, not ignored"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -5007,8 +6457,7 @@ fn config_file_unknown_top_level_key_errors() {
     // A typo'd top-level key (e.g. `allowed_url` singular instead of
     // `allowed_urls`) must also be rejected — deny_unknown_fields on VfsConfig.
     // For an SSRF allowlist, silently dropping a misspelled key would fail open.
-    let dir = std::env::temp_dir().join("lsh_bad_toplevel_key_test");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = TestDir::new("lsh_bad_toplevel_key_test");
     let config_path = dir.join("bad.toml");
     std::fs::write(
         &config_path,
@@ -5022,15 +6471,13 @@ allowed_url = ["https://example.com/"]
         result.is_err(),
         "unknown top-level key should be rejected, not ignored"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn config_file_unknown_table_key_errors() {
     // Unknown keys inside [[bind]], [[cred]], and [[mcp]] tables are also
     // rejected, so the "typos fail the parse" guarantee holds at every level.
-    let dir = std::env::temp_dir().join("lsh_bad_table_key_test");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = TestDir::new("lsh_bad_table_key_test");
 
     // [[cred]] with a misspelled key.
     let cred_path = dir.join("bad_cred.toml");
@@ -5081,8 +6528,6 @@ comand = "/path/to/server"
         Shell::builder().config_file(&mcp_path).is_err(),
         "unknown [[mcp]] key should be rejected"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -5091,8 +6536,7 @@ fn config_file_partial_limits_keeps_defaults() {
     // builder defaults, not reset them to zero. Guards the Option-merge.
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_partial_limits_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_partial_limits_test");
         let config_path = dir.join("partial.toml");
         std::fs::write(
             &config_path,
@@ -5129,7 +6573,6 @@ max_depth = 7
             1024 * 1024,
             "omitted max_input should keep default"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -5139,8 +6582,7 @@ fn config_file_env_code_wins_regardless_of_order() {
     // no matter whether .env() or .config_file() is called first.
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_env_precedence_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_env_precedence_test");
         let config_path = dir.join("env.toml");
         std::fs::write(
             &config_path,
@@ -5171,8 +6613,6 @@ ONLY_TOML = "toml_only"
             .unwrap();
         assert_eq!(b.run("echo $SHARED").await.stdout.trim(), "from_code");
         assert_eq!(b.run("echo $ONLY_TOML").await.stdout.trim(), "toml_only");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -5258,6 +6698,124 @@ fn script_exit_code() {
         let out = shell.run("sh /tmp/exitcode.sh").await;
         assert_eq!(out.status, 42);
     }));
+}
+
+/// Runs `cmd` after writing a script that prints `out` to stdout and `err` to stderr.
+async fn run_with_two_stream_script(cmd: &str) -> strands_shell::Output {
+    let mut shell = Shell::builder().build().unwrap();
+    shell
+        .run("printf '#!/bin/sh\\necho out\\necho err >&2\\n' > /tmp/streams.sh; chmod +x /tmp/streams.sh")
+        .await;
+    shell.run(cmd).await
+}
+
+#[test]
+fn script_stderr_reaches_caller() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script("sh /tmp/streams.sh").await;
+        assert_eq!(out.stdout, "out\n");
+        assert_eq!(out.stderr, "err\n");
+    }));
+}
+
+#[test]
+fn script_streams_follow_redirects() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script(
+            "sh /tmp/streams.sh > /tmp/o 2> /tmp/e; echo \"o=$(cat /tmp/o) e=$(cat /tmp/e)\"",
+        )
+        .await;
+        assert_eq!(out.stdout, "o=out e=err\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn script_stderr_dup_into_pipe() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out =
+            run_with_two_stream_script("sh /tmp/streams.sh 2>&1 > /tmp/o | tr a-z A-Z; cat /tmp/o")
+                .await;
+        assert_eq!(out.stdout, "ERR\nout\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn script_stderr_in_substitution() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script("x=$(sh /tmp/streams.sh 2>&1); echo \"[$x]\"").await;
+        assert_eq!(out.stdout, "[out\nerr]\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn shebang_script_stderr_follows_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out =
+            run_with_two_stream_script("/tmp/streams.sh 2> /tmp/e; echo \"e=$(cat /tmp/e)\"").await;
+        assert_eq!(out.stdout, "out\ne=err\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn script_open_error_follows_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("sh /tmp/missing.sh 2> /tmp/e; grep -c missing.sh /tmp/e")
+            .await;
+        assert_eq!(out.stdout, "1\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn nested_script_keeps_its_own_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_two_stream_script(
+            "printf 'sh /tmp/streams.sh 2>/dev/null\\necho outer >&2\\n' > /tmp/outer.sh; sh /tmp/outer.sh",
+        )
+        .await;
+        assert_eq!(out.stdout, "out\n");
+        assert_eq!(out.stderr, "outer\n");
+    }));
+}
+
+#[test]
+fn script_reports_output_limit_once() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().max_output(64).build().unwrap();
+        shell
+            .run("printf 'for i in 1 2 3 4 5 6 7 8 9 10; do echo 0123456789abcdef; done\\n' > /tmp/loud.sh")
+            .await;
+        let out = shell.run("sh /tmp/loud.sh > /tmp/o").await;
+        assert_eq!(out.stderr, "strands-shell: output size limit exceeded\n");
+    }));
+}
+
+#[test]
+fn script_streams_follow_redirects_in_cli() {
+    let dir = TestDir::new("script_streams_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("printf 'echo out\\necho err >&2\\n' > /tmp/s.sh; sh /tmp/s.sh > /tmp/o 2> /tmp/e; sh /tmp/s.sh | tr a-z A-Z; cat /tmp/o /tmp/e")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "OUT\nout\nerr\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "err\n");
+    assert!(out.status.success());
 }
 
 // ── Shebang resolution ─────────────────────────────────────────────
@@ -5588,23 +7146,14 @@ fn url_check_allowed_prefix_no_confusion() {
 fn bind_direct_write_back() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_bind_write_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_bind_write_test");
         let mut shell = Shell::builder()
             .bind_direct(dir.to_str().unwrap(), "/mnt/wr")
             .build()
             .unwrap();
         shell.run("echo written_data > /mnt/wr/output.txt").await;
-        // Run another command to ensure the write-back task completes
-        shell.run("true").await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let content = std::fs::read_to_string(dir.join("output.txt")).unwrap_or_default();
-        assert!(
-            content.contains("written_data"),
-            "host file content: {:?}",
-            content
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+        let content = std::fs::read_to_string(dir.join("output.txt")).unwrap();
+        assert_eq!(content, "written_data\n");
     }));
 }
 
@@ -5715,10 +7264,9 @@ fn parser_error_unexpected_rparen() {
 fn config_file_with_binds_and_creds() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_config_full_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TestDir::new("lsh_config_full_test");
         let src_dir = dir.join("src");
-        let _ = std::fs::create_dir_all(&src_dir);
+        std::fs::create_dir(&src_dir).unwrap();
         std::fs::write(src_dir.join("test.txt"), "config_bind_test").unwrap();
         let config_path = dir.join("full.toml");
         std::fs::write(
@@ -5751,7 +7299,6 @@ api_key = "test-key-123"
         assert_eq!(out.stdout.trim(), "config_bind_test");
         let out2 = shell.run("umask").await;
         assert_eq!(out2.stdout.trim(), "0077");
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -6066,6 +7613,92 @@ expect!(
     "1"
 );
 expect!(rm_help, "rm --help | head -n 1", "Usage: rm [-rf] FILE...");
+expect!(
+    rm_force_absent_is_silent,
+    "rm -f /tmp/rm_absent 2>&1; echo status=$?",
+    "status=0"
+);
+shell_test!(
+    rm_denied_fails_with_and_without_force,
+    "rm /bin/cat 2>&1; echo status=$?; rm -f /bin/cat 2>&1; echo status=$?; test -e /bin/cat && echo kept",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        let lines: Vec<&str> = out.stdout.lines().collect();
+        assert_eq!(lines.len(), 5, "stdout: {}", out.stdout);
+        assert!(lines[0].contains("/bin/cat"), "stdout: {}", out.stdout);
+        assert_eq!(lines[1], "status=1");
+        assert!(lines[2].contains("/bin/cat"), "stdout: {}", out.stdout);
+        assert_eq!(lines[3], "status=1");
+        assert_eq!(lines[4], "kept");
+    }
+);
+shell_test!(
+    rm_recursive_names_denied_children_and_removes_siblings,
+    "mkdir -p /tmp/rrn/locked /tmp/rrn/open && touch /tmp/rrn/locked/x /tmp/rrn/locked/y /tmp/rrn/open/z /tmp/rrn/a && chmod 555 /tmp/rrn/locked; \
+     rm -r /tmp/rrn 2>&1; echo status=$?; rm -rf /tmp/rrn 2>&1; echo status=$?; ls -R /tmp/rrn",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        let s = &out.stdout;
+        for denied in ["/tmp/rrn/locked/x", "/tmp/rrn/locked/y"] {
+            assert_eq!(s.matches(denied).count(), 2, "stdout: {s}");
+        }
+        assert!(!s.contains("rm: /tmp/rrn:"), "parent reported: {s}");
+        assert!(!s.contains("rm: /tmp/rrn/locked:"), "parent reported: {s}");
+        assert_eq!(s.matches("status=1").count(), 2, "stdout: {s}");
+        assert!(
+            !s.contains("open") && !s.contains("\na\n"),
+            "sibling kept: {s}"
+        );
+    }
+);
+#[test]
+fn rm_readonly_bind_fails_with_force() {
+    let dir = TestDir::new("lsh_rm_ro_bind");
+    std::fs::write(dir.join("keep.txt"), "x").unwrap();
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct_readonly(dir.to_str().unwrap(), "/mnt/ro")
+            .build()
+            .unwrap();
+        let out = shell.run("rm -f /mnt/ro/keep.txt 2>&1").await;
+        assert_eq!(out.status, 1);
+        assert!(out.stdout.contains("/mnt/ro/keep.txt"), "{}", out.stdout);
+    }));
+    assert!(dir.join("keep.txt").exists());
+}
+#[cfg(unix)]
+#[test]
+fn rm_recursive_names_unlistable_nested_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestDir::new("lsh_rm_unlistable");
+    std::fs::create_dir_all(dir.join("top/hidden")).unwrap();
+    std::fs::write(dir.join("top/hidden/f"), "x").unwrap();
+    std::fs::write(dir.join("top/sibling"), "x").unwrap();
+    std::fs::set_permissions(
+        dir.join("top/hidden"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let (rt, local) = rt();
+    let out = rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/rw")
+            .build()
+            .unwrap();
+        shell.run("rm -r /mnt/rw/top 2>&1").await
+    }));
+    std::fs::set_permissions(
+        dir.join("top/hidden"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(out.status, 1);
+    assert!(
+        out.stdout.contains("rm: /mnt/rw/top/hidden:"),
+        "{}",
+        out.stdout
+    );
+    assert!(!dir.join("top/sibling").exists());
+}
 
 // ── chmod coverage ──────────────────────────────────────────────────
 
@@ -6092,6 +7725,86 @@ expect!(
     "chmod --help | head -n 1",
     "Usage: chmod MODE FILE..."
 );
+
+#[cfg(unix)]
+fn host_mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+#[cfg(unix)]
+#[test]
+fn chmod_changes_the_host_mode_on_a_direct_bind() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestDir::new("lsh_chmod_direct");
+    std::fs::write(dir.join("f"), "x").unwrap();
+    std::fs::set_permissions(dir.join("f"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink("f", dir.join("link")).unwrap();
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/rw")
+            .build()
+            .unwrap();
+        let out = shell.run("chmod 600 /mnt/rw/f").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(host_mode(&dir.join("f")), 0o600);
+        let out = shell.run("chmod u+x,g+r /mnt/rw/f").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(host_mode(&dir.join("f")), 0o740);
+        let out = shell
+            .run("chmod 000 /mnt/rw/f && chmod 644 /mnt/rw/f")
+            .await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(host_mode(&dir.join("f")), 0o644);
+        let out = shell.run("chmod 640 /mnt/rw/link").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(host_mode(&dir.join("f")), 0o640);
+        let out = shell.run("chmod 600 /mnt/rw/missing").await;
+        assert_eq!(out.status, 1);
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn chmod_on_a_direct_bind_stays_inside_the_bind() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestDir::new("lsh_chmod_direct_escape");
+    std::fs::create_dir(dir.join("mount")).unwrap();
+    std::fs::write(dir.join("outside"), "x").unwrap();
+    std::fs::set_permissions(dir.join("outside"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(dir.join("outside"), dir.join("mount/escape")).unwrap();
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.join("mount").to_str().unwrap(), "/mnt/rw")
+            .build()
+            .unwrap();
+        let out = shell.run("chmod 777 /mnt/rw/escape").await;
+        assert_ne!(out.status, 0);
+    }));
+    assert_eq!(host_mode(&dir.join("outside")), 0o644);
+}
+
+#[cfg(unix)]
+#[test]
+fn chmod_on_a_readonly_direct_bind_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestDir::new("lsh_chmod_direct_ro");
+    std::fs::write(dir.join("f"), "x").unwrap();
+    std::fs::set_permissions(dir.join("f"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct_readonly(dir.to_str().unwrap(), "/mnt/ro")
+            .build()
+            .unwrap();
+        let out = shell.run("chmod 600 /mnt/ro/f").await;
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("read-only"), "stderr: {}", out.stderr);
+    }));
+    assert_eq!(host_mode(&dir.join("f")), 0o644);
+}
 
 // ── wc coverage ─────────────────────────────────────────────────────
 
@@ -6807,13 +8520,32 @@ shell_test!(
 
 // ── credential resolution (vfs_kernel.rs resolve_credential) ────────
 
-shell_test!(
-    cred_no_match,
-    "true",
-    |_shell: &mut Shell, out: strands_shell::Output| {
-        assert_eq!(out.status, 0);
+#[test]
+fn cred_no_match() {
+    let shell = Shell::builder()
+        .credential(
+            "https://api.example.com",
+            strands_shell::CredKind::Bearer,
+            "test-token",
+        )
+        .build()
+        .unwrap();
+    let kernel = shell.kernel();
+    assert_eq!(
+        kernel.resolve_credential("https://api.example.com/v1", "GET"),
+        vec![("Authorization".to_string(), "Bearer test-token".to_string())]
+    );
+    for url in [
+        "https://api.example.org/v1",
+        "http://api.example.com/v1",
+        "https://api.example.com.evil.com/v1",
+    ] {
+        assert!(
+            kernel.resolve_credential(url, "GET").is_empty(),
+            "no credential expected for {url}"
+        );
     }
-);
+}
 
 // ── config parsing (vfs_config.rs) ──────────────────────────────────
 
@@ -7768,17 +9500,16 @@ expect!(cmd_sleep_zero, "command sleep 0 && echo ok", "ok");
 fn bind_direct_dangling_symlink_blocked() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let dir = std::env::temp_dir().join("lsh_dangling_symlink_test");
-        let target = std::env::temp_dir().join("lsh_dangling_escape.txt");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_file(&target);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new("lsh_dangling_symlink_test");
+        let mount = dir.join("mount");
+        let target = dir.join("escape.txt");
+        std::fs::create_dir(&mount).unwrap();
         // Create a dangling symlink inside the mount pointing outside
-        std::os::unix::fs::symlink(&target, dir.join("escape_link")).unwrap();
+        std::os::unix::fs::symlink(&target, mount.join("escape_link")).unwrap();
         assert!(!target.exists());
 
         let mut shell = Shell::builder()
-            .bind_direct(dir.to_str().unwrap(), "/mnt")
+            .bind_direct(mount.to_str().unwrap(), "/mnt")
             .build()
             .unwrap();
         // Attempt to write through the dangling symlink
@@ -7786,8 +9517,6 @@ fn bind_direct_dangling_symlink_blocked() {
         assert_ne!(out.status, 0);
         // Verify nothing was written outside the mount
         assert!(!target.exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }));
 }
 
@@ -7826,6 +9555,91 @@ fn max_file_size_append_loop_blocked() {
     }));
 }
 
+/// A shell with `max_file_size(4)` and `/mnt/d` bound direct to `dir`.
+fn shell_with_max_file_size_4(dir: &std::path::Path) -> Shell {
+    Shell::builder()
+        .bind_direct(dir.to_str().unwrap(), "/mnt/d")
+        .max_file_size(4)
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap()
+}
+
+/// Puts `seed` in `{mount}/f` before a case runs.
+async fn seed_file(shell: &mut Shell, dir: &std::path::Path, mount: &str, seed: &str) {
+    if mount == "/tmp" {
+        shell.write_file("/tmp/f", seed.as_bytes()).await.unwrap();
+    } else {
+        std::fs::write(dir.join("f"), seed).unwrap();
+    }
+}
+
+/// The content of `{mount}/f`, removing the host copy.
+async fn written_file(shell: &mut Shell, dir: &std::path::Path, mount: &str) -> String {
+    if mount == "/tmp" {
+        return shell.run("cat /tmp/f").await.stdout;
+    }
+    let content = std::fs::read_to_string(dir.join("f")).unwrap();
+    std::fs::remove_file(dir.join("f")).unwrap();
+    content
+}
+
+#[test]
+fn max_file_size_overflow_fails_the_write() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_file_size_overflow");
+        for (seed, script, kept) in [
+            (None, "printf abcdefgh > MOUNT/f", ""),
+            (Some("ab"), "printf cde >> MOUNT/f", "ab"),
+            (None, "{ printf ab; printf cde; } > MOUNT/f", ""),
+        ] {
+            for mount in ["/tmp", "/mnt/d"] {
+                let script = script.replace("MOUNT", mount);
+                let mut shell = shell_with_max_file_size_4(&dir);
+                if let Some(seed) = seed {
+                    seed_file(&mut shell, &dir, mount, seed).await;
+                }
+                let out = shell.run(&script).await;
+                assert_eq!(out.status, 1, "{script}: stderr {:?}", out.stderr);
+                assert!(
+                    out.stderr.contains("file size limit exceeded"),
+                    "{script}: stderr {:?}",
+                    out.stderr
+                );
+                let content = written_file(&mut shell, &dir, mount).await;
+                assert_eq!(content, kept, "{script}");
+            }
+        }
+    }));
+}
+
+#[test]
+fn max_file_size_write_up_to_the_limit_succeeds() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_file_size_exact");
+        for (seed, script) in [
+            (None, "printf abcd > MOUNT/f"),
+            (Some("ab"), "printf cd >> MOUNT/f"),
+            (None, "{ printf ab; printf cd; } > MOUNT/f"),
+        ] {
+            for mount in ["/tmp", "/mnt/d"] {
+                let script = script.replace("MOUNT", mount);
+                let mut shell = shell_with_max_file_size_4(&dir);
+                if let Some(seed) = seed {
+                    seed_file(&mut shell, &dir, mount, seed).await;
+                }
+                let out = shell.run(&script).await;
+                assert_eq!(out.status, 0, "{script}: stderr {:?}", out.stderr);
+                assert_eq!(out.stderr, "", "{script}");
+                let content = written_file(&mut shell, &dir, mount).await;
+                assert_eq!(content, "abcd", "{script}");
+            }
+        }
+    }));
+}
+
 // ── max_output enforced in execute_capture mode ───────────────────
 
 #[test]
@@ -7853,7 +9667,9 @@ fn max_output_truncates_in_capture_mode() {
     }));
 }
 
-// ── empty pipeline stage does not panic ───────────────────────────#[test]
+// ── empty pipeline stage does not panic ───────────────────────────
+
+#[test]
 fn empty_pipeline_stage_no_panic() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
@@ -7863,6 +9679,32 @@ fn empty_pipeline_stage_no_panic() {
             // Must not panic — any non-zero exit is fine
             assert_ne!(out.status, -1, "{cmd} should not crash");
         }
+    }));
+}
+
+// ── function depth is tracked through pipeline stages ─────────────
+
+#[test]
+fn pipeline_function_depth_limited() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .max_depth(4)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        // Two nested function calls through pipelines — within limit
+        let out = shell
+            .run("g() { echo ok | cat; }; f() { g | cat; }; f | cat")
+            .await;
+        assert_eq!((out.stdout.as_str(), out.stderr.as_str()), ("ok\n", ""));
+        // Unbounded recursion through a pipeline stage stops at the depth
+        // limit; each call appends one line before it recurses
+        let out = shell
+            .run("r() { echo x >> /tmp/calls; r | cat; }; r; wc -l < /tmp/calls")
+            .await;
+        let calls: u32 = out.stdout.trim().parse().unwrap_or(u32::MAX);
+        assert!(calls < 4, "calls: {calls}, stderr: {}", out.stderr);
     }));
 }
 
@@ -7981,5 +9823,146 @@ fn uniq_skip_chars_multibyte_no_panic() {
         assert_eq!(out.status, 0, "stderr: {}", out.stderr);
         // Skipping the leading `é` leaves `x`/`y`, which differ → both kept.
         assert_eq!(out.stdout, "éx\néy\n");
+    }));
+}
+
+// ── output writers installed by the caller ────────────────────────
+
+/// Run `cmd` with channel writers on the shell's stdout and stderr, and return what each received.
+async fn run_with_writers(shell: &mut Shell, cmd: &str) -> (strands_shell::Output, String, String) {
+    use strands_shell::os::{STDERR, STDOUT, pipe};
+    fn drain(rx: &mut tokio::sync::mpsc::Receiver<bytes::Bytes>) -> String {
+        let mut text = String::new();
+        while let Ok(chunk) = rx.try_recv() {
+            text.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        text
+    }
+    let (out_tx, mut out_rx) = pipe(1024);
+    let (err_tx, mut err_rx) = pipe(1024);
+    shell.proc.set_channel_writer(STDOUT, out_tx);
+    shell.proc.set_channel_writer(STDERR, err_tx);
+    let output = shell.run(cmd).await;
+    (output, drain(&mut out_rx), drain(&mut err_rx))
+}
+
+macro_rules! expect_writers {
+    ($name:ident, $cmd:expr, $stdout:expr, $stderr:expr) => {
+        #[test]
+        fn $name() {
+            let (rt, local) = rt();
+            rt.block_on(local.run_until(async {
+                let mut shell = Shell::builder().build().unwrap();
+                let (output, stdout, stderr) = run_with_writers(&mut shell, $cmd).await;
+                assert_eq!(stdout, $stdout, "stdout writer mismatch");
+                #[allow(clippy::redundant_closure_call)]
+                ($stderr)(&stderr);
+                assert_eq!(output.stdout, "", "captured stdout must be empty");
+                assert_eq!(output.stderr, "", "captured stderr must be empty");
+            }));
+        }
+    };
+}
+
+expect_writers!(
+    writer_receives_builtin_stdout,
+    "printf A; echo B; printf C",
+    "AB\nC",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    writer_receives_builtin_stderr,
+    "printf OOPS >&2",
+    "",
+    |stderr: &str| assert_eq!(stderr, "OOPS")
+);
+expect_writers!(
+    writer_receives_builtin_diagnostic,
+    "cd /nope",
+    "",
+    |stderr: &str| assert!(stderr.contains("cd: /nope"), "stderr: {stderr:?}")
+);
+expect_writers!(
+    writer_receives_failed_redirect_reason,
+    "printf x > /nope/f",
+    "",
+    |stderr: &str| assert!(stderr.contains("/nope/f"), "stderr: {stderr:?}")
+);
+expect_writers!(
+    writer_receives_command_stdout,
+    "printf FILE > /tmp/w.txt; cat /tmp/w.txt",
+    "FILE",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    writer_receives_command_stderr,
+    "ls /nope",
+    "",
+    |stderr: &str| assert!(stderr.contains("/nope"), "stderr: {stderr:?}")
+);
+expect_writers!(
+    writer_receives_last_pipeline_stage_stdout,
+    "echo a | cat",
+    "a\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    writer_receives_every_pipeline_stage_stderr,
+    "ls /first | ls /second",
+    "",
+    |stderr: &str| assert!(
+        stderr.contains("/first") && stderr.contains("/second"),
+        "stderr: {stderr:?}"
+    )
+);
+expect_writers!(
+    redirect_takes_output_away_from_writer,
+    "printf x > /tmp/r.txt; cat /tmp/r.txt >/dev/null; ls /nope 2>/dev/null",
+    "",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+
+#[test]
+fn writer_receives_bytes_that_are_not_utf8() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("writer_not_utf8");
+        std::fs::write(dir.join("f"), [b'a', 0x80, b'b']).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/w")
+            .build()
+            .unwrap();
+        let (out_tx, mut out_rx) = strands_shell::os::pipe(16);
+        shell
+            .proc
+            .set_channel_writer(strands_shell::os::STDOUT, out_tx);
+        let output = shell.run("cat /w/f").await;
+        let mut bytes = Vec::new();
+        while let Ok(chunk) = out_rx.try_recv() {
+            bytes.extend_from_slice(&chunk);
+        }
+        assert_eq!(bytes, [b'a', 0x80, b'b'], "status {}", output.status);
+    }));
+}
+
+#[test]
+fn output_is_captured_when_no_writer_is_installed() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let output = shell
+            .run("printf A; printf B >&2; echo c | cat; ls /nope")
+            .await;
+        assert_eq!(output.stdout, "Ac\n");
+        assert!(
+            output.stderr.starts_with('B'),
+            "stderr: {:?}",
+            output.stderr
+        );
+        assert!(
+            output.stderr.contains("/nope"),
+            "stderr: {:?}",
+            output.stderr
+        );
     }));
 }
