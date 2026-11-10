@@ -1,0 +1,7 @@
+status: 0
+stderr: empty
+--- stdout
+      2 a
+      3 b
+      1 c
+a

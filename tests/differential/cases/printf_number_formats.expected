@@ -1,0 +1,5 @@
+status: 0
+stderr: empty
+--- stdout
+42 -7
+ff 10

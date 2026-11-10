@@ -1699,6 +1699,24 @@ async fn execute_captured_control_flow(
     result
 }
 
+/// Run one pipeline with its stdout captured, through the dispatch a direct run takes.
+async fn capture_pipeline_checked(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    pipeline: &[parser::Command],
+) -> (Result<i32, ControlFlow>, String) {
+    let saved_capture = std::mem::replace(&mut proc.capture, true);
+    let saved_output = std::mem::take(&mut proc.captured_output);
+    let mut saved_stdout = Process::empty();
+    proc.transfer_fd(STDOUT, &mut saved_stdout);
+    let result = Box::pin(execute_pipeline_checked(os, proc, pipeline)).await;
+    proc.capture = saved_capture;
+    proc.close(STDOUT);
+    saved_stdout.transfer_fd(STDOUT, proc);
+    let output = std::mem::replace(&mut proc.captured_output, saved_output);
+    (result, output)
+}
+
 /// The exit status of a captured command line that ran to its end or stopped on control flow.
 fn captured_status(result: Result<i32, ControlFlow>, last_exit: i32) -> i32 {
     match result {
@@ -1741,12 +1759,16 @@ async fn run_capturing_status(
                     }
                 }
                 Item::Pipeline(pipeline, negated) => {
-                    let (mut exit, out) =
-                        execute_pipeline_capture(os.clone(), proc, pipeline).await;
-                    if *negated {
-                        exit = if exit == 0 { 1 } else { 0 };
+                    match capture_pipeline_checked(os.clone(), proc, pipeline).await {
+                        (Ok(exit), out) => {
+                            let exit = if *negated { i32::from(exit == 0) } else { exit };
+                            (exit, out)
+                        }
+                        (Err(control), out) => {
+                            flow = Some(control);
+                            (proc.last_exit, out)
+                        }
                     }
-                    (exit, out)
                 }
                 Item::Group(cl) => {
                     let (s, result) = Box::pin(run_capturing_status(os.clone(), proc, cl)).await;
@@ -1970,11 +1992,16 @@ async fn run_capturing_status(
                             item: item.clone(),
                             redirects: redirects.clone(),
                         };
-                        match Box::pin(execute_item(os.clone(), proc, &cr)).await {
-                            Ok(exit) => (exit, String::new()),
+                        let saved_capture = std::mem::replace(&mut proc.capture, true);
+                        let saved_output = std::mem::take(&mut proc.captured_output);
+                        let result = Box::pin(execute_item(os.clone(), proc, &cr)).await;
+                        proc.capture = saved_capture;
+                        let out = std::mem::replace(&mut proc.captured_output, saved_output);
+                        match result {
+                            Ok(exit) => (exit, out),
                             Err(control) => {
                                 flow = Some(control);
-                                (proc.last_exit, String::new())
+                                (proc.last_exit, out)
                             }
                         }
                     } else {
@@ -2199,43 +2226,69 @@ async fn execute_item(
             }
             // For stdout/stderr redirects, capture output and write to target
             if !stdout_expanded.is_empty() {
-                // Open the targets before the body runs.
+                // Open the targets before the body runs. fd 1 and fd 2 each end at one sink,
+                // decided by the redirects in order.
+                let mut sinks = [GroupSink::Stdout, GroupSink::Stderr];
                 let mut writers = Vec::new();
                 for (redir, target) in &stdout_expanded {
-                    let fd_num = match redir {
+                    let index = match redir {
                         Redirect::Write(fd, _)
                         | Redirect::Append(fd, _)
                         | Redirect::Clobber(fd, _)
-                        | Redirect::DupWrite(fd, _) => *fd,
+                        | Redirect::DupWrite(fd, _) => match *fd {
+                            STDOUT => 0,
+                            STDERR => 1,
+                            _ => continue,
+                        },
                         _ => continue,
                     };
-                    if fd_num == STDOUT || fd_num == 1 {
-                        let flags = match redir {
-                            Redirect::Append(..) => OpenFlags::append(),
-                            _ => OpenFlags::write(),
+                    if let Redirect::DupWrite(..) = redir {
+                        sinks[index] = match target.as_str() {
+                            "1" => sinks[0],
+                            "2" => sinks[1],
+                            _ => continue,
                         };
-                        match os.open(proc, target, flags).await {
-                            Ok(fd) => writers.extend(proc.take_writer(fd).map(|w| (target, w))),
-                            Err(e) => {
-                                if !stdin_expanded.is_empty() {
-                                    proc.close(STDIN);
-                                    saved_stdin.transfer_fd(STDIN, proc);
-                                }
-                                proc.err_msg(&format!("strands-shell: {target}: {e}"));
-                                return Ok(1);
+                        continue;
+                    }
+                    let flags = match redir {
+                        Redirect::Append(..) => OpenFlags::append(),
+                        _ => OpenFlags::write(),
+                    };
+                    match os.open(proc, target, flags).await {
+                        Ok(fd) => {
+                            if let Ok(w) = proc.take_writer(fd) {
+                                sinks[index] = GroupSink::File(writers.len());
+                                writers.push((target, w, String::new()));
                             }
+                        }
+                        Err(e) => {
+                            if !stdin_expanded.is_empty() {
+                                proc.close(STDIN);
+                                saved_stdin.transfer_fd(STDIN, proc);
+                            }
+                            proc.err_msg(&format!("strands-shell: {target}: {e}"));
+                            return Ok(1);
                         }
                     }
                 }
+                let outer_stderr = std::mem::take(&mut proc.captured_stderr);
                 let inner_cl = vec![(*item.clone(), None)];
                 let (captured, result) =
                     Box::pin(run_capturing_status(os.clone(), proc, &inner_cl)).await;
+                let stderr_text = std::mem::replace(&mut proc.captured_stderr, outer_stderr);
                 if !stdin_expanded.is_empty() {
                     proc.close(STDIN);
                     saved_stdin.transfer_fd(STDIN, proc);
                 }
-                for (target, mut w) in writers {
-                    if let Err(e) = w.write_all(captured.as_bytes()).await {
+                for (sink, text) in [(sinks[0], &captured), (sinks[1], &stderr_text)] {
+                    match sink {
+                        GroupSink::Stdout => proc.write_stdout(text),
+                        GroupSink::Stderr => proc.write_stderr(text),
+                        GroupSink::File(index) => writers[index].2.push_str(text),
+                    }
+                }
+                for (target, mut w, text) in writers {
+                    if let Err(e) = w.write_all(text.as_bytes()).await {
                         proc.err_msg(&format!("strands-shell: {target}: {e}"));
                         proc.last_exit = 1;
                     }
@@ -2254,6 +2307,15 @@ async fn execute_item(
             }
         }
     }
+}
+
+/// Where one of a redirected group's two output streams ends.
+#[derive(Clone, Copy, PartialEq)]
+enum GroupSink {
+    Stdout,
+    Stderr,
+    /// The writer at this index among the group's opened targets.
+    File(usize),
 }
 
 async fn execute_if(
@@ -2857,7 +2919,9 @@ async fn execute_pipeline(
                 .saturating_sub(shell_proc.captured_output.len());
             let end = os::floor_char_boundary(&output, remaining);
             shell_proc.captured_output.push_str(&output[..end]);
-            shell_proc.err_msg("strands-shell: output size limit exceeded");
+            if !shell_proc.output_limit_reported() {
+                shell_proc.err_msg("strands-shell: output size limit exceeded");
+            }
             return 1;
         }
         shell_proc.captured_output.push_str(&output);
@@ -3012,14 +3076,26 @@ async fn run_pipeline(
             shell_proc.transfer_fd(STDIN, &mut io_proc);
             let (out_tx, out_rx) = os::pipe(64);
             let (err_tx, err_rx) = os::pipe(64);
-            io_proc.set_channel_writer(STDOUT, out_tx);
-            io_proc.set_channel_writer(STDERR, err_tx.clone());
+            // A writer the caller installed takes the place of the local pipe.
+            if shell_proc.inherit_channel_writer(STDOUT, &mut io_proc) {
+                drop(out_tx);
+            } else {
+                io_proc.set_channel_writer(STDOUT, out_tx);
+            }
+            let caller_stderr = shell_proc.inherit_channel_writer(STDERR, &mut io_proc);
+            if !caller_stderr {
+                io_proc.set_channel_writer(STDERR, err_tx.clone());
+            }
             shell_proc.set_err_tx(err_tx);
 
             // Apply redirects to the io_proc so builtins see them
             if let Err(e) = apply_redirects(&os, &mut io_proc, &expanded_redirects[0]).await {
                 shell_proc.clear_err_tx();
+                if caller_stderr && let Some(tx) = shell_proc.stderr_channel() {
+                    shell_proc.set_err_tx(tx);
+                }
                 shell_proc.err_msg(&format!("strands-shell: {e}"));
+                shell_proc.clear_err_tx();
                 return (1, String::new());
             }
             // Builtin diagnostics follow the command's own stderr redirection.
@@ -3189,16 +3265,22 @@ async fn run_pipeline(
         procs[i + 1].set_channel_reader(STDIN, rx);
     }
 
-    // Last stage stdout: channel back to us
+    // Last stage stdout: the caller's writer, or a channel back to us
     let (last_tx, last_rx) = os::pipe(64);
-    procs[len - 1].set_channel_writer(STDOUT, last_tx);
+    if shell_proc.inherit_channel_writer(STDOUT, &mut procs[len - 1]) {
+        drop(last_tx);
+    } else {
+        procs[len - 1].set_channel_writer(STDOUT, last_tx);
+    }
 
-    // Every stage gets a stderr channel back to us
+    // Every stage gets the caller's stderr writer, or a stderr channel back to us
     let mut stderr_rxs = Vec::with_capacity(len);
     for p in &mut procs {
         let (tx, rx) = os::pipe(64);
-        p.set_err_tx(tx.clone());
-        p.set_channel_writer(STDERR, tx);
+        if !shell_proc.inherit_channel_writer(STDERR, p) {
+            p.set_channel_writer(STDERR, tx.clone());
+        }
+        p.set_err_tx(tx);
         stderr_rxs.push(rx);
     }
 
@@ -3244,12 +3326,21 @@ async fn run_pipeline(
                         if args.is_empty() {
                             return 0;
                         }
+                        // Capture both streams, so each reaches this stage's redirected fd.
+                        state_proc.capture = true;
+                        state_proc.clear_err_tx();
                         let exit = run_script(os, &mut state_proc, &args[0], &args[1..]).await;
                         let output = std::mem::take(&mut state_proc.captured_output);
                         if !output.is_empty()
                             && let Ok(mut w) = crate::io::stdout()
                         {
                             let _ = w.write_all(output.as_bytes()).await;
+                        }
+                        let errors = std::mem::take(&mut state_proc.captured_stderr);
+                        if !errors.is_empty()
+                            && let Ok(mut w) = crate::io::stderr()
+                        {
+                            let _ = w.write_all(errors.as_bytes()).await;
                         }
                         return exit;
                     }

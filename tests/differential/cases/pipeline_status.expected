@@ -1,0 +1,5 @@
+status: 0
+stderr: empty
+--- stdout
+a=0
+b=1
