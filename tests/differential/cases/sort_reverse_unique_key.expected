@@ -1,0 +1,12 @@
+status: 0
+stderr: empty
+--- stdout
+a,10
+b,2
+c,1
+A
+B
+a
+b
+y
+x
