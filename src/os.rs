@@ -672,6 +672,29 @@ impl Process {
         }
     }
 
+    /// Write text to stdout by the route [`out_msg`](Self::out_msg) takes, without adding a newline.
+    pub(crate) fn write_stdout(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(FdKind::ChannelWriter { tx, .. }) = self.fds.get(&STDOUT) {
+            let _ = tx.try_send(Bytes::from(text.to_string()));
+        } else if self.capture {
+            if self.max_output > 0 && self.captured_output.len() + text.len() > self.max_output {
+                self.captured_stderr
+                    .push_str("strands-shell: output size limit exceeded\n");
+                self.last_exit = 1;
+                return;
+            }
+            self.captured_output.push_str(text);
+        } else {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(text.as_bytes());
+            let _ = out.flush();
+        }
+    }
+
     /// Set an environment variable (COW — clones map on first write if shared).
     /// Returns false if the variable is readonly.
     pub fn set_env(&mut self, key: impl Into<String>, value: impl Into<String>) -> bool {
