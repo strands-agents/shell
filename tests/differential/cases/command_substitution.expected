@@ -1,0 +1,7 @@
+status: 0
+stderr: empty
+--- stdout
+HELLO
+last=c
+nested=inner
+backtick=tick

@@ -1,0 +1,5 @@
+status: 0
+stderr: empty
+--- stdout
+alice is 30
+bob is 25
