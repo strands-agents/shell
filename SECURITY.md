@@ -50,7 +50,9 @@ network, and credential operations flow through this interface. The default
    IP filtering via `SafeResolver`. Blocks RFC1918, link-local, loopback, IMDS,
    IPv4-mapped-IPv6, 6to4, Teredo
 3. **Credential injection** — per-URL prefix matching with path-boundary checks;
-   credentials injected only on original request, stripped on redirects
+   credentials injected only on original request, stripped on redirects. `curl`
+   ignores proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) in the host
+   process environment, so no proxy receives an injected credential
 4. **No syscalls** — pure userspace shell; no `fork`, `exec`, or raw syscall paths
 
 Custom Kernel implementations (for embedding in other runtimes) carry their own

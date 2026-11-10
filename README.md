@@ -228,7 +228,7 @@ The Kernel mediates everything; it runs in the same process as your code, not in
 
 - Files: only bound paths exist, everything else is hidden.
 - Network: `curl` blocks private ranges (RFC1918, link-local, loopback, IMDS) by default while letting public URLs pass through. Use `allowed_urls` to permit specific internal hosts.
-- Secrets: the Kernel injects credentials per-URL at request time, ensuring the agent never holds them. The Kernel never re-injects on redirects, even back to the same host.
+- Secrets: the Kernel injects credentials per-URL at request time, ensuring the agent never holds them. The Kernel never re-injects on redirects, even back to the same host, and `curl` ignores proxy variables such as `HTTP_PROXY` in the host process environment.
 - Syscalls: there are none; no `fork`, no `exec` because the shell is pure userspace.
 
 If you bypass any of these, report it. See [SECURITY.md](SECURITY.md).

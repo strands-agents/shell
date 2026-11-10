@@ -838,7 +838,11 @@ impl Kernel for VfsKernel {
             let url_explicitly_allowed = check_url_safe(&req.url).is_err();
 
             // 3. Build reqwest client
+            // `no_proxy` keeps proxy variables in the host process environment from
+            // routing the request: a proxy would receive injected credentials, and
+            // it resolves the target itself, so `SafeResolver` would never run.
             let mut builder = reqwest::Client::builder()
+                .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .danger_accept_invalid_certs(req.insecure);
             if !url_explicitly_allowed {
