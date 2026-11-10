@@ -1078,19 +1078,6 @@ impl CommandRequest {
     pub fn cwd(&self) -> &Path {
         &self.cwd
     }
-
-    /// The program and arguments joined by single spaces.
-    ///
-    /// This describes the command for a reader. It is not quoted, so do not
-    /// parse it back into arguments.
-    pub fn command_line(&self) -> String {
-        let mut line = self.program.clone();
-        for arg in &self.args {
-            line.push(' ');
-            line.push_str(arg);
-        }
-        line
-    }
 }
 
 /// The core kernel abstraction. All methods take &self — the kernel is shared.
@@ -1161,10 +1148,11 @@ pub trait Kernel: Send + Sync {
     ///
     /// Shell calls this for each pipeline stage that names a builtin,
     /// function, registered command, or script, after expansion and
-    /// resolution, and before any stage starts. For `builtin NAME`, Shell
-    /// asks about `NAME`. Commands that `eval`, `source`, traps, `find -exec`,
-    /// `xargs`, and Lua run come here too, but `eval`, `source`, `.`, `exec`,
-    /// `command`, `exit`, `return`, `break`, and `continue` themselves do not.
+    /// resolution, and before any stage starts. For `builtin NAME`, where
+    /// `NAME` is a builtin, Shell asks about `NAME`. Commands that `eval`,
+    /// `source`, traps, `find -exec`, `xargs`, and Lua run come here too, but
+    /// `eval`, `source`, `.`, `exec`, `command`, `exit`, `return`, `break`,
+    /// and `continue` themselves do not.
     /// Commands for [`Kernel::command_fallback`] do not. An `Err` stops the
     /// pipeline: Shell writes the error to stderr and returns 126. The
     /// default allows every command.
@@ -1174,7 +1162,8 @@ pub trait Kernel: Send + Sync {
     /// Report the status of a command that [`Kernel::check_command`] allowed
     /// and Shell ran.
     ///
-    /// `request` is the value that Shell passed to [`Kernel::check_command`].
+    /// `request` has the same program, args, and cwd that Shell passed to
+    /// [`Kernel::check_command`].
     /// `status` is the stage's own status, before Shell adjusts the pipeline
     /// status for a failed host write or the output limit. A command that was
     /// allowed but never started, because a redirect failed or another stage
