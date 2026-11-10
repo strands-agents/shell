@@ -227,7 +227,7 @@ The Kernel mediates everything; it runs in the same process as your code, not in
 **Default-deny. You allowlist what the agent can reach:**
 
 - Files: only bound paths exist, everything else is hidden.
-- Network: `curl` blocks private ranges (RFC1918, link-local, loopback, IMDS and other cloud metadata addresses, and IPv6 encodings of any of them such as NAT64) by default while letting public URLs pass through. Use `allowed_urls` to permit specific internal hosts.
+- Network: `curl` blocks private ranges (RFC1918, link-local, loopback, IMDS, `0.0.0.0/8`, and two cloud metadata addresses outside `169.254.0.0/16`, plus their IPv4-mapped, IPv4-compatible, IPv4-translated, 6to4, Teredo, and `64:ff9b::/96` NAT64 encodings and all of `64:ff9b:1::/48`) by default while letting public URLs pass through. Use `allowed_urls` to permit specific internal hosts.
 - Secrets: the Kernel injects credentials per-URL at request time, ensuring the agent never holds them. The Kernel never re-injects on redirects, even back to the same host.
 - Syscalls: there are none; no `fork`, no `exec` because the shell is pure userspace.
 
