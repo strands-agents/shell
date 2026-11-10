@@ -1561,7 +1561,6 @@ mod url_safety_tests {
         }
     }
 
-    // sbox-89 / V2441362197: translated encodings and platform metadata addresses.
     #[test]
     fn check_url_safe_blocks_translated_and_platform_metadata_addresses() {
         for u in [
