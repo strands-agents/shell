@@ -301,6 +301,11 @@ fn builtin_is_unwrapped_before_the_check() {
             "builtin echo hi",
             "builtin builtin echo hi",
             "true | builtin echo hi",
+            "builtin echo hi | cat",
+            "X=builtin; $X echo hi",
+            "\"builtin\" echo hi",
+            "eval 'true | builtin echo hi'",
+            "command builtin echo hi",
         ] {
             let (mut shell, events) = shell_with(&["echo"], false);
             let out = shell.run(script).await;
@@ -313,6 +318,22 @@ fn builtin_is_unwrapped_before_the_check() {
             );
             assert!(finished(&events).is_empty(), "{script}: {events:?}");
         }
+    });
+}
+
+#[test]
+fn builtin_find_in_a_later_stage_is_checked_as_find() {
+    block_on(async {
+        let (mut shell, events) = shell_with(&["find"], false);
+        shell.run("mkdir -p /tmp/d; touch /tmp/d/f").await;
+        events.lock().unwrap().clear();
+        let out = shell
+            .run("true | builtin find /tmp/d -name f -exec rm {} ';'")
+            .await;
+        assert_eq!(out.status, 126);
+        assert_eq!(checked_programs(&events), ["true", "find"]);
+        assert!(finished(&events).is_empty(), "{events:?}");
+        assert_eq!(shell.run("test -e /tmp/d/f").await.status, 0);
     });
 }
 
