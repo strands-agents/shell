@@ -1443,12 +1443,23 @@ fn parse_pipeline_into_compound<'a>(
     pipeline_tokens.clear();
     let (compound, rest) = parse_compound(&tokens[*i..])?;
     *i = tokens.len() - rest.len();
-    let item = Item::PipelineIntoCompound {
-        head,
-        compound: Box::new(compound),
-        negated,
-    };
-    collect_compound_pipe(tokens, i, pipeline_tokens, item, false)
+    // Redirects after the compound apply to it alone, not to the head.
+    match collect_compound_pipe(tokens, i, pipeline_tokens, compound, false)? {
+        Item::CompoundPipeline { compound, tail, .. } => Ok(Item::CompoundPipeline {
+            compound: Box::new(Item::PipelineIntoCompound {
+                head,
+                compound,
+                negated: false,
+            }),
+            tail,
+            negated,
+        }),
+        compound => Ok(Item::PipelineIntoCompound {
+            head,
+            compound: Box::new(compound),
+            negated,
+        }),
+    }
 }
 
 /// Whether `tok` begins a compound command.

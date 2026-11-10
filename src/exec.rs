@@ -466,9 +466,18 @@ fn expand_part_split<'a>(
                 }
             }
             WordPart::VarOp(name, op, word, colon) if op == "-" || op == "+" => {
+                if quoted {
+                    // A quoted expansion is one field even when it comes out empty.
+                    segments.last_mut().unwrap().push("", false, false);
+                }
                 if uses_alternate_word(proc, name, op, *colon) {
                     for p in word {
-                        expand_part_split(os.clone(), proc, p, segments, ifs, quoted).await;
+                        if !quoted && let WordPart::Literal(s) = p {
+                            // Unquoted, the word's own text is split like an expansion.
+                            segments.last_mut().unwrap().push(s, true, true);
+                        } else {
+                            expand_part_split(os.clone(), proc, p, segments, ifs, quoted).await;
+                        }
                     }
                 } else if op == "-"
                     && let Some(v) = resolve_var(proc, name)
@@ -2099,9 +2108,16 @@ async fn capture_pipeline_into_compound(
         return (1, String::new());
     }
     sub.set_channel_reader(STDIN, text_reader(input));
-    let compound_cl = vec![(compound.clone(), None)];
+    let compound_cl = match compound {
+        // `sub` is already the subshell; forking again would lose its stdin.
+        Item::Subshell(cl) => cl.clone(),
+        _ => vec![(compound.clone(), None)],
+    };
     let (s, result) = run_capturing_status(os, &mut sub, &compound_cl).await;
-    let mut exit = captured_status(result, sub.last_exit);
+    let mut exit = match result {
+        Ok(n) | Err(ControlFlow::Exit(n) | ControlFlow::Return(n)) => n,
+        Err(_) => sub.last_exit,
+    };
     if negated {
         exit = if exit == 0 { 1 } else { 0 };
     }
@@ -2124,14 +2140,19 @@ async fn execute_pipeline_into_compound(
         return Ok(1);
     }
     sub.set_channel_reader(STDIN, text_reader(input));
-    let r = execute_item(os, &mut sub, compound).await;
+    let r = match compound {
+        // `sub` is already the subshell; forking again would lose its stdin.
+        Item::Subshell(cl) => Box::pin(execute_command_line_inner(os, &mut sub, cl)).await,
+        _ => execute_item(os, &mut sub, compound).await,
+    };
     if proc.capture {
         proc.captured_output.push_str(&sub.captured_output);
         proc.captured_stderr.push_str(&sub.captured_stderr);
     }
+    // The compound runs in a subshell, so `return`, `break` and `continue` stop there.
     let mut exit = match r {
-        Ok(n) | Err(ControlFlow::Exit(n)) => n,
-        Err(e) => return Err(e),
+        Ok(n) | Err(ControlFlow::Exit(n) | ControlFlow::Return(n)) => n,
+        Err(_) => sub.last_exit,
     };
     if negated {
         exit = if exit == 0 { 1 } else { 0 };

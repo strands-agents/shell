@@ -167,3 +167,23 @@ fn a_pipeline_can_feed_a_compound_command() {
         assert_eq!(out.stdout, "[1][2]|got y|<a><b>");
     }));
 }
+
+#[test]
+fn a_quoted_default_that_comes_out_empty_is_still_one_argument() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run("f(){ printf '%s,' \"$#\"; }; f \"${1:-}\"; f a \"${u:-}\" c; f \"${u-}\"; f \"${u+x}\"; f ${u:-a b}; f ${u:-}; set -u; [ -n \"${DEBUG:-}\" ] && echo on; echo end").await;
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.stdout, "1,3,1,1,2,0,end\n");
+    }));
+}
+
+#[test]
+fn a_compound_fed_by_a_pipe_runs_in_a_subshell() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run("f(){ echo x | while read l; do return 3; done; echo \"after $?\"; }; f; for i in 1 2; do echo x | while read l; do break 2; done; printf 'i=%s,' $i; done; echo; echo a | ( read v; echo \"got=$v\" ); printf 'a\\n' | while read l; do echo \"<$l>\" >&2; done 2>e; cat e; echo a | while read v; do echo \"no $v\"; done < /dev/null; printf '1\\n' | while read l; do echo \"[$l]\"; done | tr 1 X; ! printf 'a\\n' | while read l; do :; done | false; echo neg=$?").await;
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.stdout, "after 3\ni=1,i=2,\ngot=a\n<a>\n[X]\nneg=0\n");
+    }));
+}
