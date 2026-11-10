@@ -340,6 +340,10 @@ pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &st
 /// Expand a Word into a String using the current environment.
 async fn expand_word(os: Arc<dyn Kernel>, proc: &mut Process, word: &Word) -> String {
     let mut result = String::new();
+    if parser::is_array_literal(word) {
+        refuse_array(proc);
+        return result;
+    }
     for part in word {
         expand_part(os.clone(), proc, part, &mut result).await;
     }
@@ -384,6 +388,10 @@ async fn expand_word_split(os: Arc<dyn Kernel>, proc: &mut Process, word: &Word)
         .get("IFS")
         .cloned()
         .unwrap_or_else(|| " \t\n".into());
+    if parser::is_array_literal(word) {
+        refuse_array(proc);
+        return Vec::new();
+    }
     let mut segments: Vec<Segment> = vec![Segment::new()];
 
     for part in word {
@@ -504,7 +512,6 @@ fn expand_part_split<'a>(
                     expand_part_split(os.clone(), proc, p, segments, ifs, true).await;
                 }
             }
-            WordPart::ArrayLiteral(_) => refuse_array(proc),
         }
     })
 }
@@ -1438,18 +1445,8 @@ fn expand_part<'a>(
                     expand_part(os.clone(), proc, p, out).await;
                 }
             }
-            WordPart::ArrayLiteral(_) => refuse_array(proc),
         }
     })
-}
-
-/// A stdin channel that yields `text` and then ends.
-fn text_reader(text: String) -> tokio::sync::mpsc::Receiver<bytes::Bytes> {
-    let (tx, rx) = os::pipe(1);
-    if !text.is_empty() {
-        let _ = tx.try_send(bytes::Bytes::from(text.into_bytes()));
-    }
-    rx
 }
 
 /// Pattern trimming for ${var%pat}, ${var%%pat}, ${var#pat}, ${var##pat}.
@@ -1833,8 +1830,10 @@ async fn run_capturing_status(
                         sub.err_msg(msg);
                         (1, String::new())
                     } else {
+                        proc.transfer_fd(STDIN, &mut sub);
                         let (s, result) =
                             Box::pin(run_capturing_status(os.clone(), &mut sub, cl)).await;
+                        sub.transfer_fd(STDIN, proc);
                         (captured_status(result, sub.last_exit), s)
                     }
                 }
@@ -1988,20 +1987,6 @@ async fn run_capturing_status(
                     proc.set_function(name, body.clone());
                     (0, String::new())
                 }
-                Item::PipelineIntoCompound {
-                    head,
-                    compound,
-                    negated,
-                } => {
-                    Box::pin(capture_pipeline_into_compound(
-                        os.clone(),
-                        proc,
-                        head,
-                        compound,
-                        *negated,
-                    ))
-                    .await
-                }
                 Item::CompoundRedirect { item, redirects } => {
                     let mut expanded = Vec::new();
                     for redir in redirects {
@@ -2090,74 +2075,6 @@ async fn run_capturing_status(
         }
     }
     (output, Ok(last_exit))
-}
-
-/// Run `head | compound` and capture the compound's stdout.
-async fn capture_pipeline_into_compound(
-    os: Arc<dyn Kernel>,
-    proc: &mut Process,
-    head: &[parser::Command],
-    compound: &Item,
-    negated: bool,
-) -> (i32, String) {
-    let (_, input) = execute_pipeline_capture(os.clone(), proc, head).await;
-    let mut sub = proc.fork();
-    sub.depth += 1;
-    if let Some(msg) = sub.check_limits() {
-        sub.err_msg(msg);
-        return (1, String::new());
-    }
-    sub.set_channel_reader(STDIN, text_reader(input));
-    let compound_cl = match compound {
-        // `sub` is already the subshell; forking again would lose its stdin.
-        Item::Subshell(cl) => cl.clone(),
-        _ => vec![(compound.clone(), None)],
-    };
-    let (s, result) = run_capturing_status(os, &mut sub, &compound_cl).await;
-    let mut exit = match result {
-        Ok(n) | Err(ControlFlow::Exit(n) | ControlFlow::Return(n)) => n,
-        Err(_) => sub.last_exit,
-    };
-    if negated {
-        exit = if exit == 0 { 1 } else { 0 };
-    }
-    (exit, s)
-}
-
-/// Run `head | compound`: the head runs to its end, then the compound reads its output in a fork.
-async fn execute_pipeline_into_compound(
-    os: Arc<dyn Kernel>,
-    proc: &mut Process,
-    head: &[parser::Command],
-    compound: &Item,
-    negated: bool,
-) -> Result<i32, ControlFlow> {
-    let (_, input) = execute_pipeline_capture(os.clone(), proc, head).await;
-    let mut sub = proc.fork();
-    sub.depth += 1;
-    if let Some(msg) = sub.check_limits() {
-        sub.err_msg(msg);
-        return Ok(1);
-    }
-    sub.set_channel_reader(STDIN, text_reader(input));
-    let r = match compound {
-        // `sub` is already the subshell; forking again would lose its stdin.
-        Item::Subshell(cl) => Box::pin(execute_command_line_inner(os, &mut sub, cl)).await,
-        _ => execute_item(os, &mut sub, compound).await,
-    };
-    if proc.capture {
-        proc.captured_output.push_str(&sub.captured_output);
-        proc.captured_stderr.push_str(&sub.captured_stderr);
-    }
-    // The compound runs in a subshell, so `return`, `break` and `continue` stop there.
-    let mut exit = match r {
-        Ok(n) | Err(ControlFlow::Exit(n) | ControlFlow::Return(n)) => n,
-        Err(_) => sub.last_exit,
-    };
-    if negated {
-        exit = if exit == 0 { 1 } else { 0 };
-    }
-    Ok(exit)
 }
 
 /// Inner execute that propagates ControlFlow.
@@ -2256,7 +2173,9 @@ async fn execute_item(
                 sub.err_msg(msg);
                 return Ok(1);
             }
+            proc.transfer_fd(STDIN, &mut sub);
             let r = Box::pin(execute_command_line_inner(os, &mut sub, cl)).await;
+            sub.transfer_fd(STDIN, proc);
             if proc.capture {
                 proc.captured_output.push_str(&sub.captured_output);
                 proc.captured_stderr.push_str(&sub.captured_stderr);
@@ -2282,16 +2201,6 @@ async fn execute_item(
         Item::Function { name, body } => {
             proc.set_function(name, body.clone());
             Ok(0)
-        }
-        Item::PipelineIntoCompound {
-            head,
-            compound,
-            negated,
-        } => {
-            Box::pin(execute_pipeline_into_compound(
-                os, proc, head, compound, *negated,
-            ))
-            .await
         }
         Item::CompoundPipeline {
             compound,
@@ -3480,6 +3389,14 @@ async fn run_pipeline(
                     if let Some(f) = builtin {
                         return match f(os.as_ref(), &mut state_proc, &args).await {
                             Ok(code) => code,
+                            // A reader that went away stops the writer quietly, as SIGPIPE does.
+                            Err(e)
+                                if e.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                                    io.kind() == std::io::ErrorKind::BrokenPipe
+                                }) =>
+                            {
+                                1
+                            }
                             Err(e) => {
                                 if let Ok(mut w) = crate::io::stderr() {
                                     let _ = w
@@ -3521,6 +3438,12 @@ async fn run_pipeline(
                             && let Ok(mut w) = crate::io::stdout()
                         {
                             let _ = w.write_all(output.as_bytes()).await;
+                        }
+                        let errors = std::mem::take(&mut state_proc.captured_stderr);
+                        if !errors.is_empty()
+                            && let Ok(mut w) = crate::io::stderr()
+                        {
+                            let _ = w.write_all(errors.as_bytes()).await;
                         }
                         return exit;
                     }

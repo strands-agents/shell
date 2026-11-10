@@ -187,3 +187,67 @@ fn a_compound_fed_by_a_pipe_runs_in_a_subshell() {
         assert_eq!(out.stdout, "after 3\ni=1,i=2,\ngot=a\n<a>\n[X]\nneg=0\n");
     }));
 }
+
+#[test]
+fn a_function_head_feeds_the_loop_it_pipes_into() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run("p(){ echo y; echo z; }; p | while read l; do echo \"got=$l\"; done").await;
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.stdout, "got=y\ngot=z\n");
+    }));
+}
+
+#[test]
+fn a_piped_compound_sees_the_callers_positional_parameters() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run("set -- p q; echo z | while read l; do echo \"$1 $# $l\"; done").await;
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.stdout, "p 2 z\n");
+    }));
+}
+
+#[test]
+fn a_piped_group_and_a_piped_if_read_the_pipe() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run("printf 'a\\nb\\n' | { read x; read y; echo \"$y$x\"; }; echo x | if read v; then echo \"yes $v\"; fi; echo hi | { cat | while read l; do echo \"nested $l\"; done; }").await;
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.stdout, "ba\nyes x\nnested hi\n");
+    }));
+}
+
+#[test]
+fn a_stderr_redirect_on_a_piped_compound_takes_its_diagnostics() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run("echo a | { nosuchcmd; echo \"e $?\" >&2; } 2>e; cat e").await;
+        assert_eq!(out.stderr, "");
+        assert_eq!(
+            out.stdout,
+            "strands-shell: nosuchcmd: command not found\ne 127\n"
+        );
+    }));
+}
+
+#[test]
+fn an_array_assignment_in_a_function_defines_and_is_refused_when_run() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out =
+            run("f() { arr=(1 2); }; echo defined; f; echo rc=$?; x=\\(a\\); echo \"$x\"").await;
+        assert_eq!(out.stdout, "defined\nrc=2\n(a)\n");
+        assert_eq!(out.stderr, "strands-shell: arrays are not supported\n");
+    }));
+}
+
+#[test]
+fn return_and_exit_stop_only_the_piped_compound() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run("f(){ echo x | { return 3; }; echo \"after $?\"; }; f; echo x | { exit 4; }; echo \"after $?\"").await;
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.stdout, "after 3\nafter 4\n");
+    }));
+}

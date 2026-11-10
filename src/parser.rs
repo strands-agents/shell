@@ -6,7 +6,6 @@
 
 /// A part of a word, preserving quoting context for the expander.
 #[derive(Debug, PartialEq, Clone)]
-#[non_exhaustive]
 pub enum WordPart {
     /// Unquoted or double-quoted literal text.
     Literal(String),
@@ -29,8 +28,6 @@ pub enum WordPart {
     Tilde(String),
     /// A double-quoted region containing expandable parts.
     DoubleQuoted(Vec<WordPart>),
-    /// `name=(…)` or `name+=(…)` — the parenthesised list, kept as text.
-    ArrayLiteral(String),
 }
 
 /// A word is a sequence of parts that get concatenated after expansion.
@@ -45,7 +42,6 @@ pub struct Command {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-#[non_exhaustive]
 pub enum Redirect {
     /// `fd>file` (default fd=1)
     Write(u32, Word),
@@ -70,7 +66,6 @@ pub type Pipeline = Vec<Command>;
 
 /// How pipelines are chained together.
 #[derive(Debug, PartialEq, Clone)]
-#[non_exhaustive]
 pub enum Connector {
     Semi,
     And,
@@ -80,7 +75,6 @@ pub enum Connector {
 
 /// An item in a command line.
 #[derive(Debug, PartialEq, Clone)]
-#[non_exhaustive]
 pub enum Item {
     Pipeline(Pipeline, bool), // (pipeline, negated)
     /// A compound command (group, subshell, if, while, for, case) piped into
@@ -88,12 +82,6 @@ pub enum Item {
     CompoundPipeline {
         compound: Box<Item>,
         tail: Pipeline,
-        negated: bool,
-    },
-    /// A pipeline feeding a compound command: `cmd | while read x; do ...; done`
-    PipelineIntoCompound {
-        head: Pipeline,
-        compound: Box<Item>,
         negated: bool,
     },
     /// A compound command with redirections: `while read LINE; do ...; done < file`
@@ -277,6 +265,9 @@ fn resolve_heredocs(
                     }
                 }
             }
+            Item::Subshell(inner) if is_compound_stage(inner) => {
+                resolve_compound_stage_heredocs(inner, read_line)?;
+            }
             Item::Group(inner) | Item::Subshell(inner) => resolve_heredocs(inner, read_line)?,
             Item::If {
                 branches,
@@ -301,18 +292,6 @@ fn resolve_heredocs(
                 }
             }
             Item::Function { body, .. } => resolve_heredocs(body, read_line)?,
-            Item::PipelineIntoCompound { head, compound, .. } => {
-                for cmd in head.iter_mut() {
-                    for redir in &mut cmd.redirects {
-                        if let Redirect::HereDoc(_, delim, body, strip, _) = redir {
-                            *body = read_heredoc_body(delim, *strip, read_line)?;
-                        }
-                    }
-                }
-                let mut inner_cl = vec![(*compound.clone(), None)];
-                resolve_heredocs(&mut inner_cl, read_line)?;
-                **compound = inner_cl.into_iter().next().unwrap().0;
-            }
             Item::CompoundPipeline { compound, tail, .. } => {
                 let mut inner_cl = vec![(*compound.clone(), None)];
                 resolve_heredocs(&mut inner_cl, read_line)?;
@@ -928,7 +907,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     if ch == '(' && parts.is_empty() && is_assignment_prefix(&literal) {
                         chars.next();
                         parts.push(WordPart::Literal(std::mem::take(&mut literal)));
-                        parts.push(WordPart::ArrayLiteral(collect_array_literal(&mut chars)?));
+                        let list = collect_array_literal(&mut chars)?;
+                        parts.push(WordPart::Literal(format!("({list})")));
                         continue;
                     }
                     if " \t\n\r|;&<>()#".contains(ch) {
@@ -1009,7 +989,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 
                 // For reserved word matching, also store the plain text form.
                 // Only use Token::Word for purely literal words (no quotes).
-                let all_literal = parts.iter().all(|p| matches!(p, WordPart::Literal(_)));
+                let all_literal = parts.iter().all(|p| matches!(p, WordPart::Literal(_)))
+                    && !is_array_literal(&parts);
                 if all_literal {
                     let s = parts
                         .iter()
@@ -1432,34 +1413,109 @@ fn parse_function_keyword(tokens: &[Token]) -> Result<(Item, &[Token]), String> 
     Ok((item, rest))
 }
 
-/// Parse the compound at `tokens[*i]` as the stage after `pipeline_tokens`.
+/// The function that stands for a compound command piped from a pipeline.
+pub(crate) const COMPOUND_STAGE: &str = "_strands_compound";
+
+/// Parse `head | compound [redirects] [| tail]`, with the compound at `tokens[*i]`.
+///
+/// The compound becomes the body of a function that the pipeline calls as one stage, in a subshell.
 fn parse_pipeline_into_compound<'a>(
     tokens: &'a [Token],
     i: &mut usize,
     pipeline_tokens: &mut Vec<&'a Token>,
     negated: bool,
 ) -> Result<Item, String> {
-    let head = build_pipeline(pipeline_tokens)?;
+    let mut stages = build_pipeline(pipeline_tokens)?;
     pipeline_tokens.clear();
     let (compound, rest) = parse_compound(&tokens[*i..])?;
     *i = tokens.len() - rest.len();
-    // Redirects after the compound apply to it alone, not to the head.
-    match collect_compound_pipe(tokens, i, pipeline_tokens, compound, false)? {
-        Item::CompoundPipeline { compound, tail, .. } => Ok(Item::CompoundPipeline {
-            compound: Box::new(Item::PipelineIntoCompound {
-                head,
-                compound,
-                negated: false,
-            }),
-            tail,
-            negated,
-        }),
-        compound => Ok(Item::PipelineIntoCompound {
-            head,
-            compound: Box::new(compound),
-            negated,
-        }),
+    let (compound, tail) = match collect_compound_pipe(tokens, i, pipeline_tokens, compound, false)?
+    {
+        Item::CompoundPipeline { compound, tail, .. } => (*compound, tail),
+        compound => (compound, Vec::new()),
+    };
+    let (compound, redirects) = match compound {
+        Item::CompoundRedirect { item, redirects } => (*item, redirects),
+        compound => (compound, Vec::new()),
+    };
+    let body = match compound {
+        Item::Group(body) | Item::Subshell(body) => body,
+        compound => vec![(compound, None)],
+    };
+    stages.push(Command {
+        env: Vec::new(),
+        args: vec![
+            vec![WordPart::Literal(COMPOUND_STAGE.into())],
+            vec![WordPart::DoubleQuoted(vec![WordPart::Var("@".into())])],
+        ],
+        redirects,
+    });
+    stages.extend(tail);
+    Ok(Item::Subshell(vec![
+        (
+            Item::Function {
+                name: COMPOUND_STAGE.into(),
+                body,
+            },
+            Some(Connector::Semi),
+        ),
+        (Item::Pipeline(stages, negated), None),
+    ]))
+}
+
+/// Whether `cl` is the subshell body that [`parse_pipeline_into_compound`] builds.
+fn is_compound_stage(cl: &CommandLine) -> bool {
+    matches!(
+        cl.as_slice(),
+        [(Item::Function { name, .. }, Some(Connector::Semi)), (Item::Pipeline(..), None)]
+            if name == COMPOUND_STAGE
+    )
+}
+
+/// Fill the here-documents of a compound stage in the order they appear in the source.
+fn resolve_compound_stage_heredocs(
+    cl: &mut CommandLine,
+    read_line: &mut dyn FnMut(&str) -> Option<String>,
+) -> Result<(), String> {
+    let [
+        (Item::Function { body, .. }, _),
+        (Item::Pipeline(stages, _), _),
+    ] = cl.as_mut_slice()
+    else {
+        return Ok(());
+    };
+    let call = stages
+        .iter()
+        .position(|cmd| cmd.args.first() == Some(&vec![WordPart::Literal(COMPOUND_STAGE.into())]))
+        .unwrap_or(stages.len());
+    for cmd in &mut stages[..call] {
+        resolve_command_heredocs(cmd, read_line)?;
     }
+    resolve_heredocs(body, read_line)?;
+    for cmd in &mut stages[call..] {
+        resolve_command_heredocs(cmd, read_line)?;
+    }
+    Ok(())
+}
+
+/// Fill the here-documents of one simple command.
+fn resolve_command_heredocs(
+    cmd: &mut Command,
+    read_line: &mut dyn FnMut(&str) -> Option<String>,
+) -> Result<(), String> {
+    for redir in &mut cmd.redirects {
+        if let Redirect::HereDoc(_, delim, body, strip, _) = redir {
+            *body = read_heredoc_body(delim, *strip, read_line)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `word` holds an array literal, `name=(…)`, which the tokenizer encodes as two adjacent literals.
+pub(crate) fn is_array_literal(word: &[WordPart]) -> bool {
+    word.windows(2).any(
+        |pair| matches!(pair, [WordPart::Literal(_), WordPart::Literal(list)] if list.starts_with('(')),
+    )
 }
 
 /// Whether `tok` begins a compound command.
@@ -2197,5 +2253,178 @@ mod tests {
             let err = p(input).unwrap_err();
             assert!(!is_definite_error(&err), "{input:?}: {err}");
         }
+    }
+
+    fn lit(s: &str) -> WordPart {
+        WordPart::Literal(s.into())
+    }
+
+    fn simple(args: &[&str]) -> Command {
+        Command {
+            env: Vec::new(),
+            args: args.iter().map(|a| vec![lit(a)]).collect(),
+            redirects: Vec::new(),
+        }
+    }
+
+    fn compound_call(redirects: Vec<Redirect>) -> Command {
+        Command {
+            env: Vec::new(),
+            args: vec![
+                vec![lit(COMPOUND_STAGE)],
+                vec![WordPart::DoubleQuoted(vec![WordPart::Var("@".into())])],
+            ],
+            redirects,
+        }
+    }
+
+    #[test]
+    fn a_pipe_into_a_loop_becomes_a_function_stage_in_a_subshell() {
+        let cl = p("a | while read l; do b; done").unwrap();
+        let body = vec![(
+            Item::While {
+                condition: vec![(
+                    Item::Pipeline(vec![simple(&["read", "l"])], false),
+                    Some(Connector::Semi),
+                )],
+                body: vec![(
+                    Item::Pipeline(vec![simple(&["b"])], false),
+                    Some(Connector::Semi),
+                )],
+            },
+            None,
+        )];
+        let expected = vec![(
+            Item::Subshell(vec![
+                (
+                    Item::Function {
+                        name: COMPOUND_STAGE.into(),
+                        body,
+                    },
+                    Some(Connector::Semi),
+                ),
+                (
+                    Item::Pipeline(vec![simple(&["a"]), compound_call(Vec::new())], false),
+                    None,
+                ),
+            ]),
+            None,
+        )];
+        assert_eq!(cl, expected);
+    }
+
+    #[test]
+    fn a_piped_group_gives_its_body_to_the_stage_and_keeps_redirects_and_tail() {
+        let cl = p("! a | { b; } 2>e | c && d").unwrap();
+        let [
+            (Item::Subshell(inner), Some(Connector::And)),
+            (Item::Pipeline(..), None),
+        ] = cl.as_slice()
+        else {
+            panic!("{cl:?}");
+        };
+        let expected = vec![
+            (
+                Item::Function {
+                    name: COMPOUND_STAGE.into(),
+                    body: vec![(
+                        Item::Pipeline(vec![simple(&["b"])], false),
+                        Some(Connector::Semi),
+                    )],
+                },
+                Some(Connector::Semi),
+            ),
+            (
+                Item::Pipeline(
+                    vec![
+                        simple(&["a"]),
+                        compound_call(vec![Redirect::Write(2, vec![lit("e")])]),
+                        simple(&["c"]),
+                    ],
+                    true,
+                ),
+                None,
+            ),
+        ];
+        assert_eq!(inner, &expected);
+    }
+
+    #[test]
+    fn a_piped_subshell_gives_its_body_to_the_stage() {
+        let cl = p("a | ( b )").unwrap();
+        let [(Item::Subshell(inner), None)] = cl.as_slice() else {
+            panic!("{cl:?}");
+        };
+        assert!(matches!(
+            inner.as_slice(),
+            [(Item::Function { body, .. }, _), _]
+                if body == &vec![(Item::Pipeline(vec![simple(&["b"])], false), None)]
+        ));
+    }
+
+    #[test]
+    fn here_documents_around_a_compound_stage_fill_in_source_order() {
+        let mut lines = ["one", "A", "two", "B", "three", "C"]
+            .into_iter()
+            .map(String::from);
+        let cl = parse_with_reader("cat <<A | while read l; do cat <<B; done <<C", &mut |_| {
+            lines.next()
+        })
+        .unwrap();
+        let [(Item::Subshell(inner), None)] = cl.as_slice() else {
+            panic!("{cl:?}");
+        };
+        let [
+            (Item::Function { body, .. }, _),
+            (Item::Pipeline(stages, _), _),
+        ] = inner.as_slice()
+        else {
+            panic!("{inner:?}");
+        };
+        let heredoc = |cmd: &Command| match cmd.redirects.as_slice() {
+            [Redirect::HereDoc(_, _, body, _, _)] => body.clone(),
+            other => panic!("{other:?}"),
+        };
+        let [
+            (
+                Item::While {
+                    body: loop_body, ..
+                },
+                _,
+            ),
+        ] = body.as_slice()
+        else {
+            panic!("{body:?}");
+        };
+        let [(Item::Pipeline(inner_cat, _), _)] = loop_body.as_slice() else {
+            panic!("{loop_body:?}");
+        };
+        assert_eq!(heredoc(&stages[0]), "one\n");
+        assert_eq!(heredoc(&inner_cat[0]), "two\n");
+        assert_eq!(heredoc(&stages[1]), "three\n");
+    }
+
+    #[test]
+    fn an_array_literal_is_two_adjacent_literals_and_an_escaped_one_is_one() {
+        let cl = p("x=(1 \"2 3\") y=\\(a\\) z+=() cmd w=(4)").unwrap();
+        let cmd = &pipelines(&cl)[0].0[0];
+        assert_eq!(
+            cmd.env,
+            vec![
+                (vec![lit("x")], vec![lit(""), lit("(1 \"2 3\")")]),
+                (vec![lit("y")], vec![lit("(a)")]),
+                (vec![lit("z+")], vec![lit(""), lit("()")]),
+            ]
+        );
+        assert_eq!(cmd.args[1], vec![lit("w="), lit("(4)")]);
+        assert!(is_array_literal(&cmd.env[0].1));
+        assert!(!is_array_literal(&cmd.env[1].1));
+        assert!(is_array_literal(&cmd.env[2].1));
+        assert!(is_array_literal(&cmd.args[1]));
+        assert!(!is_array_literal(&[
+            lit("a"),
+            WordPart::Var("b".into()),
+            lit("(c)")
+        ]));
     }
 }
