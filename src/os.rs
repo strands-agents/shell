@@ -1047,6 +1047,52 @@ pub struct HttpResponse {
     pub reason: String,
 }
 
+/// One command that Shell runs itself, as [`Kernel::check_command`] sees it.
+#[derive(Debug)]
+pub struct CommandRequest {
+    program: String,
+    args: Vec<String>,
+    cwd: PathBuf,
+}
+
+impl CommandRequest {
+    pub(crate) fn new(program: &str, args: &[String], cwd: &Path) -> Self {
+        Self {
+            program: program.to_string(),
+            args: args.to_vec(),
+            cwd: cwd.to_path_buf(),
+        }
+    }
+
+    /// The program name after expansion and multicall or shebang resolution.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// The expanded arguments, without the program name.
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// The virtual working directory.
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    /// The program and arguments joined by single spaces.
+    ///
+    /// This describes the command for a reader. It is not quoted, so do not
+    /// parse it back into arguments.
+    pub fn command_line(&self) -> String {
+        let mut line = self.program.clone();
+        for arg in &self.args {
+            line.push(' ');
+            line.push_str(arg);
+        }
+        line
+    }
+}
+
 /// The core kernel abstraction. All methods take &self — the kernel is shared.
 #[async_trait]
 pub trait Kernel: Send + Sync {
@@ -1115,15 +1161,27 @@ pub trait Kernel: Send + Sync {
     ///
     /// Shell calls this for each pipeline stage that names a builtin,
     /// function, registered command, or script, after expansion and
-    /// resolution, and before any stage starts. Commands that `eval`,
-    /// `source`, traps, `find -exec`, `xargs`, and Lua run come here too.
+    /// resolution, and before any stage starts. For `builtin NAME`, Shell
+    /// asks about `NAME`. Commands that `eval`, `source`, traps, `find -exec`,
+    /// `xargs`, and Lua run come here too, but `eval`, `source`, `.`, `exec`,
+    /// `command`, `exit`, `return`, `break`, and `continue` themselves do not.
     /// Commands for [`Kernel::command_fallback`] do not. An `Err` stops the
     /// pipeline: Shell writes the error to stderr and returns 126. The
     /// default allows every command.
-    async fn check_command(&self, _program: &str, _args: &[String], _cwd: &Path) -> io::Result<()> {
+    async fn check_command(&self, _request: &CommandRequest) -> io::Result<()> {
         Ok(())
     }
     /// Report the status of a command that [`Kernel::check_command`] allowed
     /// and Shell ran.
-    fn command_finished(&self, _program: &str, _args: &[String], _cwd: &Path, _status: i32) {}
+    ///
+    /// `request` is the value that Shell passed to [`Kernel::check_command`].
+    /// `status` is the stage's own status, before Shell adjusts the pipeline
+    /// status for a failed host write or the output limit. A command that was
+    /// allowed but never started, because a redirect failed or another stage
+    /// was refused, is not reported. An `Err` cannot undo the command: Shell
+    /// writes the error to stderr and the stage's status becomes 125. The
+    /// default does nothing.
+    async fn command_finished(&self, _request: &CommandRequest, _status: i32) -> io::Result<()> {
+        Ok(())
+    }
 }

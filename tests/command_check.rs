@@ -1,18 +1,19 @@
 //! A custom kernel that decides each command Shell runs itself.
 //!
 //! `CheckingKernel` forwards every operation to the default kernel, records
-//! each `check_command` and `command_finished` call, and refuses `rm`.
+//! each `check_command` and `command_finished` call, and refuses the
+//! programs it is given.
 
 use std::future::Future;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
 use strands_shell::Shell;
 use strands_shell::os::{
-    DirEntry, Fd, FileStat, HttpRequest, HttpResponse, Kernel, OpenFlags, Process,
+    CommandRequest, DirEntry, Fd, FileStat, HttpRequest, HttpResponse, Kernel, OpenFlags, Process,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -24,17 +25,19 @@ enum Event {
 struct CheckingKernel {
     inner: Arc<dyn Kernel>,
     events: Arc<Mutex<Vec<Event>>>,
+    denied: &'static [&'static str],
+    fail_record: bool,
 }
 
 #[async_trait]
 impl Kernel for CheckingKernel {
-    async fn check_command(&self, program: &str, args: &[String], cwd: &Path) -> io::Result<()> {
+    async fn check_command(&self, request: &CommandRequest) -> io::Result<()> {
         self.events.lock().unwrap().push(Event::Check(
-            program.to_string(),
-            args.to_vec(),
-            cwd.to_path_buf(),
+            request.program().to_string(),
+            request.args().to_vec(),
+            request.cwd().to_path_buf(),
         ));
-        if program == "rm" {
+        if self.denied.contains(&request.program()) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "denied by policy",
@@ -43,13 +46,17 @@ impl Kernel for CheckingKernel {
         Ok(())
     }
 
-    fn command_finished(&self, program: &str, args: &[String], cwd: &Path, status: i32) {
+    async fn command_finished(&self, request: &CommandRequest, status: i32) -> io::Result<()> {
         self.events.lock().unwrap().push(Event::Finished(
-            program.to_string(),
-            args.to_vec(),
-            cwd.to_path_buf(),
+            request.program().to_string(),
+            request.args().to_vec(),
+            request.cwd().to_path_buf(),
             status,
         ));
+        if self.fail_record {
+            return Err(io::Error::other("store unavailable"));
+        }
+        Ok(())
     }
 
     fn new_process(&self) -> Process {
@@ -142,13 +149,32 @@ impl Kernel for CheckingKernel {
 }
 
 fn checking_shell() -> (Shell, Arc<Mutex<Vec<Event>>>) {
+    shell_with(&["rm"], false)
+}
+
+fn shell_with(
+    denied: &'static [&'static str],
+    fail_record: bool,
+) -> (Shell, Arc<Mutex<Vec<Event>>>) {
     let events = Arc::new(Mutex::new(Vec::new()));
     let inner = Shell::builder().build().unwrap().kernel().clone();
     let shell = Shell::with_kernel(Arc::new(CheckingKernel {
         inner,
         events: events.clone(),
+        denied,
+        fail_record,
     }));
     (shell, events)
+}
+
+fn finished(events: &Mutex<Vec<Event>>) -> Vec<Event> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| matches!(event, Event::Finished(..)))
+        .cloned()
+        .collect()
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -265,5 +291,132 @@ fn commands_for_the_fallback_are_not_checked() {
         let out = shell.run("missing arg").await;
         assert_eq!(out.status, 127);
         assert!(events.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn builtin_is_unwrapped_before_the_check() {
+    block_on(async {
+        for script in [
+            "builtin echo hi",
+            "builtin builtin echo hi",
+            "true | builtin echo hi",
+        ] {
+            let (mut shell, events) = shell_with(&["echo"], false);
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 126, "{script}");
+            assert_eq!(out.stdout, "", "{script}");
+            assert_eq!(
+                checked_programs(&events).last().map(String::as_str),
+                Some("echo"),
+                "{script}"
+            );
+            assert!(finished(&events).is_empty(), "{script}: {events:?}");
+        }
+    });
+}
+
+#[test]
+fn an_allowed_builtin_reports_the_name_that_was_checked() {
+    block_on(async {
+        let (mut shell, events) = shell_with(&["echo"], false);
+        let out = shell.run("builtin builtin printf ok").await;
+        assert_eq!(out.stdout, "ok");
+        let cwd = PathBuf::from("/home/lash");
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                Event::Check("printf".into(), strings(&["ok"]), cwd.clone()),
+                Event::Finished("printf".into(), strings(&["ok"]), cwd, 0),
+            ]
+        );
+    });
+}
+
+#[test]
+fn builtin_with_no_builtin_name_is_checked_as_builtin() {
+    block_on(async {
+        let (mut shell, events) = shell_with(&["cat"], false);
+        let out = shell.run("builtin cat /dev/null").await;
+        assert_eq!(out.status, 1);
+        assert_eq!(checked_programs(&events), ["builtin"]);
+    });
+}
+
+#[test]
+fn each_pipeline_stage_reports_its_own_status() {
+    block_on(async {
+        let (mut shell, events) = checking_shell();
+        let out = shell.run("true | false | echo x").await;
+        assert_eq!(out.status, 0);
+        let cwd = PathBuf::from("/home/lash");
+        assert_eq!(
+            finished(&events),
+            [
+                Event::Finished("true".into(), vec![], cwd.clone(), 0),
+                Event::Finished("false".into(), vec![], cwd.clone(), 1),
+                Event::Finished("echo".into(), strings(&["x"]), cwd, 0),
+            ]
+        );
+    });
+}
+
+#[test]
+fn functions_and_scripts_report_their_status() {
+    block_on(async {
+        let cwd = PathBuf::from("/home/lash");
+        let (mut shell, events) = checking_shell();
+        shell.run("f() { return 3; }; f a").await;
+        assert!(
+            finished(&events).contains(&Event::Finished(
+                "f".into(),
+                strings(&["a"]),
+                cwd.clone(),
+                3
+            )),
+            "{events:?}"
+        );
+
+        let (mut shell, events) = checking_shell();
+        shell.run("echo 'exit 4' > /tmp/s; sh /tmp/s").await;
+        assert!(
+            finished(&events).contains(&Event::Finished("sh".into(), strings(&["/tmp/s"]), cwd, 4)),
+            "{events:?}"
+        );
+    });
+}
+
+#[test]
+fn an_allowed_command_that_never_started_is_not_reported() {
+    block_on(async {
+        for script in [
+            "echo hi > /missing/dir/f",
+            "true > /missing/dir/f | echo b",
+            "echo a | rm x",
+        ] {
+            let (mut shell, events) = checking_shell();
+            let out = shell.run(script).await;
+            assert_ne!(out.status, 0, "{script}");
+            assert!(
+                checked_programs(&events).contains(&"echo".to_string()),
+                "{script}"
+            );
+            assert!(finished(&events).is_empty(), "{script}: {events:?}");
+        }
+    });
+}
+
+#[test]
+fn a_failed_record_is_reported_and_changes_the_status() {
+    block_on(async {
+        let (mut shell, events) = shell_with(&[], true);
+        let out = shell.run("echo hi").await;
+        assert_eq!(out.stdout, "hi\n");
+        assert_eq!(out.status, 125);
+        assert_eq!(
+            out.stderr,
+            "strands-shell: echo: finished with status 0, but the kernel could not record it: store unavailable\n"
+        );
+        assert_eq!(finished(&events).len(), 1);
     });
 }

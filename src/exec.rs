@@ -7,7 +7,9 @@ use crate::builtins;
 use crate::command_fallback;
 use crate::commands;
 use crate::io::{CURRENT_KERNEL, CURRENT_PROCESS};
-use crate::os::{self, FdReader, Kernel, OpenFlags, Process, STDERR, STDIN, STDOUT};
+use crate::os::{
+    self, CommandRequest, FdReader, Kernel, OpenFlags, Process, STDERR, STDIN, STDOUT,
+};
 use crate::parser::{self, Connector, Item, Redirect, Word, WordPart};
 
 /// Foreground tasks that abort on drop when the kernel has a command fallback.
@@ -2934,6 +2936,31 @@ fn runs_in_shell(proc: &Process, name: &str) -> bool {
         || name == "sh"
 }
 
+/// Status of a command that ran but whose status the kernel could not record.
+const RECORD_FAILURE_STATUS: i32 = 125;
+
+/// Report a checked command's status to the kernel, and return the status the stage ends with.
+async fn report_finished(
+    os: &dyn Kernel,
+    proc: &mut Process,
+    request: &Option<CommandRequest>,
+    status: i32,
+) -> i32 {
+    let Some(request) = request else {
+        return status;
+    };
+    match os.command_finished(request, status).await {
+        Ok(()) => status,
+        Err(e) => {
+            proc.err_msg(&format!(
+                "strands-shell: {}: finished with status {status}, but the kernel could not record it: {e}",
+                request.program()
+            ));
+            RECORD_FAILURE_STATUS
+        }
+    }
+}
+
 async fn run_pipeline(
     os: Arc<dyn Kernel>,
     shell_proc: &mut Process,
@@ -3049,28 +3076,30 @@ async fn run_pipeline(
     }
 
     // Ask the kernel about each command Shell runs itself, before any stage starts.
-    let cwd = shell_proc.cwd.clone();
-    let mut checked = vec![false; len];
-    for (i, words) in expanded_args.iter().enumerate() {
-        let Some((program, args)) = words.split_first() else {
+    let mut requests: Vec<Option<CommandRequest>> = Vec::with_capacity(len);
+    for words in &expanded_args {
+        let Some((mut program, mut args)) = words.split_first() else {
+            requests.push(None);
             continue;
         };
+        // `builtin NAME` runs the builtin NAME, so the kernel decides NAME.
+        while program == "builtin"
+            && let Some((inner, rest)) = args.split_first()
+            && builtins::lookup(inner).is_some()
+        {
+            (program, args) = (inner, rest);
+        }
         if !runs_in_shell(shell_proc, program) {
+            requests.push(None);
             continue;
         }
-        if let Err(e) = os.check_command(program, args, &cwd).await {
+        let request = CommandRequest::new(program, args, &shell_proc.cwd);
+        if let Err(e) = os.check_command(&request).await {
             shell_proc.err_msg(&format!("strands-shell: {program}: {e}"));
             return (126, String::new());
         }
-        checked[i] = true;
+        requests.push(Some(request));
     }
-    let finished = |stage: usize, status: i32| {
-        if checked[stage] {
-            let (program, args) = expanded_args[stage].split_first().unwrap();
-            os.command_finished(program, args, &cwd, status);
-        }
-        status
-    };
 
     // Single command: check for builtins
     if len == 1 {
@@ -3206,10 +3235,9 @@ async fn run_pipeline(
                 shell_proc.captured_stderr.push_str(&stderr_str);
             }
 
-            return match result {
-                Ok(code) => (finished(0, code), stdout_str),
-                Err(_) => (finished(0, 1), stdout_str),
-            };
+            let status = result.unwrap_or(1);
+            let status = report_finished(os.as_ref(), shell_proc, &requests[0], status).await;
+            return (status, stdout_str);
         }
 
         // Single command: check for functions
@@ -3231,7 +3259,8 @@ async fn run_pipeline(
                     shell_proc.depth -= 1;
                     shell_proc.pop_local_scope();
                     shell_proc.args = saved_args;
-                    return (finished(0, code), String::new());
+                    let code = report_finished(os.as_ref(), shell_proc, &requests[0], code).await;
+                    return (code, String::new());
                 }
                 Err(_) => shell_proc.last_exit,
             };
@@ -3243,7 +3272,8 @@ async fn run_pipeline(
             } else {
                 String::new()
             };
-            return (finished(0, exit), func_output);
+            let exit = report_finished(os.as_ref(), shell_proc, &requests[0], exit).await;
+            return (exit, func_output);
         }
     }
 
@@ -3522,7 +3552,7 @@ async fn run_pipeline(
     let mut last_exit = 0;
     for (stage, handle) in handles {
         if let Ok(exit) = handle.await {
-            last_exit = finished(stage, exit);
+            last_exit = report_finished(os.as_ref(), shell_proc, &requests[stage], exit).await;
         }
     }
 
