@@ -166,3 +166,53 @@ fn tempdir() -> String {
     std::fs::create_dir_all(&path).unwrap();
     path.to_string_lossy().into_owned()
 }
+
+#[test]
+fn config_toml_merges_like_config_file() {
+    let shell = Shell::builder()
+        .env("FROM_CODE", "code")
+        .config_toml(
+            r#"
+umask = "077"
+allowed_urls = ["https://api.example.com/"]
+
+[env]
+FROM_CODE = "file"
+FROM_FILE = "file"
+
+[limits]
+max_depth = 7
+"#,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let cfg = shell.config();
+    assert_eq!(cfg.umask, 0o077);
+    assert_eq!(
+        cfg.allowed_urls,
+        vec!["https://api.example.com/".to_string()]
+    );
+    assert_eq!(cfg.limits.max_depth, 7);
+    // Code wins over the TOML for the same key; new keys are taken from the TOML.
+    assert!(
+        cfg.env
+            .contains(&("FROM_CODE".to_string(), "code".to_string()))
+    );
+    assert!(
+        cfg.env
+            .contains(&("FROM_FILE".to_string(), "file".to_string()))
+    );
+}
+
+#[test]
+fn config_toml_empty_is_a_noop_and_unknown_keys_fail() {
+    let shell = Shell::builder().config_toml("").unwrap().build().unwrap();
+    assert_eq!(shell.config().umask, 0o022);
+
+    let err = Shell::builder()
+        .config_toml("[nope]\nk = 1")
+        .err()
+        .expect("unknown table must be rejected");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
