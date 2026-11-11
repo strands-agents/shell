@@ -2673,15 +2673,18 @@ async fn run_special_redirected(
         Box::pin(run_special(body_os, proc, special, args))
     })
     .await
+    .unwrap_or(Ok(1))
 }
 
 /// Run `body` in the current shell with expanded redirections applied to its I/O.
+///
+/// Returns `None`, without running `body`, when a redirection fails.
 async fn run_redirected<F>(
     os: Arc<dyn Kernel>,
     proc: &mut Process,
     redirects: &[(Redirect, String)],
     body: F,
-) -> Result<i32, ControlFlow>
+) -> Option<Result<i32, ControlFlow>>
 where
     F: for<'p> FnOnce(
         &'p mut Process,
@@ -2708,7 +2711,7 @@ where
         drop(io_proc);
         tokio::task::yield_now().await;
         proc.err_msg(&format!("strands-shell: {msg}"));
-        return Ok(1);
+        return None;
     }
 
     let mut saved_stdin = Process::empty();
@@ -2781,7 +2784,7 @@ where
     if !to_stderr.is_empty() {
         proc.write_stderr(&to_stderr);
     }
-    result
+    Some(result)
 }
 
 /// Print xtrace for a command about to execute.
@@ -3359,12 +3362,14 @@ async fn run_pipeline(
             shell_proc.push_local_scope();
             shell_proc.depth += 1;
             let result = if expanded_redirects[0].is_empty() {
-                Box::pin(execute_command_line_inner(
-                    os.clone(),
-                    shell_proc,
-                    &func_body,
-                ))
-                .await
+                Some(
+                    Box::pin(execute_command_line_inner(
+                        os.clone(),
+                        shell_proc,
+                        &func_body,
+                    ))
+                    .await,
+                )
             } else {
                 let body_os = os.clone();
                 run_redirected(
@@ -3379,7 +3384,9 @@ async fn run_pipeline(
                 )
                 .await
             };
-            let exit = match result {
+            // A failed redirect leaves the function's check unreported, so it is dropped.
+            let started = result.is_some();
+            let exit = match result.unwrap_or(Ok(1)) {
                 Ok(code) => code,
                 Err(ControlFlow::Return(code)) => code,
                 Err(ControlFlow::Exit(code)) => {
@@ -3400,7 +3407,11 @@ async fn run_pipeline(
             } else {
                 String::new()
             };
-            let exit = report_finished(os.as_ref(), shell_proc, requests[0].take(), exit).await;
+            let exit = if started {
+                report_finished(os.as_ref(), shell_proc, requests[0].take(), exit).await
+            } else {
+                exit
+            };
             return (exit, func_output);
         }
     }

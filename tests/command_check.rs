@@ -8,7 +8,7 @@ use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use strands_shell::Shell;
@@ -493,6 +493,26 @@ fn an_allowed_command_whose_redirect_fails_is_reported_as_dropped() {
         );
 
         let (mut shell, events) = checking_shell();
+        let out = shell
+            .run("f() { touch /tmp/ran; }; f > /missing/dir/f; test -e /tmp/ran")
+            .await;
+        assert_eq!(out.status, 1);
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                check("f", &[]),
+                dropped("f", &[]),
+                check("test", &["-e", "/tmp/ran"]),
+                Event::Finished(
+                    "test".into(),
+                    strings(&["-e", "/tmp/ran"]),
+                    PathBuf::from("/home/lash"),
+                    1,
+                ),
+            ]
+        );
+
+        let (mut shell, events) = checking_shell();
         let out = shell.run("true > /missing/dir/f | echo b").await;
         assert_eq!(out.status, 1);
         assert_eq!(
@@ -521,6 +541,28 @@ fn allowed_stages_before_a_refused_stage_are_reported_as_dropped() {
                 check("rm", &["x"]),
                 dropped("echo", &["a"]),
                 dropped("true", &[]),
+            ]
+        );
+    });
+}
+
+#[test]
+fn a_cancelled_pipeline_reports_its_unfinished_stages_as_dropped() {
+    block_on(async {
+        let (mut shell, events) = checking_shell();
+        let run = shell.run("sleep 5 | cat");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), run)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                check("sleep", &["5"]),
+                check("cat", &[]),
+                dropped("sleep", &["5"]),
+                dropped("cat", &[]),
             ]
         );
     });
