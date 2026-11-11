@@ -294,7 +294,7 @@ pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &st
             }
         };
 
-        match parser::parse_with_aliases(&accum, &mut reader, &proc.aliases) {
+        match parser::parse_source(&accum, &mut reader, &proc.aliases, i < lines.len()) {
             Ok(cl) => {
                 i = line_idx; // advance past any lines consumed by heredoc
                 accum.clear();

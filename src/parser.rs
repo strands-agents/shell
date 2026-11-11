@@ -181,7 +181,17 @@ pub fn parse_with_aliases(
     read_line: &mut dyn FnMut(&str) -> Option<String>,
     aliases: &std::collections::HashMap<String, String>,
 ) -> Result<CommandLine, String> {
-    let mut tokens = tokenize(input)?;
+    parse_source(input, read_line, aliases, false)
+}
+
+/// Parse a source statement with `more_input` indicating whether another physical line is available.
+pub(crate) fn parse_source(
+    input: &str,
+    read_line: &mut dyn FnMut(&str) -> Option<String>,
+    aliases: &std::collections::HashMap<String, String>,
+    more_input: bool,
+) -> Result<CommandLine, String> {
+    let mut tokens = tokenize(input, more_input)?;
     if tokens.is_empty() {
         return Ok(vec![]);
     }
@@ -221,7 +231,7 @@ fn expand_aliases(tokens: &mut Vec<Token>, aliases: &std::collections::HashMap<S
                 {
                     trail_space = val.ends_with(' ') || val.ends_with('\t');
                     seen.insert(name.clone());
-                    if let Ok(mut expanded) = tokenize(val) {
+                    if let Ok(mut expanded) = tokenize(val, false) {
                         tokens.remove(i);
                         for (j, tok) in expanded.drain(..).enumerate() {
                             tokens.insert(i + j, tok);
@@ -232,7 +242,7 @@ fn expand_aliases(tokens: &mut Vec<Token>, aliases: &std::collections::HashMap<S
                 break;
             }
             if !seen.is_empty() {
-                let expanded_count = tokens.len() - before_len + 1;
+                let expanded_count = tokens.len().saturating_sub(before_len - 1);
                 i += expanded_count;
                 cmd_pos = trail_space;
                 continue;
@@ -764,7 +774,8 @@ pub fn collect_dollar_pub(
     collect_dollar(chars)
 }
 
-fn tokenize(input: &str) -> Result<Vec<Token>, String> {
+/// Tokenize shell input, treating a final unquoted backslash as incomplete when `more_input` is true.
+fn tokenize(input: &str, more_input: bool) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
 
@@ -917,15 +928,13 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     match ch {
                         '\\' => {
                             chars.next();
-                            if let Some(&next) = chars.peek() {
-                                if next == '\n' {
-                                    chars.next();
+                            match chars.next() {
+                                Some('\n') => {}
+                                Some(next) => literal.push(next),
+                                None if more_input => {
+                                    return Err("unterminated escape".into());
                                 }
-                                // line continuation
-                                else {
-                                    literal.push(next);
-                                    chars.next();
-                                }
+                                None => {}
                             }
                         }
                         '\'' => {
@@ -985,6 +994,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
                 if !literal.is_empty() {
                     parts.push(WordPart::Literal(literal));
+                }
+                if parts.is_empty() {
+                    continue;
                 }
 
                 // For reserved word matching, also store the plain text form.
@@ -1906,6 +1918,20 @@ mod tests {
                 _ => panic!("expected pipeline"),
             })
             .collect()
+    }
+
+    #[test]
+    fn line_continuations_do_not_create_words() {
+        for (continued, joined) in [
+            ("printf '%s' one \\\n  two", "printf '%s' one two"),
+            (
+                "if false || {\n  true; \\\n  }; then :; fi",
+                "if false || {\n  true;   }; then :; fi",
+            ),
+            ("printf '%s' '' \\\n  \"\"", "printf '%s' '' \"\""),
+        ] {
+            assert_eq!(p(continued).unwrap(), p(joined).unwrap(), "{continued}");
+        }
     }
 
     #[test]
