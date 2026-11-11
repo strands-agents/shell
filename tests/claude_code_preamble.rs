@@ -95,15 +95,25 @@ fn the_snapshot_script_writes_its_file_and_the_wrapper_is_silent() {
 fn shopt_records_state_and_refuses_an_unknown_name() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let out = run("shopt -q extglob; echo a=$?; shopt -s extglob; shopt -q extglob; echo b=$?; shopt -p extglob; shopt -u extglob; shopt -p extglob; shopt nosuch; echo c=$?").await;
+        let out = run("shopt -q expand_aliases; echo a=$?; shopt -s expand_aliases; shopt -q expand_aliases; echo b=$?; shopt -p expand_aliases; shopt -u expand_aliases; shopt -p expand_aliases; shopt nosuch; echo c=$?").await;
         assert_eq!(
             out.stdout,
-            "a=1\nb=0\nshopt -s extglob\nshopt -u extglob\nc=1\n"
+            "a=1\nb=0\nshopt -s expand_aliases\nshopt -u expand_aliases\nc=1\n"
         );
         assert_eq!(
             out.stderr,
             "strands-shell: shopt: nosuch: invalid shell option name\n"
         );
+    }));
+}
+
+#[test]
+fn shopt_turns_on_only_an_option_the_shell_honours() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run("shopt -s nullglob; echo a=$?; shopt -q nullglob; echo b=$?; shopt -s expand_aliases; echo c=$?; shopt -q expand_aliases; echo d=$?; shopt -u nullglob; echo e=$?").await;
+        assert_eq!(out.stdout, "a=1\nb=1\nc=0\nd=0\ne=0\n");
+        assert_eq!(out.stderr, "strands-shell: shopt: nullglob: not supported\n");
     }));
 }
 

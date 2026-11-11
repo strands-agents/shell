@@ -66,6 +66,9 @@ const OPTIONS: &[&str] = &[
     "xpg_echo",
 ];
 
+/// The options `shopt -s` may turn on, because the shell already behaves as they say.
+const HONOURED: &[&str] = &["expand_aliases"];
+
 /// `shopt [-pqsu] [name …]`: the option state is recorded and has no effect on execution.
 pub fn builtin_shopt<'a>(
     _os: &'a dyn Kernel,
@@ -109,6 +112,10 @@ pub fn builtin_shopt<'a>(
         }
         if status != 0 {
             return Ok(status);
+        }
+        if set && let Some(name) = names.iter().find(|name| !HONOURED.contains(name)) {
+            proc.err_msg(&format!("strands-shell: shopt: {name}: not supported"));
+            return Ok(1);
         }
         if set || unset {
             for name in names {
