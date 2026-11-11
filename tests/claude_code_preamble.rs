@@ -198,6 +198,22 @@ fn a_function_head_feeds_the_loop_it_pipes_into() {
     }));
 }
 
+/// Run `script` through the CLI, where output streams to the terminal and is not captured.
+fn run_cli(script: &str) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg(script)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_function_head_feeds_the_loop_it_pipes_into_when_output_streams() {
+    let out = run_cli("p(){ echo y; echo z; }; p | while read l; do echo \"got=$l\"; done");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "got=y\ngot=z\n");
+}
+
 #[test]
 fn a_piped_compound_sees_the_callers_positional_parameters() {
     let (rt, local) = rt();
@@ -222,11 +238,11 @@ fn a_piped_group_and_a_piped_if_read_the_pipe() {
 fn a_stderr_redirect_on_a_piped_compound_takes_its_diagnostics() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let out = run("echo a | { nosuchcmd; echo \"e $?\" >&2; } 2>e; cat e").await;
+        let out = run("echo a | { nosuchcmd; cat /nope; echo \"e $?\" >&2; } 2>e; cat e").await;
         assert_eq!(out.stderr, "");
         assert_eq!(
             out.stdout,
-            "strands-shell: nosuchcmd: command not found\ne 127\n"
+            "strands-shell: nosuchcmd: command not found\nstrands-shell: cat: no such file or directory: /nope\ne 1\n"
         );
     }));
 }
