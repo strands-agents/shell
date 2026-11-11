@@ -1175,6 +1175,8 @@ pub trait Kernel: Send + Sync {
     /// each command that [`Kernel::check_command`] allowed to
     /// [`Kernel::command_dropped`]. Shell reports a command for the fallback
     /// to neither [`Kernel::command_finished`] nor [`Kernel::command_dropped`].
+    /// It also sees names the fallback would decline with `Ok(None)`; refusing
+    /// one stops the pipeline with 126 rather than 127 `command not found`.
     /// The default allows every command.
     async fn check_fallback(&self, _request: &CommandRequest) -> io::Result<()> {
         Ok(())

@@ -446,7 +446,7 @@ fn nested_commands_are_checked() {
 }
 
 #[test]
-fn commands_for_the_fallback_are_not_checked() {
+fn unknown_commands_without_a_fallback_are_not_checked() {
     block_on(async {
         let (mut shell, events) = checking_shell();
         let out = shell.run("missing arg").await;
@@ -779,6 +779,24 @@ fn an_allowed_fallback_stage_is_asked_before_any_stage_runs() {
             [check_fallback("tool", &["a"]), check("true", &[])]
         );
         assert_eq!(*ran.lock().unwrap(), ["tool"]);
+    });
+}
+
+#[test]
+fn a_command_shell_runs_itself_is_not_sent_to_check_fallback() {
+    block_on(async {
+        let (mut shell, events, ran) = fallback_shell(true, &["tool"]);
+        let out = shell.run("tool() { true; }; tool a").await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, Event::CheckFallback(..))),
+            "{events:?}"
+        );
+        assert!(ran.lock().unwrap().is_empty());
     });
 }
 
