@@ -1052,7 +1052,7 @@ pub struct HttpResponse {
     pub reason: String,
 }
 
-/// One command that Shell runs itself, as [`Kernel::check_command`] sees it.
+/// One command, as [`Kernel::check_command`] or [`Kernel::check_fallback`] sees it.
 #[derive(Debug)]
 pub struct CommandRequest {
     program: String,
@@ -1158,10 +1158,25 @@ pub trait Kernel: Send + Sync {
     /// `source`, traps, `find -exec`, `xargs`, and Lua run come here too, but
     /// `eval`, `source`, `.`, `exec`, `command`, `exit`, `return`, `break`,
     /// and `continue` themselves do not.
-    /// Commands for [`Kernel::command_fallback`] do not. An `Err` stops the
-    /// pipeline: Shell writes the error to stderr and returns 126. The
-    /// default allows every command.
+    /// Commands for [`Kernel::command_fallback`] go to
+    /// [`Kernel::check_fallback`] instead. An `Err` stops the pipeline: Shell
+    /// writes the error to stderr and returns 126. The default allows every
+    /// command.
     async fn check_command(&self, _request: &CommandRequest) -> io::Result<()> {
+        Ok(())
+    }
+    /// Decide whether a command for [`Kernel::command_fallback`] may run.
+    ///
+    /// Shell calls this for each pipeline stage that goes to the fallback,
+    /// after expansion and resolution, and before any stage starts, in the
+    /// same pass as [`Kernel::check_command`]. Shell does not call it when
+    /// [`Kernel::command_fallback`] returns `None`. An `Err` stops the
+    /// pipeline: Shell writes the error to stderr, returns 126, and reports
+    /// each command that [`Kernel::check_command`] allowed to
+    /// [`Kernel::command_dropped`]. Shell reports a command for the fallback
+    /// to neither [`Kernel::command_finished`] nor [`Kernel::command_dropped`].
+    /// The default allows every command.
+    async fn check_fallback(&self, _request: &CommandRequest) -> io::Result<()> {
         Ok(())
     }
     /// Report the status of a command that [`Kernel::check_command`] allowed
