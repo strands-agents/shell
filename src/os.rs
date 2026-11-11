@@ -1185,7 +1185,10 @@ pub trait Kernel: Send + Sync {
     /// allowed command never started, because a redirect failed or another
     /// stage of its pipeline was refused, and when Shell stopped waiting for
     /// it, because its task failed or the pipeline was cancelled. The command
-    /// may or may not have had an effect. `request` has the same program,
+    /// may or may not have had an effect. After a cancel it may still be
+    /// running, and calling the kernel, unless the kernel has a
+    /// [`Kernel::command_fallback`]. Shell may call this while dropping a
+    /// future, so it must not block. `request` has the same program,
     /// args, and cwd that Shell passed to [`Kernel::check_command`]. Shell
     /// calls this at most once for each allowed command, and never for one
     /// it reported to [`Kernel::command_finished`]. The default does nothing.
