@@ -2662,19 +2662,42 @@ async fn run_special_redirected(
             | Redirect::DupRead(_, word) => expand_word(os.clone(), proc, word).await,
             Redirect::HereDoc(..) => String::new(),
         };
-        // `N<&N` and `N>&N` leave the caller's fd as it is.
-        if let Redirect::DupRead(fd, _) | Redirect::DupWrite(fd, _) = redir
-            && target == fd.to_string()
-        {
-            continue;
-        }
         redirects.push((redir.clone(), target));
     }
     if proc.nounset_error {
         proc.nounset_error = false;
         return Err(ControlFlow::Exit(2));
     }
+    let body_os = os.clone();
+    run_redirected(os, proc, &redirects, move |proc| {
+        Box::pin(run_special(body_os, proc, special, args))
+    })
+    .await
+}
 
+/// Run `body` in the current shell with expanded redirections applied to its I/O.
+async fn run_redirected<F>(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    redirects: &[(Redirect, String)],
+    body: F,
+) -> Result<i32, ControlFlow>
+where
+    F: for<'p> FnOnce(
+        &'p mut Process,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<i32, ControlFlow>> + 'p>,
+    >,
+{
+    // `N<&N` and `N>&N` leave the caller's fd as it is.
+    let redirects: Vec<(Redirect, String)> = redirects
+        .iter()
+        .filter(|(redir, target)| {
+            !matches!(redir, Redirect::DupRead(fd, _) | Redirect::DupWrite(fd, _)
+                if *target == fd.to_string())
+        })
+        .cloned()
+        .collect();
     // Channels stand for the caller's stdout and stderr, so the redirections apply in order.
     let mut io_proc = proc.fork();
     let (out_tx, mut out_rx) = os::pipe(64);
@@ -2699,7 +2722,7 @@ async fn run_special_redirected(
     let saved_stderr = std::mem::take(&mut proc.captured_stderr);
     let saved_err_tx = proc.take_err_tx();
 
-    let mut result = Box::pin(run_special(os, proc, special, args)).await;
+    let mut result = body(proc).await;
 
     let stdout = std::mem::replace(&mut proc.captured_output, saved_output);
     let stderr = std::mem::replace(&mut proc.captured_stderr, saved_stderr);
@@ -3318,13 +3341,28 @@ async fn run_pipeline(
                 std::mem::replace(&mut shell_proc.args, expanded_args[0][1..].to_vec());
             shell_proc.push_local_scope();
             shell_proc.depth += 1;
-            let exit = match Box::pin(execute_command_line_inner(
-                os.clone(),
-                shell_proc,
-                &func_body,
-            ))
-            .await
-            {
+            let result = if expanded_redirects[0].is_empty() {
+                Box::pin(execute_command_line_inner(
+                    os.clone(),
+                    shell_proc,
+                    &func_body,
+                ))
+                .await
+            } else {
+                let body_os = os.clone();
+                run_redirected(
+                    os.clone(),
+                    shell_proc,
+                    &expanded_redirects[0],
+                    move |proc| {
+                        Box::pin(async move {
+                            execute_command_line_inner(body_os, proc, &func_body).await
+                        })
+                    },
+                )
+                .await
+            };
+            let exit = match result {
                 Ok(code) => code,
                 Err(ControlFlow::Return(code)) => code,
                 Err(ControlFlow::Exit(code)) => {
