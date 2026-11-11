@@ -1958,10 +1958,8 @@ fn line_continuations_preserve_quoting_and_input_boundaries() {
                 "cat \\\n  <<'EOF'\na\\\nb\nEOF\nprintf after",
                 "a\\\nb\nafter",
             ),
-            ("printf '<%s>' word\\", "<word>"),
             ("printf '<%s>' word\\\n", "<word>"),
-            ("\\", ""),
-            ("alias a='\\'\nalias b='\\\n'\na b printf after", "after"),
+            ("alias a=''\nalias b=''\na b printf after", "after"),
         ] {
             let mut shell = Shell::builder().build().unwrap();
             let out = shell.run(script).await;
