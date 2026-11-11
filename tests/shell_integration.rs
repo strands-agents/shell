@@ -5649,6 +5649,51 @@ expect!(
 expect!(sed_replace_newline, "echo 'a b' | sed 's/ /\\n/'", "a\nb");
 expect!(sed_replace_tab, "printf 'a b' | sed 's/ /\\t/'", "a\tb");
 
+// ── sed basic and extended regex syntax ────────────────────────────
+
+expect!(
+    sed_bre_literal_parens,
+    "echo 'call(x)' | sed 's/call(x)/run(x)/'",
+    "run(x)"
+);
+expect!(
+    sed_bre_literal_metachars,
+    "echo 'a+b?c|d{1}' | sed 's/a+b?c|d{1}/ok/'",
+    "ok"
+);
+expect!(
+    sed_bre_gnu_operators,
+    r#"echo 'aab' | sed 's/a\+\(b\|c\)\?/X/'"#,
+    "X"
+);
+expect!(sed_bre_interval, r#"echo 'aaa' | sed 's/a\{2\}/X/'"#, "Xa");
+expect!(
+    sed_bre_leading_star_inner_dollar,
+    "echo '*$(CC)' | sed 's/^*$(CC)/ok/'",
+    "ok"
+);
+expect!(sed_bre_final_dollar, "echo 'b b' | sed 's/b$/X/'", "b X");
+expect!(
+    sed_bre_dollar_before_group_end,
+    r#"echo 'b b' | sed 's/\(b$\)/[\1]/'"#,
+    "b [b]"
+);
+expect!(
+    sed_bre_address,
+    "printf 'f(x)\\ng(y)\\n' | sed -n '/f(x)/p'",
+    "f(x)"
+);
+expect!(
+    sed_ere_flag,
+    r#"echo 'ab' | sed -E 's/(a|z)+(b)/\2\1/'"#,
+    "ba"
+);
+expect!(
+    sed_ere_escaped_parens,
+    r#"echo 'f(x)' | sed -rn '/f\(x\)/s/f\(x\)/g/p'"#,
+    "g"
+);
+
 // ── set +e disables errexit ────────────────────────────────────────
 
 expect!(
