@@ -1171,11 +1171,26 @@ pub trait Kernel: Send + Sync {
     /// [`Kernel::check_command`].
     /// `status` is the stage's own status, before Shell adjusts the pipeline
     /// status for a failed host write or the output limit. A command that was
-    /// allowed but never started, because a redirect failed or another stage
-    /// was refused, is not reported. An `Err` cannot undo the command: Shell
-    /// writes the error to stderr and the stage's status becomes 125. The
-    /// default does nothing.
+    /// allowed but ended with no status is reported to
+    /// [`Kernel::command_dropped`] instead. An `Err` cannot undo the command:
+    /// Shell writes the error to stderr and the stage's status becomes 125.
+    /// The default does nothing.
     async fn command_finished(&self, _request: &CommandRequest, _status: i32) -> io::Result<()> {
         Ok(())
     }
+    /// Report that a command [`Kernel::check_command`] allowed ended with no
+    /// status.
+    ///
+    /// Shell calls this instead of [`Kernel::command_finished`] when an
+    /// allowed command never started, because a redirect failed or another
+    /// stage of its pipeline was refused, and when Shell stopped waiting for
+    /// it, because its task failed or the pipeline was cancelled. The command
+    /// may or may not have had an effect. After a cancel it may still be
+    /// running, and calling the kernel, unless the kernel has a
+    /// [`Kernel::command_fallback`]. Shell may call this while dropping a
+    /// future, so it must not block. `request` has the same program,
+    /// args, and cwd that Shell passed to [`Kernel::check_command`]. Shell
+    /// calls this at most once for each allowed command, and never for one
+    /// it reported to [`Kernel::command_finished`]. The default does nothing.
+    fn command_dropped(&self, _request: &CommandRequest) {}
 }
