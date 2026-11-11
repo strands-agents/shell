@@ -14,6 +14,7 @@ mod pwd;
 mod read;
 mod set;
 mod shift;
+mod shopt;
 mod test;
 mod trap;
 mod type_cmd;
@@ -54,6 +55,7 @@ pub fn lookup(name: &str) -> Option<BuiltinFn> {
         "readonly" => Some(export::builtin_readonly),
         "set" => Some(set::builtin_set),
         "shift" => Some(shift::builtin_shift),
+        "shopt" => Some(shopt::builtin_shopt),
         "test" | "[" => Some(test::builtin_test),
         "trap" => Some(trap::builtin_trap),
         "type" => Some(type_cmd::builtin_type),

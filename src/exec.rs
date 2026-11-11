@@ -342,6 +342,10 @@ pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &st
 /// Expand a Word into a String using the current environment.
 async fn expand_word(os: Arc<dyn Kernel>, proc: &mut Process, word: &Word) -> String {
     let mut result = String::new();
+    if parser::is_array_literal(word) {
+        refuse_array(proc);
+        return result;
+    }
     for part in word {
         expand_part(os.clone(), proc, part, &mut result).await;
     }
@@ -386,6 +390,10 @@ async fn expand_word_split(os: Arc<dyn Kernel>, proc: &mut Process, word: &Word)
         .get("IFS")
         .cloned()
         .unwrap_or_else(|| " \t\n".into());
+    if parser::is_array_literal(word) {
+        refuse_array(proc);
+        return Vec::new();
+    }
     let mut segments: Vec<Segment> = vec![Segment::new()];
 
     for part in word {
@@ -467,6 +475,26 @@ fn expand_part_split<'a>(
                     segments.last_mut().unwrap().push(&val, splittable, false);
                 }
             }
+            WordPart::VarOp(name, op, word, colon) if op == "-" || op == "+" => {
+                if quoted {
+                    // A quoted expansion is one field even when it comes out empty.
+                    segments.last_mut().unwrap().push("", false, false);
+                }
+                if uses_alternate_word(proc, name, op, *colon) {
+                    for p in word {
+                        if !quoted && let WordPart::Literal(s) = p {
+                            // Unquoted, the word's own text is split like an expansion.
+                            segments.last_mut().unwrap().push(s, true, true);
+                        } else {
+                            expand_part_split(os.clone(), proc, p, segments, ifs, quoted).await;
+                        }
+                    }
+                } else if op == "-"
+                    && let Some(v) = resolve_var(proc, name)
+                {
+                    segments.last_mut().unwrap().push(&v, !quoted, false);
+                }
+            }
             WordPart::VarOp(..)
             | WordPart::Backtick(_)
             | WordPart::DollarParen(_)
@@ -488,6 +516,33 @@ fn expand_part_split<'a>(
             }
         }
     })
+}
+
+/// Whether `${name-word}` or `${name+word}` expands to `word` rather than to the value.
+fn uses_alternate_word(proc: &Process, name: &str, op: &str, colon: bool) -> bool {
+    let is_unset_or_null = match resolve_var(proc, name) {
+        None => true,
+        Some(v) => colon && v.is_empty(),
+    };
+    is_unset_or_null == (op == "-")
+}
+
+/// The variable and value that `key=value` sets, where `key+=value` appends.
+fn assignment(proc: &Process, key: String, value: String) -> (String, String) {
+    match key.strip_suffix('+') {
+        Some(base) => {
+            let mut joined = proc.env.get(base).cloned().unwrap_or_default();
+            joined.push_str(&value);
+            (base.to_string(), joined)
+        }
+        None => (key, value),
+    }
+}
+
+/// Arrays parse so that a function body holding one defines as in bash; running one is refused.
+fn refuse_array(proc: &mut Process) {
+    proc.err_msg("strands-shell: arrays are not supported");
+    proc.nounset_error = true;
 }
 
 /// Perform IFS field splitting on a single segment.
@@ -1236,8 +1291,19 @@ fn resolve_var(proc: &Process, name: &str) -> Option<String> {
                 None
             }
         }
-        _ => proc.env.get(name).cloned(),
+        _ => match split_subscript(name) {
+            Some((base, "@" | "*" | "0")) => proc.env.get(base).cloned(),
+            Some(_) => None,
+            None => proc.env.get(name).cloned(),
+        },
     }
+}
+
+/// `name[subscript]` split in two, or `None` for a plain name.
+fn split_subscript(name: &str) -> Option<(&str, &str)> {
+    let open = name.find('[')?;
+    let inner = name[open + 1..].strip_suffix(']')?;
+    Some((&name[..open], inner))
 }
 
 /// Check nounset: if `set -u` is active and the variable is unset, print error and set flag.
@@ -1252,7 +1318,7 @@ fn check_nounset(proc: &mut Process, name: &str) -> bool {
         n if n.len() == 1 && n.as_bytes()[0].is_ascii_digit() => return false,
         _ => {}
     }
-    if proc.env.get(name).is_none() {
+    if resolve_var(proc, name).is_none() {
         proc.err_msg(&format!("strands-shell: {name}: parameter not set"));
         proc.nounset_error = true;
         return true;
@@ -1285,7 +1351,10 @@ fn expand_part<'a>(
                 };
                 match op.as_str() {
                     "len" => {
-                        let len = val.as_deref().unwrap_or("").len();
+                        let len = match split_subscript(name) {
+                            Some((_, "@" | "*")) => usize::from(val.is_some()),
+                            _ => val.as_deref().unwrap_or("").len(),
+                        };
                         out.push_str(&len.to_string());
                     }
                     "-" => {
@@ -1763,8 +1832,10 @@ async fn run_capturing_status(
                         sub.err_msg(msg);
                         (1, String::new())
                     } else {
+                        proc.transfer_fd(STDIN, &mut sub);
                         let (s, result) =
                             Box::pin(run_capturing_status(os.clone(), &mut sub, cl)).await;
+                        sub.transfer_fd(STDIN, proc);
                         (captured_status(result, sub.last_exit), s)
                     }
                 }
@@ -2104,7 +2175,9 @@ async fn execute_item(
                 sub.err_msg(msg);
                 return Ok(1);
             }
+            proc.transfer_fd(STDIN, &mut sub);
             let r = Box::pin(execute_command_line_inner(os, &mut sub, cl)).await;
+            sub.transfer_fd(STDIN, proc);
             if proc.capture {
                 proc.captured_output.push_str(&sub.captured_output);
                 proc.captured_stderr.push_str(&sub.captured_stderr);
@@ -2984,10 +3057,9 @@ async fn run_pipeline(
         expanded_args.push(expand_words(os.clone(), shell_proc, &cmd.args).await);
         let mut env = Vec::new();
         for (k, v) in &cmd.env {
-            env.push((
-                expand_word(os.clone(), shell_proc, k).await,
-                expand_word(os.clone(), shell_proc, v).await,
-            ));
+            let key = expand_word(os.clone(), shell_proc, k).await;
+            let value = expand_word(os.clone(), shell_proc, v).await;
+            env.push(assignment(shell_proc, key, value));
         }
         expanded_env.push(env);
         let mut redirs = Vec::new();
@@ -3380,6 +3452,14 @@ async fn run_pipeline(
                     if let Some(f) = builtin {
                         return match f(os.as_ref(), &mut state_proc, &args).await {
                             Ok(code) => code,
+                            // A reader that went away stops the writer quietly, as SIGPIPE does.
+                            Err(e)
+                                if e.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                                    io.kind() == std::io::ErrorKind::BrokenPipe
+                                }) =>
+                            {
+                                1
+                            }
                             Err(e) => {
                                 if let Ok(mut w) = crate::io::stderr() {
                                     let _ = w
@@ -3421,6 +3501,12 @@ async fn run_pipeline(
                             && let Ok(mut w) = crate::io::stdout()
                         {
                             let _ = w.write_all(output.as_bytes()).await;
+                        }
+                        let errors = std::mem::take(&mut state_proc.captured_stderr);
+                        if !errors.is_empty()
+                            && let Ok(mut w) = crate::io::stderr()
+                        {
+                            let _ = w.write_all(errors.as_bytes()).await;
                         }
                         return exit;
                     }

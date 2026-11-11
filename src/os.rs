@@ -163,6 +163,8 @@ pub struct Process {
     pub readonly_vars: Arc<std::collections::HashSet<String>>,
     /// Shell aliases.
     pub aliases: Arc<HashMap<String, String>>,
+    /// Shell options turned on with `shopt -s`.
+    pub(crate) shopts: std::collections::BTreeSet<String>,
     /// Command hash table (name → full path).
     pub hash_table: Arc<HashMap<String, String>>,
     /// Optional stderr channel for sandboxed error output.
@@ -334,6 +336,7 @@ impl Process {
             optoff: -1,
             readonly_vars: Arc::new(std::collections::HashSet::new()),
             aliases: Arc::new(HashMap::new()),
+            shopts: std::collections::BTreeSet::new(),
             hash_table: Arc::new(HashMap::new()),
             err_tx: None,
             depth: 0,
@@ -376,6 +379,7 @@ impl Process {
             optoff: -1,
             readonly_vars: Arc::new(std::collections::HashSet::new()),
             aliases: Arc::new(HashMap::new()),
+            shopts: std::collections::BTreeSet::new(),
             hash_table: Arc::new(HashMap::new()),
             err_tx: None,
             depth: 0,
@@ -458,6 +462,7 @@ impl Process {
             optoff: self.optoff,
             readonly_vars: self.readonly_vars.clone(),
             aliases: self.aliases.clone(),
+            shopts: self.shopts.clone(),
             hash_table: self.hash_table.clone(),
             err_tx: self.err_tx.clone(),
             depth: self.depth,
