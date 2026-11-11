@@ -1,8 +1,8 @@
 //! A custom kernel that decides each command Shell runs itself.
 //!
 //! `CheckingKernel` forwards every operation to the default kernel, records
-//! each `check_command` and `command_finished` call, and refuses the
-//! programs it is given.
+//! each `check_command`, `command_finished`, and `command_dropped` call, and
+//! refuses the programs it is given.
 
 use std::future::Future;
 use std::io;
@@ -16,10 +16,120 @@ use strands_shell::os::{
     CommandRequest, DirEntry, Fd, FileStat, HttpRequest, HttpResponse, Kernel, OpenFlags, Process,
 };
 
+/// Implement `Kernel` for a type with an `inner` kernel: the given methods,
+/// and every other required method forwarded to `inner`.
+macro_rules! forwarding_kernel {
+    ($kernel:ty { $($own:tt)* }) => {
+        #[async_trait]
+        impl Kernel for $kernel {
+            $($own)*
+
+            fn new_process(&self) -> Process {
+                self.inner.new_process()
+            }
+
+            async fn open(
+                &self,
+                proc: &mut Process,
+                path: &str,
+                flags: OpenFlags,
+            ) -> io::Result<Fd> {
+                self.inner.open(proc, path, flags).await
+            }
+
+            async fn list_dir(&self, proc: &Process, path: &str) -> io::Result<Vec<DirEntry>> {
+                self.inner.list_dir(proc, path).await
+            }
+
+            async fn change_dir(&self, proc: &mut Process, path: &str) -> io::Result<()> {
+                self.inner.change_dir(proc, path).await
+            }
+
+            async fn stat(&self, proc: &Process, path: &str) -> FileStat {
+                self.inner.stat(proc, path).await
+            }
+
+            async fn lstat(&self, proc: &Process, path: &str) -> FileStat {
+                self.inner.lstat(proc, path).await
+            }
+
+            async fn access(&self, proc: &Process, path: &str, mode: i32) -> bool {
+                self.inner.access(proc, path, mode).await
+            }
+
+            async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf> {
+                self.inner.canonicalize(proc, path).await
+            }
+
+            async fn is_executable(&self, proc: &Process, path: &str) -> bool {
+                self.inner.is_executable(proc, path).await
+            }
+
+            async fn glob(&self, proc: &Process, pattern: &str) -> Vec<String> {
+                self.inner.glob(proc, pattern).await
+            }
+
+            fn isatty(&self, fd: i32) -> bool {
+                self.inner.isatty(fd)
+            }
+
+            async fn remove_file(&self, proc: &Process, path: &str) -> io::Result<()> {
+                self.inner.remove_file(proc, path).await
+            }
+
+            async fn remove_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
+                self.inner.remove_dir(proc, path).await
+            }
+
+            async fn create_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
+                self.inner.create_dir(proc, path).await
+            }
+
+            async fn rename(&self, proc: &Process, from: &str, to: &str) -> io::Result<()> {
+                self.inner.rename(proc, from, to).await
+            }
+
+            async fn symlink(&self, proc: &Process, target: &str, link: &str) -> io::Result<()> {
+                self.inner.symlink(proc, target, link).await
+            }
+
+            async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String> {
+                self.inner.read_link(proc, path).await
+            }
+
+            async fn set_permissions(
+                &self,
+                proc: &Process,
+                path: &str,
+                mode: u32,
+            ) -> io::Result<()> {
+                self.inner.set_permissions(proc, path, mode).await
+            }
+
+            fn now(&self) -> SystemTime {
+                self.inner.now()
+            }
+
+            fn check_url(&self, url: &str) -> io::Result<()> {
+                self.inner.check_url(url)
+            }
+
+            fn resolve_credential(&self, url: &str, method: &str) -> Vec<(String, String)> {
+                self.inner.resolve_credential(url, method)
+            }
+
+            async fn http_request(&self, req: HttpRequest) -> io::Result<HttpResponse> {
+                self.inner.http_request(req).await
+            }
+        }
+    };
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Event {
     Check(String, Vec<String>, PathBuf),
     Finished(String, Vec<String>, PathBuf, i32),
+    Dropped(String, Vec<String>, PathBuf),
 }
 
 struct CheckingKernel {
@@ -29,8 +139,7 @@ struct CheckingKernel {
     fail_record: bool,
 }
 
-#[async_trait]
-impl Kernel for CheckingKernel {
+forwarding_kernel!(CheckingKernel {
     async fn check_command(&self, request: &CommandRequest) -> io::Result<()> {
         self.events.lock().unwrap().push(Event::Check(
             request.program().to_string(),
@@ -59,94 +168,48 @@ impl Kernel for CheckingKernel {
         Ok(())
     }
 
-    fn new_process(&self) -> Process {
-        self.inner.new_process()
+    fn command_dropped(&self, request: &CommandRequest) {
+        self.events.lock().unwrap().push(Event::Dropped(
+            request.program().to_string(),
+            request.args().to_vec(),
+            request.cwd().to_path_buf(),
+        ));
     }
+});
 
-    async fn open(&self, proc: &mut Process, path: &str, flags: OpenFlags) -> io::Result<Fd> {
-        self.inner.open(proc, path, flags).await
-    }
-
-    async fn list_dir(&self, proc: &Process, path: &str) -> io::Result<Vec<DirEntry>> {
-        self.inner.list_dir(proc, path).await
-    }
-
-    async fn change_dir(&self, proc: &mut Process, path: &str) -> io::Result<()> {
-        self.inner.change_dir(proc, path).await
-    }
-
-    async fn stat(&self, proc: &Process, path: &str) -> FileStat {
-        self.inner.stat(proc, path).await
-    }
-
-    async fn lstat(&self, proc: &Process, path: &str) -> FileStat {
-        self.inner.lstat(proc, path).await
-    }
-
-    async fn access(&self, proc: &Process, path: &str, mode: i32) -> bool {
-        self.inner.access(proc, path, mode).await
-    }
-
-    async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf> {
-        self.inner.canonicalize(proc, path).await
-    }
-
-    async fn is_executable(&self, proc: &Process, path: &str) -> bool {
-        self.inner.is_executable(proc, path).await
-    }
-
-    async fn glob(&self, proc: &Process, pattern: &str) -> Vec<String> {
-        self.inner.glob(proc, pattern).await
-    }
-
-    fn isatty(&self, fd: i32) -> bool {
-        self.inner.isatty(fd)
-    }
-
-    async fn remove_file(&self, proc: &Process, path: &str) -> io::Result<()> {
-        self.inner.remove_file(proc, path).await
-    }
-
-    async fn remove_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
-        self.inner.remove_dir(proc, path).await
-    }
-
-    async fn create_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
-        self.inner.create_dir(proc, path).await
-    }
-
-    async fn rename(&self, proc: &Process, from: &str, to: &str) -> io::Result<()> {
-        self.inner.rename(proc, from, to).await
-    }
-
-    async fn symlink(&self, proc: &Process, target: &str, link: &str) -> io::Result<()> {
-        self.inner.symlink(proc, target, link).await
-    }
-
-    async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String> {
-        self.inner.read_link(proc, path).await
-    }
-
-    async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()> {
-        self.inner.set_permissions(proc, path, mode).await
-    }
-
-    fn now(&self) -> SystemTime {
-        self.inner.now()
-    }
-
-    fn check_url(&self, url: &str) -> io::Result<()> {
-        self.inner.check_url(url)
-    }
-
-    fn resolve_credential(&self, url: &str, method: &str) -> Vec<(String, String)> {
-        self.inner.resolve_credential(url, method)
-    }
-
-    async fn http_request(&self, req: HttpRequest) -> io::Result<HttpResponse> {
-        self.inner.http_request(req).await
-    }
+/// A kernel that checks and records commands like `CheckingKernel`, but
+/// keeps the default `command_dropped`.
+struct PlainKernel {
+    inner: Arc<dyn Kernel>,
+    events: Arc<Mutex<Vec<Event>>>,
 }
+
+forwarding_kernel!(PlainKernel {
+    async fn check_command(&self, request: &CommandRequest) -> io::Result<()> {
+        self.events.lock().unwrap().push(Event::Check(
+            request.program().to_string(),
+            request.args().to_vec(),
+            request.cwd().to_path_buf(),
+        ));
+        if request.program() == "rm" {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "denied by policy",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn command_finished(&self, request: &CommandRequest, status: i32) -> io::Result<()> {
+        self.events.lock().unwrap().push(Event::Finished(
+            request.program().to_string(),
+            request.args().to_vec(),
+            request.cwd().to_path_buf(),
+            status,
+        ));
+        Ok(())
+    }
+});
 
 fn checking_shell() -> (Shell, Arc<Mutex<Vec<Event>>>) {
     shell_with(&["rm"], false)
@@ -177,6 +240,9 @@ fn finished(events: &Mutex<Vec<Event>>) -> Vec<Event> {
         .collect()
 }
 
+const STDERR_MISSING_DIR: &str =
+    "strands-shell: /missing/dir/f: no such file or directory: /missing/dir\n";
+
 fn block_on<F: Future>(future: F) -> F::Output {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -196,7 +262,7 @@ fn checked_programs(events: &Mutex<Vec<Event>>) -> Vec<String> {
         .iter()
         .filter_map(|event| match event {
             Event::Check(program, ..) => Some(program.clone()),
-            Event::Finished(..) => None,
+            Event::Finished(..) | Event::Dropped(..) => None,
         })
         .collect()
 }
@@ -407,22 +473,111 @@ fn functions_and_scripts_report_their_status() {
     });
 }
 
+fn check(program: &str, args: &[&str]) -> Event {
+    Event::Check(program.into(), strings(args), PathBuf::from("/home/lash"))
+}
+
+fn dropped(program: &str, args: &[&str]) -> Event {
+    Event::Dropped(program.into(), strings(args), PathBuf::from("/home/lash"))
+}
+
 #[test]
-fn an_allowed_command_that_never_started_is_not_reported() {
+fn an_allowed_command_whose_redirect_fails_is_reported_as_dropped() {
     block_on(async {
-        for script in [
-            "echo hi > /missing/dir/f",
-            "true > /missing/dir/f | echo b",
-            "echo a | rm x",
+        let (mut shell, events) = checking_shell();
+        let out = shell.run("echo hi > /missing/dir/f").await;
+        assert_eq!(out.status, 1);
+        assert_eq!(
+            *events.lock().unwrap(),
+            [check("echo", &["hi"]), dropped("echo", &["hi"])]
+        );
+
+        let (mut shell, events) = checking_shell();
+        let out = shell.run("true > /missing/dir/f | echo b").await;
+        assert_eq!(out.status, 1);
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                check("true", &[]),
+                check("echo", &["b"]),
+                dropped("true", &[]),
+                dropped("echo", &["b"]),
+            ]
+        );
+    });
+}
+
+#[test]
+fn allowed_stages_before_a_refused_stage_are_reported_as_dropped() {
+    block_on(async {
+        let (mut shell, events) = checking_shell();
+        let out = shell.run("echo a | true | rm x").await;
+        assert_eq!(out.status, 126);
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                check("echo", &["a"]),
+                check("true", &[]),
+                check("rm", &["x"]),
+                dropped("echo", &["a"]),
+                dropped("true", &[]),
+            ]
+        );
+    });
+}
+
+#[test]
+fn a_command_that_finished_is_not_reported_as_dropped() {
+    block_on(async {
+        let (mut shell, events) = checking_shell();
+        shell
+            .run("echo a | false; f() { return 2; }; f; builtin printf x")
+            .await;
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, Event::Dropped(..))),
+            "{events:?}"
+        );
+    });
+}
+
+#[test]
+fn a_kernel_without_command_dropped_sees_no_change() {
+    block_on(async {
+        for (script, status, stderr, expected) in [
+            (
+                "echo hi > /missing/dir/f",
+                1,
+                STDERR_MISSING_DIR,
+                vec![check("echo", &["hi"])],
+            ),
+            (
+                "true > /missing/dir/f | echo b",
+                1,
+                STDERR_MISSING_DIR,
+                vec![check("true", &[]), check("echo", &["b"])],
+            ),
+            (
+                "echo a | rm x",
+                126,
+                "strands-shell: rm: denied by policy\n",
+                vec![check("echo", &["a"]), check("rm", &["x"])],
+            ),
         ] {
-            let (mut shell, events) = checking_shell();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let inner = Shell::builder().build().unwrap().kernel().clone();
+            let mut shell = Shell::with_kernel(Arc::new(PlainKernel {
+                inner,
+                events: events.clone(),
+            }));
             let out = shell.run(script).await;
-            assert_ne!(out.status, 0, "{script}");
-            assert!(
-                checked_programs(&events).contains(&"echo".to_string()),
-                "{script}"
-            );
-            assert!(finished(&events).is_empty(), "{script}: {events:?}");
+            assert_eq!(out.status, status, "{script}");
+            assert_eq!(out.stdout, "", "{script}");
+            assert_eq!(out.stderr, stderr, "{script}");
+            assert_eq!(*events.lock().unwrap(), expected, "{script}");
         }
     });
 }

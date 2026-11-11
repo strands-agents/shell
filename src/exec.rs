@@ -3035,17 +3035,31 @@ fn runs_in_shell(proc: &Process, name: &str) -> bool {
 /// Status of a command that ran but whose status the kernel could not record.
 const RECORD_FAILURE_STATUS: i32 = 125;
 
+/// A command the kernel allowed, reported as dropped unless its status is reported.
+struct CheckedCommand {
+    os: Arc<dyn Kernel>,
+    request: Option<CommandRequest>,
+}
+
+impl Drop for CheckedCommand {
+    fn drop(&mut self) {
+        if let Some(request) = self.request.take() {
+            self.os.command_dropped(&request);
+        }
+    }
+}
+
 /// Report a checked command's status to the kernel, and return the status the stage ends with.
 async fn report_finished(
     os: &dyn Kernel,
     proc: &mut Process,
-    request: &Option<CommandRequest>,
+    command: Option<CheckedCommand>,
     status: i32,
 ) -> i32 {
-    let Some(request) = request else {
+    let Some(request) = command.and_then(|mut command| command.request.take()) else {
         return status;
     };
-    match os.command_finished(request, status).await {
+    match os.command_finished(&request, status).await {
         Ok(()) => status,
         Err(e) => {
             proc.err_msg(&format!(
@@ -3171,7 +3185,7 @@ async fn run_pipeline(
     }
 
     // Ask the kernel about each command Shell runs itself, before any stage starts.
-    let mut requests: Vec<Option<CommandRequest>> = Vec::with_capacity(len);
+    let mut requests: Vec<Option<CheckedCommand>> = Vec::with_capacity(len);
     for words in &expanded_args {
         let Some((mut program, mut args)) = words.split_first() else {
             requests.push(None);
@@ -3193,7 +3207,10 @@ async fn run_pipeline(
             shell_proc.err_msg(&format!("strands-shell: {program}: {e}"));
             return (126, String::new());
         }
-        requests.push(Some(request));
+        requests.push(Some(CheckedCommand {
+            os: os.clone(),
+            request: Some(request),
+        }));
     }
 
     // Single command: check for builtins
@@ -3331,7 +3348,7 @@ async fn run_pipeline(
             }
 
             let status = result.unwrap_or(1);
-            let status = report_finished(os.as_ref(), shell_proc, &requests[0], status).await;
+            let status = report_finished(os.as_ref(), shell_proc, requests[0].take(), status).await;
             return (status, stdout_str);
         }
 
@@ -3369,7 +3386,8 @@ async fn run_pipeline(
                     shell_proc.depth -= 1;
                     shell_proc.pop_local_scope();
                     shell_proc.args = saved_args;
-                    let code = report_finished(os.as_ref(), shell_proc, &requests[0], code).await;
+                    let code =
+                        report_finished(os.as_ref(), shell_proc, requests[0].take(), code).await;
                     return (code, String::new());
                 }
                 Err(_) => shell_proc.last_exit,
@@ -3382,7 +3400,7 @@ async fn run_pipeline(
             } else {
                 String::new()
             };
-            let exit = report_finished(os.as_ref(), shell_proc, &requests[0], exit).await;
+            let exit = report_finished(os.as_ref(), shell_proc, requests[0].take(), exit).await;
             return (exit, func_output);
         }
     }
@@ -3676,7 +3694,8 @@ async fn run_pipeline(
     let mut last_exit = 0;
     for (stage, handle) in handles {
         if let Ok(exit) = handle.await {
-            last_exit = report_finished(os.as_ref(), shell_proc, &requests[stage], exit).await;
+            last_exit =
+                report_finished(os.as_ref(), shell_proc, requests[stage].take(), exit).await;
         }
     }
 
