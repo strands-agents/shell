@@ -6296,6 +6296,11 @@ expect!(
 expect!(lone_subst_status, "$(false); echo $?", "1");
 expect!(assign_subst_parse_error_status, "x=$(fi); echo $?", "1");
 expect!(
+    assign_arith_subst_status,
+    "x=$(( $(exit 3) + 1 )); echo $?",
+    "3"
+);
+expect!(
     assign_subst_then_empty_subst_word_status,
     "x=$(false) $(true); echo $?",
     "1"
