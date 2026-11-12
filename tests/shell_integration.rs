@@ -98,7 +98,7 @@ expect!(
 expect!(pipe_wc, "echo hello | wc -c", "6");
 expect!(pipe_cut, "echo 'a:b:c' | cut -d: -f2", "b");
 
-// Use printf for multiline input since echo -e is not supported
+// Use printf for multiline input
 expect!(
     pipe_grep,
     "printf 'foo\\nbar\\nbaz\\n' | grep ba",
@@ -10064,6 +10064,39 @@ expect!(echo_esc_octal, "echo '\\0101'", "A");
 expect!(echo_esc_c_stops, "echo 'ab\\cde'", "ab");
 expect!(echo_trailing_bslash, "echo 'test\\'", "test\\");
 expect!(echo_esc_unknown, "echo '\\z'", "\\z");
+
+// ── echo (builtin) options ──────────────────────────────────────────
+
+expect_output!(echo_opt_e, "echo -e 'a\\tb'", "a\tb\n", "", 0);
+expect_output!(echo_opt_cap_e, "echo -E 'a\\tb'", "a\\tb\n", "", 0);
+expect_output!(echo_opt_ne, "echo -ne 'a\\tb'", "a\tb", "", 0);
+expect_output!(echo_opt_en, "echo -en x", "x", "", 0);
+expect_output!(echo_opt_repeated_n, "echo -nn x", "x", "", 0);
+expect_output!(echo_opt_repeated_e, "echo -ee 'a\\tb'", "a\tb\n", "", 0);
+expect_output!(echo_opt_n_cap_e, "echo -nE 'a\\tb'", "a\\tb", "", 0);
+expect_output!(echo_opt_separate, "echo -n -e 'a\\tb'", "a\tb", "", 0);
+expect_output!(
+    echo_opt_last_cap_e_wins,
+    "echo -eE 'a\\tb'",
+    "a\\tb\n",
+    "",
+    0
+);
+expect_output!(echo_opt_last_e_wins, "echo -E -e 'a\\tb'", "a\tb\n", "", 0);
+expect_output!(echo_opt_e_c, "echo -e 'ab\\cde'", "ab", "", 0);
+expect_output!(echo_opt_cap_e_c, "echo -E 'ab\\cde'", "ab\\cde\n", "", 0);
+expect_output!(echo_opt_unknown_letter, "echo -x a", "-x a\n", "", 0);
+expect_output!(echo_opt_mixed_unknown, "echo -nx a", "-nx a\n", "", 0);
+expect_output!(
+    echo_opt_stops_at_non_option,
+    "echo -e -x -n a",
+    "-x -n a\n",
+    "",
+    0
+);
+expect_output!(echo_opt_double_dash, "echo -- a", "-- a\n", "", 0);
+expect_output!(echo_opt_lone_dash, "echo -", "-\n", "", 0);
+expect_output!(echo_opt_empty_arg, "echo -e '' a", " a\n", "", 0);
 
 // ── true / false ────────────────────────────────────────────────────
 
