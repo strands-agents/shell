@@ -170,7 +170,7 @@ async fn run_script(
             Some((name, args)) => (name.clone(), args),
             None => (proc.arg0.clone(), rest),
         };
-        return run_sourced(os, proc, command, None, arg0, args).await;
+        return run_sourced(os, proc, command, "-c", arg0, args).await;
     }
     let fd = match os.open(proc, script_path, OpenFlags::read()).await {
         Ok(fd) => fd,
@@ -197,7 +197,7 @@ async fn run_script(
         os,
         proc,
         &content,
-        Some(script_path),
+        script_path,
         script_path.to_string(),
         args,
     )
@@ -205,19 +205,19 @@ async fn run_script(
 }
 
 /// Run `content` with `$0` and the positional parameters set, restoring them after.
-/// `origin` names the script in parse errors.
+/// `origin` names the script (or `-c`) in parse errors.
 async fn run_sourced(
     os: Arc<dyn Kernel>,
     proc: &mut Process,
     content: &str,
-    origin: Option<&str>,
+    origin: &str,
     arg0: String,
     args: &[String],
 ) -> i32 {
     let saved_args = std::mem::replace(&mut proc.args, args.to_vec());
     let saved_arg0 = std::mem::replace(&mut proc.arg0, arg0);
     proc.depth += 1;
-    let (exit, _) = execute_source_file(os, proc, content, origin).await;
+    let (exit, _) = execute_source_file(os, proc, content, Some(origin)).await;
     proc.depth -= 1;
     proc.args = saved_args;
     proc.arg0 = saved_arg0;

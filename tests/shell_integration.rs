@@ -7244,6 +7244,13 @@ expect_output!(
     "sh: -c: option requires an argument\n",
     2
 );
+expect_output!(
+    sh_c_parse_error_names_line,
+    "sh -c 'echo a\n)'",
+    "a\n",
+    "strands-shell: -c: line 2: unexpected ')'\n",
+    1
+);
 expect!(sh_c_double_dash, "sh -c -- 'echo hi'", "hi");
 expect!(sh_c_double_dash_params, "sh -c -- 'echo $0 $1' n a", "n a");
 expect!(sh_c_double_dash_as_name, "sh -c 'echo $0 $1' -- a", "-- a");
