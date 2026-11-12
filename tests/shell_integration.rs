@@ -4101,6 +4101,145 @@ expect!(
     "/tmp/target"
 );
 
+/// Builds `/tmp/rc` with a file, a symlink chain, a directory symlink, a
+/// dangling symlink and a symlink loop, then `cd`s into it.
+const READLINK_TREE: &str = "mkdir -p /tmp/rc/d/sub && cd /tmp/rc && echo x > d/f && \
+    ln -s d/f l1 && ln -s l1 l2 && ln -s d ld && ln -s missing dang && \
+    ln -s loopb loopa && ln -s loopa loopb; ";
+
+macro_rules! readlink_case {
+    ($name:ident, $args:expr, $stdout:expr, $status:expr) => {
+        expect_output!(
+            $name,
+            &format!("{READLINK_TREE}readlink {}", $args),
+            $stdout,
+            "",
+            $status
+        );
+    };
+}
+
+readlink_case!(
+    readlink_f_regular_file,
+    "-f /tmp/rc/d/f",
+    "/tmp/rc/d/f\n",
+    0
+);
+readlink_case!(readlink_f_relative, "-f d/f", "/tmp/rc/d/f\n", 0);
+readlink_case!(readlink_f_symlink_chain, "-f l2", "/tmp/rc/d/f\n", 0);
+readlink_case!(
+    readlink_f_dir_symlink_child,
+    "-f ld/sub",
+    "/tmp/rc/d/sub\n",
+    0
+);
+readlink_case!(readlink_f_dotdot, "-f ./ld/../d/./f", "/tmp/rc/d/f\n", 0);
+readlink_case!(
+    readlink_f_dotdot_after_link,
+    "-f ld/../l1",
+    "/tmp/rc/d/f\n",
+    0
+);
+readlink_case!(readlink_f_missing_last, "-f nofile", "/tmp/rc/nofile\n", 0);
+readlink_case!(readlink_f_dangling_link, "-f dang", "/tmp/rc/missing\n", 0);
+readlink_case!(readlink_f_missing_middle, "-f no/x", "", 1);
+readlink_case!(readlink_f_file_as_dir, "-f d/f/x", "", 1);
+readlink_case!(readlink_f_file_dotdot, "-f d/f/..", "", 1);
+readlink_case!(readlink_f_file_trailing_slash, "-f d/f/", "", 1);
+readlink_case!(readlink_f_loop, "-f loopa", "", 1);
+readlink_case!(readlink_f_root, "-f /", "/\n", 0);
+readlink_case!(readlink_f_empty, "-f ''", "", 1);
+readlink_case!(
+    readlink_canonicalize_long,
+    "--canonicalize l2",
+    "/tmp/rc/d/f\n",
+    0
+);
+readlink_case!(readlink_e_existing, "-e l2", "/tmp/rc/d/f\n", 0);
+readlink_case!(readlink_e_missing_last, "-e nofile", "", 1);
+readlink_case!(readlink_e_dangling_link, "-e dang", "", 1);
+readlink_case!(readlink_e_loop, "--canonicalize-existing loopa", "", 1);
+readlink_case!(
+    readlink_m_missing_middle,
+    "-m no/x/../y",
+    "/tmp/rc/no/y\n",
+    0
+);
+readlink_case!(readlink_m_file_as_dir, "-m d/f/x", "/tmp/rc/d/f/x\n", 0);
+readlink_case!(
+    readlink_m_loop,
+    "--canonicalize-missing loopa",
+    "/tmp/rc/loopa\n",
+    0
+);
+readlink_case!(readlink_last_mode_wins, "-ef nofile", "/tmp/rc/nofile\n", 0);
+readlink_case!(readlink_fn_no_newline, "-fn l2", "/tmp/rc/d/f", 0);
+readlink_case!(readlink_n_plain, "--no-newline l2", "l1", 0);
+readlink_case!(readlink_plain_relative_target, "l2", "l1\n", 0);
+
+/// Builds `/tmp/rc` with a chain `c0 -> c1 -> ... -> c45` ending at a file,
+/// a link to `.`, links whose targets end with a slash, a link that grows the
+/// path (`g`), a loop (`m0 <-> m1`) and a link through 600 `dd/..` pairs.
+const READLINK_LINKS: &str = "mkdir -p /tmp/rc/dd && cd /tmp/rc && echo x > f && echo x > c45 && \
+    i=0; while [ $i -lt 45 ]; do ln -s c$((i+1)) c$i; i=$((i+1)); done; \
+    ln -s . l && ln -s f/ fslash && ln -s dd/ ddslash && ln -s g/x g; \
+    ll=l; i=0; while [ $i -lt 45 ]; do ll=$ll/l; i=$((i+1)); done; \
+    ln -s m1 m0 && ln -s m0 m1; mx=m0; i=0; while [ $i -lt 1000 ]; do mx=$mx/x; i=$((i+1)); done; \
+    t=g/x; i=0; while [ $i -lt 600 ]; do t=dd/../$t; i=$((i+1)); done; ln -s $t dotdot; ";
+
+macro_rules! readlink_links_case {
+    ($name:ident, $args:expr, $stdout:expr, $status:expr) => {
+        expect_output!(
+            $name,
+            &format!("{READLINK_LINKS}readlink {}", $args),
+            $stdout,
+            "",
+            $status
+        );
+    };
+}
+
+readlink_links_case!(readlink_m_long_chain, "-m c0", "/tmp/rc/c45\n", 0);
+readlink_links_case!(readlink_f_long_chain, "-f c0", "/tmp/rc/c45\n", 0);
+readlink_links_case!(readlink_e_long_chain, "-e c0", "/tmp/rc/c45\n", 0);
+readlink_links_case!(readlink_f_repeated_link, "-f $ll/f", "/tmp/rc/f\n", 0);
+readlink_links_case!(readlink_e_repeated_link, "-e $ll/f", "/tmp/rc/f\n", 0);
+readlink_links_case!(readlink_f_target_slash_file, "-f fslash", "", 1);
+readlink_links_case!(readlink_e_target_slash_file, "-e fslash", "", 1);
+readlink_links_case!(readlink_m_target_slash_file, "-m fslash", "/tmp/rc/f\n", 0);
+readlink_links_case!(readlink_e_target_slash_dir, "-e ddslash", "/tmp/rc/dd\n", 0);
+readlink_links_case!(
+    readlink_f_missing_trailing_slash,
+    "-f nofile/",
+    "/tmp/rc/nofile\n",
+    0
+);
+readlink_links_case!(readlink_f_missing_trailing_dot, "-f nofile/.", "", 1);
+readlink_links_case!(readlink_f_file_trailing_dot, "-f f/.", "", 1);
+readlink_links_case!(readlink_f_growing_link, "-f g", "", 1);
+readlink_links_case!(readlink_m_growing_link, "-m g", "", 1);
+readlink_links_case!(readlink_f_long_dotdot_link, "-f dotdot", "", 1);
+readlink_links_case!(readlink_m_long_dotdot_link, "-m dotdot", "", 1);
+readlink_links_case!(
+    readlink_m_loop_then_dotdot,
+    "-m m0/x/../y",
+    "/tmp/rc/m0/y\n",
+    0
+);
+readlink_links_case!(readlink_f_loop_long_path, "-f $mx", "", 1);
+expect!(
+    readlink_m_loop_long_path,
+    &format!("{READLINK_LINKS}r=$(readlink -m $mx); echo \"${{#r}} ${{r%%/x/*}}\""),
+    "2010 /tmp/rc/m0"
+);
+
+expect!(
+    readlink_f_script_dir,
+    "mkdir -p /tmp/proj/bin && ln -s /tmp/proj/bin /tmp/b && echo : > /tmp/proj/bin/run && \
+     cd /tmp && dirname \"$(readlink -f b/run)\"",
+    "/tmp/proj/bin"
+);
+
 // ── type builtin extended ───────────────────────────────────────────
 shell_test!(
     type_function,
@@ -6983,6 +7122,52 @@ fn bind_direct_readlink_prints_stored_link_text() {
             let out = shell.run(&format!("readlink {path}")).await;
             assert_eq!(out.stdout, "", "{path}");
             assert_eq!(out.status, 1, "{path}");
+        }
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_readlink_canonicalizes_symlinks() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_canonicalize");
+        std::fs::create_dir(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/f"), "x").unwrap();
+        for (target, name) in [
+            ("d", "ld"),
+            ("ld/f", "file"),
+            ("missing", "dangling"),
+            ("loop2", "loop1"),
+            ("loop1", "loop2"),
+        ] {
+            std::os::unix::fs::symlink(target, dir.join(name)).unwrap();
+        }
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        for (args, stdout, status) in [
+            ("-f /b/ld", "/b/d\n", 0),
+            ("-e /b/ld", "/b/d\n", 0),
+            ("-m /b/ld", "/b/d\n", 0),
+            ("-f /b/file", "/b/d/f\n", 0),
+            ("-e /b/file", "/b/d/f\n", 0),
+            ("-m /b/file", "/b/d/f\n", 0),
+            ("-fn /b/file", "/b/d/f", 0),
+            ("-n /b/file", "ld/f", 0),
+            ("-f /b/ld/../file", "/b/d/f\n", 0),
+            ("-f /b/dangling", "/b/missing\n", 0),
+            ("-e /b/dangling", "", 1),
+            ("-m /b/dangling", "/b/missing\n", 0),
+            ("-f /b/loop1", "", 1),
+            ("-e /b/loop1", "", 1),
+            ("-m /b/loop1", "/b/loop1\n", 0),
+        ] {
+            let out = shell.run(&format!("readlink {args}")).await;
+            assert_eq!(out.stdout, stdout, "{args}");
+            assert_eq!(out.stderr, "", "{args}");
+            assert_eq!(out.status, status, "{args}");
         }
     }));
 }
