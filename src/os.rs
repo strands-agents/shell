@@ -165,6 +165,8 @@ pub struct Process {
     pub opt_errexit: bool,
     pub opt_nounset: bool,
     pub opt_xtrace: bool,
+    /// `set -o pipefail`: a pipeline fails with its rightmost failing stage.
+    pub opt_pipefail: bool,
     /// Set when a nounset error occurs during expansion.
     pub nounset_error: bool,
     /// PID of last background job (for $!).
@@ -348,6 +350,7 @@ impl Process {
             opt_errexit: false,
             opt_nounset: false,
             opt_xtrace: false,
+            opt_pipefail: false,
             nounset_error: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
@@ -392,6 +395,7 @@ impl Process {
             opt_errexit: false,
             opt_nounset: false,
             opt_xtrace: false,
+            opt_pipefail: false,
             nounset_error: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
@@ -496,6 +500,7 @@ impl Process {
             opt_errexit: self.opt_errexit,
             opt_nounset: self.opt_nounset,
             opt_xtrace: self.opt_xtrace,
+            opt_pipefail: self.opt_pipefail,
             nounset_error: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),

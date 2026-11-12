@@ -34,33 +34,38 @@ pub fn builtin_xargs<'a>(
         let mut replace: Option<String> = None;
         let mut max_args: usize = 0;
         let mut delim: Option<char> = None;
-        let mut cmd_args = Vec::new();
         let mut i = 0;
         while i < args.len() {
-            match args[i].as_str() {
-                "-0" => null_delim = true,
-                "-I" => {
-                    i += 1;
-                    if i < args.len() {
-                        replace = Some(args[i].clone());
-                    }
+            let arg = args[i].as_str();
+            if arg == "--" {
+                i += 1;
+                break;
+            }
+            if arg == "-0" {
+                null_delim = true;
+                i += 1;
+                continue;
+            }
+            let opt = match arg.get(..2) {
+                Some(o @ ("-I" | "-n" | "-d")) => o,
+                _ => break,
+            };
+            let value = if arg.len() > 2 {
+                Some(arg[2..].to_string())
+            } else {
+                i += 1;
+                args.get(i).cloned()
+            };
+            if let Some(v) = value {
+                match opt {
+                    "-I" => replace = Some(v),
+                    "-n" => max_args = v.parse().unwrap_or(0),
+                    _ => delim = v.chars().next(),
                 }
-                "-n" => {
-                    i += 1;
-                    if i < args.len() {
-                        max_args = args[i].parse().unwrap_or(0);
-                    }
-                }
-                "-d" => {
-                    i += 1;
-                    if i < args.len() {
-                        delim = args[i].chars().next();
-                    }
-                }
-                _ => cmd_args.push(args[i].clone()),
             }
             i += 1;
         }
+        let mut cmd_args: Vec<String> = args[i.min(args.len())..].to_vec();
         if cmd_args.is_empty() {
             cmd_args.push("echo".to_string());
         }
