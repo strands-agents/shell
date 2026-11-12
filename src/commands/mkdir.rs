@@ -41,12 +41,16 @@ async fn cmd_mkdir(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     path.push('/');
                 }
                 path.push_str(part);
-                let st = io::stat(os, &path).await;
-                if st.exists {
-                    continue;
-                }
                 let is_ancestor = target.is_some_and(|target| index < target);
-                if is_ancestor && lookup_refused(os, &path).await {
+                let skip = if is_ancestor {
+                    match io::try_stat(os, &path).await {
+                        Ok(stat) => stat.exists,
+                        Err(err) => err.kind() == std::io::ErrorKind::PermissionDenied,
+                    }
+                } else {
+                    io::stat(os, &path).await.exists
+                };
+                if skip {
                     continue;
                 }
                 io::create_dir(os, &path).await?;
@@ -56,12 +60,4 @@ async fn cmd_mkdir(os: &dyn Kernel, args: &[String]) -> CommandResult {
         }
     }
     Ok(0)
-}
-
-/// Whether the kernel refuses to look up `path`, rather than reporting it missing.
-async fn lookup_refused(os: &dyn Kernel, path: &str) -> bool {
-    matches!(
-        io::canonicalize(os, path).await,
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied
-    )
 }
