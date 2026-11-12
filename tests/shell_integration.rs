@@ -5007,6 +5007,67 @@ fn sleep_within_timeout_succeeds() {
     }));
 }
 
+// A command substitution that uses up the deadline stops its command:
+// the command does not run and its redirect does not open the file.
+#[test]
+fn timeout_in_substitution_stops_the_command_and_its_redirect() {
+    for command in [
+        "echo $(sleep 5) > /tmp/after",
+        "echo hi > \"/tmp/$(sleep 5)after\"",
+        "X=$(sleep 5) echo hi > /tmp/after",
+        "echo \"$(sleep 5)\" | cat > /tmp/after",
+        "echo hi > /tmp/before; echo $(sleep 5) >> /tmp/before",
+        "a=$(echo $(sleep 5) > /tmp/after)",
+        "echo \"$(sleep 5; echo hi > /tmp/after)\"",
+        "echo $(sleep 5) late",
+    ] {
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert_eq!(out.status, 1, "{command}: stderr={:?}", out.stderr);
+            assert_eq!(out.stdout, "", "{command}: the command ran");
+            assert!(
+                !out.stderr.is_empty()
+                    && out
+                        .stderr
+                        .lines()
+                        .all(|line| line == "strands-shell: execution timeout exceeded"),
+                "{command}: stderr={:?}",
+                out.stderr
+            );
+            let after = shell.run("test ! -e /tmp/after").await;
+            assert_eq!(after.status, 0, "{command}: the redirect opened the file");
+            let before = shell.run("cat /tmp/before 2>/dev/null").await;
+            assert!(
+                before.stdout.is_empty() || before.stdout == "hi\n",
+                "{command}: the redirect appended to the file: {:?}",
+                before.stdout
+            );
+        }));
+    }
+}
+
+// A command substitution that ends in time still lets its command run.
+#[test]
+fn substitution_within_timeout_runs_the_command() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = shell
+            .run("echo $(sleep 0.05; echo in) > /tmp/after; cat /tmp/after")
+            .await;
+        assert_eq!(out.status, 0, "stderr={:?}", out.stderr);
+        assert_eq!(out.stdout, "in\n");
+    }));
+}
+
 #[test]
 fn builder_max_output() {
     let (rt, local) = rt();

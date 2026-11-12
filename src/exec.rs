@@ -3179,6 +3179,12 @@ async fn run_pipeline(
         expanded_redirects.push(redirs);
     }
 
+    // A command substitution can use up the deadline before dispatch and redirection.
+    if let Some(msg) = shell_proc.check_limits() {
+        shell_proc.err_msg(msg);
+        return (1, String::new());
+    }
+
     // Abort if nounset error occurred during expansion
     if shell_proc.nounset_error {
         shell_proc.last_exit = 2;
