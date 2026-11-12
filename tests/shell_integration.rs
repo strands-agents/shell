@@ -6415,6 +6415,13 @@ fn invalid_utf8_capture_still_enforces_max_output() {
     assert_eq!(out.stdout, "[]\n");
     let out = invalid_utf8_run("limitrun", 4, "cat /g/bin");
     assert_eq!(out.stdout, "");
+
+    // The raw bytes fit, but replacement characters expand stdout past the
+    // limit, so the post-conversion check truncates and reports the overflow.
+    let out = invalid_utf8_run("expandedlimit", 7, "cat /g/bin");
+    assert_eq!(out.stdout, "ok\u{FFFD}ba");
+    assert_eq!(out.status, 1);
+    assert!(out.stderr.contains("output size limit exceeded"));
 }
 
 // ── exec.rs coverage: exit inside function ─────────────────────────
