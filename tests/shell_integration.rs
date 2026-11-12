@@ -578,10 +578,27 @@ shell_test!(
         );
     }
 );
+shell_test!(
+    set_euo_invalid_name_stops,
+    "set -euo pipefial; echo unreachable",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: set: pipefial: invalid option name\n"
+        );
+        assert_eq!(out.status, 2);
+    }
+);
 expect!(
-    set_o_invalid_name_changes_nothing,
-    "set -eo bogus 2>/dev/null; echo \"[$-]\"; set -o pipefail; set +o pipefail -o bogus 2>/dev/null; false | true; echo $?",
-    "[]\n1"
+    set_o_invalid_name_keeps_earlier_enable,
+    "set -o pipefail +o bogus 2>/dev/null; false | true; echo $?",
+    "1"
+);
+expect!(
+    set_o_invalid_name_keeps_earlier_disable,
+    "set -o pipefail; set +o pipefail -o bogus 2>/dev/null; false | true; echo $?",
+    "0"
 );
 shell_test!(
     set_o_invalid_name_under_errexit,

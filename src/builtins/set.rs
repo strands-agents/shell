@@ -28,8 +28,6 @@ pub fn builtin_set<'a>(
             return Ok(0);
         }
 
-        // Parse every option before applying any, so a bad one changes nothing.
-        let mut changes = Vec::new();
         let mut listings = Vec::new();
         let mut positional = None;
         let mut i = 0;
@@ -67,13 +65,10 @@ pub fn builtin_set<'a>(
                         return Ok(2);
                     }
                 };
-                changes.push((opt, enable));
+                *opt.flag(proc) = enable;
             }
         }
 
-        for (opt, enable) in changes {
-            *opt.flag(proc) = enable;
-        }
         // A bare `-o` lists the options; a bare `+o` lists them as `set` commands.
         for enable in listings {
             let mut w = io::stdout()?;
