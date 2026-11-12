@@ -2952,6 +2952,13 @@ expect_streams!(
     "ret\nneg\n"
 );
 expect_streams!(
+    compound_pipe_tail_function_exit_preserves_stderr,
+    "set -o pipefail; f() { exit 7; }; \
+     { echo producer >&2; exit 3; } | f; echo \"pipe $?\"; echo after",
+    "pipe 7\nafter\n",
+    "producer\n"
+);
+expect_streams!(
     compound_pipe_in_substitution_stderr,
     "x=$({ echo o; echo e >&2; } | cat); echo \"x=$x\"",
     "x=o\n",
