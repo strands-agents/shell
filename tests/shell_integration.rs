@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use strands_shell::Shell;
 
 fn rt() -> (tokio::runtime::Runtime, tokio::task::LocalSet) {
@@ -3526,7 +3528,6 @@ expect!(
 /// `files` is (name, size, mtime seconds since epoch).
 #[cfg(unix)]
 fn ls_fixture(name: &str, files: &[(&str, u64, u64)]) -> TestDir {
-    use std::os::unix::fs::PermissionsExt;
     let dir = TestDir::new(name);
     for &(file, len, secs) in files {
         let path = dir.join(file);
