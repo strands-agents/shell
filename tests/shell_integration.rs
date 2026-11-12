@@ -448,6 +448,21 @@ shell_test!(
 expect!(pipefail_off_by_default, "false | true; echo $?", "0");
 expect!(pipefail_on, "set -o pipefail; false | true; echo $?", "1");
 expect!(
+    pipefail_off_assignment_only_last_stage,
+    "false | FOO=1; echo $?",
+    "0"
+);
+expect!(
+    pipefail_subshell_option_does_not_leak,
+    "(set -o pipefail); false | true; echo $?",
+    "0"
+);
+expect!(
+    pipefail_subshell_exit_status,
+    "set -o pipefail; (exit 3) | cat; echo $?",
+    "3"
+);
+expect!(
     pipefail_middle_stage,
     "set -o pipefail; true | false | true; echo $?",
     "1"
@@ -476,6 +491,16 @@ expect!(
     pipefail_compound_left,
     "set -o pipefail; { false; } | true; echo $?; { exit 3; } | cat; echo $?",
     "1\n3"
+);
+expect!(
+    pipefail_compound_return_status,
+    "set -o pipefail; f() { { return 3; } | cat; }; f; echo $?",
+    "3"
+);
+expect!(
+    pipefail_compound_return_in_substitution,
+    "set -o pipefail; f() { echo $({ return 3; } | cat; echo $?); }; f",
+    "3"
 );
 expect!(
     pipefail_compound_left_off,

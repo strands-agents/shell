@@ -1790,7 +1790,7 @@ async fn capture_pipeline_checked(
 /// The exit status of a captured command line that ran to its end or stopped on control flow.
 fn captured_status(result: Result<i32, ControlFlow>, last_exit: i32) -> i32 {
     match result {
-        Ok(code) | Err(ControlFlow::Exit(code)) => code,
+        Ok(code) | Err(ControlFlow::Exit(code) | ControlFlow::Return(code)) => code,
         Err(_) => last_exit,
     }
 }
