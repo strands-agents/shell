@@ -1800,9 +1800,11 @@ expect!(
     "printf 'echo run $1; exit $1\\n' > e.sh; printf '200\\n0\\n' | xargs -n 1 sh e.sh; echo st=$?",
     "run 200\nrun 0\nst=123"
 );
-expect_status!(
+expect_output!(
     xargs_status_not_found,
     "printf 'a\\nb\\n' | xargs -n 1 nosuchcmd",
+    "",
+    "strands-shell: nosuchcmd: command not found\n",
     127
 );
 
@@ -1816,6 +1818,28 @@ shell_test!(
         assert_eq!(out.status, 124);
     }
 );
+
+#[test]
+fn xargs_status_timeout() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut statuses = Vec::new();
+        for command in [
+            "echo 2 | xargs sleep",
+            "printf '2\\n2\\n' | xargs -n 1 sleep",
+            "printf '2\\n2\\n' | xargs -I X sleep X",
+        ] {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert!(out.stderr.contains("execution timeout exceeded"));
+            statuses.push(out.status);
+        }
+        assert_eq!(statuses, vec![1, 1, 1]);
+    }));
+}
 
 // ── Arithmetic: assignment operators ────────────────────────────────
 

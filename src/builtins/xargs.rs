@@ -144,6 +144,9 @@ pub fn builtin_xargs<'a>(
             }
         }
 
+        if proc.check_limits().is_some() {
+            return Ok(1);
+        }
         // GNU: 124 after a 255, 126/127 if the command could not be run,
         // otherwise 123 if any invocation failed.
         Ok(match status {
