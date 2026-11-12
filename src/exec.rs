@@ -3218,7 +3218,7 @@ async fn run_pipeline(
         }
     }
 
-    // Ask the kernel about each command Shell runs itself, before any stage starts.
+    // Ask the kernel about each command, before any stage starts.
     let mut requests: Vec<Option<CheckedCommand>> = Vec::with_capacity(len);
     for words in &expanded_args {
         let Some((mut program, mut args)) = words.split_first() else {
@@ -3233,6 +3233,13 @@ async fn run_pipeline(
             (program, args) = (inner, rest);
         }
         if !runs_in_shell(shell_proc, program) {
+            if os.command_fallback().is_some() {
+                let request = CommandRequest::new(program, args, &shell_proc.cwd);
+                if let Err(e) = os.check_fallback(&request).await {
+                    shell_proc.err_msg(&format!("strands-shell: {program}: {e}"));
+                    return (126, String::new());
+                }
+            }
             requests.push(None);
             continue;
         }
