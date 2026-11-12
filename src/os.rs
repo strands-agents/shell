@@ -149,6 +149,10 @@ pub struct Process {
     pub opt_pipefail: bool,
     /// Set when a nounset error occurs during expansion.
     pub nounset_error: bool,
+    /// Set when `exit` ran inside a function called by a single-command pipeline.
+    pub(crate) pending_exit: bool,
+    /// An unsupported array aborts its function without requesting a shell exit.
+    pub(crate) refused_array: bool,
     /// PID of last background job (for $!).
     pub last_bg_pid: Option<u32>,
     /// Background job handles.
@@ -330,6 +334,8 @@ impl Process {
             opt_xtrace: false,
             opt_pipefail: false,
             nounset_error: false,
+            pending_exit: false,
+            refused_array: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
@@ -374,6 +380,8 @@ impl Process {
             opt_xtrace: false,
             opt_pipefail: false,
             nounset_error: false,
+            pending_exit: false,
+            refused_array: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
@@ -458,6 +466,8 @@ impl Process {
             opt_xtrace: self.opt_xtrace,
             opt_pipefail: self.opt_pipefail,
             nounset_error: false,
+            pending_exit: false,
+            refused_array: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),

@@ -7064,7 +7064,7 @@ fn stdout_max_output_truncate_multibyte() {
 // ── exec.rs coverage: exit inside function ─────────────────────────
 
 expect_status!(func_exit_code, "f() { exit 42; }; f", 42);
-expect!(func_exit_stops, "f() { exit 0; }; f; echo after", "after");
+expect!(func_exit_stops, "f() { exit 0; }; f; echo after", "");
 
 // ── exec.rs coverage: continue N in nested loops ───────────────────
 
@@ -8440,11 +8440,201 @@ expect!(bare_dollar_in_dquote, r#"echo "cost: $""#, "cost: $");
 
 // ── ControlFlow::Exit in function ───────────────────────────────────
 
-// In lash, exit inside a function acts like return
-expect!(
+// Exit inside a function exits the shell, not just the function.
+expect_output!(
     function_exit_in_func,
     "f() { exit 7; }; f; echo after",
-    "after"
+    "",
+    "",
+    7
+);
+expect_output!(
+    array_refusal_does_not_hide_a_later_function_exit,
+    "f() { arr=(1); }; f; g() { exit 7; }; g; echo after",
+    "",
+    "strands-shell: arrays are not supported\n",
+    7
+);
+expect_output!(
+    function_exit_no_arg_uses_last_status,
+    "f() { false; exit; }; f; echo after",
+    "",
+    "",
+    1
+);
+expect_output!(
+    function_exit_keeps_earlier_output,
+    "f() { echo in; exit 6; echo not; }; f; echo after",
+    "in\n",
+    "",
+    6
+);
+expect_output!(
+    function_exit_from_nested_function,
+    "g() { exit 9; }; f() { g; echo inner; }; f; echo after",
+    "",
+    "",
+    9
+);
+expect_output!(
+    function_exit_in_loop,
+    "f() { exit 8; }; for i in 1 2; do f; echo \"loop$i\"; done; echo after",
+    "",
+    "",
+    8
+);
+expect_output!(
+    function_exit_in_if_condition,
+    "f() { exit 2; }; if f; then echo t; fi; echo after",
+    "",
+    "",
+    2
+);
+expect_output!(
+    function_exit_in_and_list,
+    "f() { exit 3; }; f && echo and; echo after",
+    "",
+    "",
+    3
+);
+expect_output!(
+    function_exit_negated,
+    "f() { exit 6; }; ! f; echo after",
+    "",
+    "",
+    6
+);
+expect_output!(
+    function_exit_in_group,
+    "f() { exit 6; }; { f; echo grp; }; echo after",
+    "",
+    "",
+    6
+);
+expect_output!(
+    function_exit_through_eval,
+    "f() { exit 6; }; eval f; echo after",
+    "",
+    "",
+    6
+);
+expect_output!(
+    function_exit_runs_exit_trap_once,
+    "trap 'echo bye' EXIT; f() { exit 4; }; f; echo after",
+    "bye\n",
+    "",
+    4
+);
+expect!(
+    function_exit_in_subshell_stays_in_subshell,
+    "f() { exit 4; }; (f; echo after); echo \"outer $?\"",
+    "outer 4"
+);
+expect!(
+    function_exit_in_cmd_subst_stays_in_subst,
+    "f() { echo a; exit 3; }; X=$(f; echo after); echo \"[$X]\"; echo outer",
+    "[a]\nouter"
+);
+expect!(
+    function_exit_in_cmd_subst_and_list,
+    "f() { exit 3; }; X=$(f && echo and; echo after); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    function_exit_in_pipeline_stage,
+    "f() { exit 5; }; echo hi | f; echo \"pipe $?\"",
+    "pipe 5"
+);
+expect!(
+    function_exit_in_first_pipeline_stage,
+    "f() { exit 5; }; f | cat; echo \"pipe $?\"",
+    "pipe 0"
+);
+expect!(
+    function_exit_in_compound_pipeline_tail,
+    "f() { exit 7; }; { echo; } | f; echo \"pipe $?\"",
+    "pipe 7"
+);
+expect!(
+    function_exit_in_compound_pipeline_tail_in_cmd_subst,
+    "f() { exit 7; }; X=$({ echo; } | f; echo after); echo \"[$X]\"",
+    "[after]"
+);
+expect!(
+    function_exit_in_background_job,
+    "f() { exit 6; }; f & wait $!; echo \"bg $?\"",
+    "bg 6"
+);
+expect!(
+    function_exit_in_script_stops_only_script,
+    "printf 'f() { exit 5; }\\nf\\necho inscript\\n' > /tmp/fexit.sh; sh /tmp/fexit.sh; echo \"script $?\"",
+    "script 5"
+);
+expect!(
+    function_exit_in_background_job_in_cmd_subst,
+    "f() { exit 3; }; X=$(f & echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    background_array_refusal_does_not_hide_function_exit,
+    "g() { exit 4; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    background_array_refusal_does_not_hide_function_nounset,
+    "g() { set -u; echo $missing; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    background_array_refusal_does_not_hide_function_expansion_error,
+    "g() { echo ${missing?stop}; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_does_not_hide_function_exit,
+    "g() { exit 4; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_with_pipefail_does_not_hide_function_exit,
+    "set -o pipefail; g() { exit 4; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_does_not_hide_function_nounset,
+    "g() { set -u; echo $missing; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_does_not_hide_function_parameter_error,
+    "g() { echo ${missing?stop}; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    function_exit_in_background_job_keeps_shell,
+    "f() { exit 3; }; f & echo no; wait $!; echo \"bg $?\"",
+    "no\nbg 3"
+);
+expect!(
+    function_exit_under_command_does_not_leak,
+    "f() { exit 3; }; command f; echo after; echo more",
+    "after\nmore"
+);
+#[test]
+fn function_exit_under_command_does_not_leak_into_next_run() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell.run("f() { exit 3; }; command f").await;
+        let out = shell.run("echo hi; echo more").await;
+        assert_eq!(out.stdout, "hi\nmore\n");
+        assert_eq!(out.status, 0);
+    }));
+}
+expect!(
+    function_return_in_loop_still_returns,
+    "f() { return 2; }; for i in 1 2; do f; echo \"r$i $?\"; done",
+    "r1 2\nr2 2"
 );
 #[test]
 fn function_exit_status_code() {

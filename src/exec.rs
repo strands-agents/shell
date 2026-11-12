@@ -227,6 +227,8 @@ async fn run_sourced(
 /// Execute a full input line. `proc` is the shell's process — cd modifies it.
 /// Returns (exit_code, should_exit).
 pub async fn execute(os: Arc<dyn Kernel>, proc: &mut Process, input: &str) -> (i32, bool) {
+    proc.pending_exit = false;
+    proc.refused_array = false;
     let result = if proc.max_input > 0 && input.len() > proc.max_input {
         proc.err_msg("strands-shell: input too large");
         (1, false)
@@ -267,6 +269,9 @@ pub async fn execute_with_reader(
     input: &str,
     read_line: &mut dyn FnMut(&str) -> Option<String>,
 ) -> (i32, bool) {
+    // Never carry a function's pending exit into a new top-level command.
+    proc.pending_exit = false;
+    proc.refused_array = false;
     if proc.max_input > 0 && input.len() > proc.max_input {
         proc.err_msg("strands-shell: input too large");
         return (1, false);
@@ -603,6 +608,7 @@ fn assignment(proc: &Process, key: String, value: String) -> (String, String) {
 /// Arrays parse so that a function body holding one defines as in bash; running one is refused.
 fn refuse_array(proc: &mut Process) {
     proc.err_msg("strands-shell: arrays are not supported");
+    proc.refused_array = true;
     proc.nounset_error = true;
 }
 
@@ -1842,7 +1848,7 @@ async fn run_capturing_status(
     let mut last_exit = 0;
     let mut skip = false;
     let mut flow = None;
-    for (i, (item, _connector)) in command_line.iter().enumerate() {
+    for (i, (item, connector)) in command_line.iter().enumerate() {
         if i > 0 {
             match &command_line[i - 1].1 {
                 Some(Connector::And) => skip = last_exit != 0,
@@ -1867,6 +1873,15 @@ async fn run_capturing_status(
                 Item::Pipeline(pipeline, negated) => {
                     match capture_pipeline_checked(os.clone(), proc, pipeline).await {
                         (Ok(exit), out) => {
+                            let exit = if *negated { i32::from(exit == 0) } else { exit };
+                            (exit, out)
+                        }
+                        // Captured background jobs run in the foreground, but their
+                        // exit must not end the command substitution.
+                        (Err(ControlFlow::Exit(exit)), out)
+                            if matches!(connector, Some(Connector::Background)) =>
+                        {
+                            proc.refused_array = false;
                             let exit = if *negated { i32::from(exit == 0) } else { exit };
                             (exit, out)
                         }
@@ -2030,6 +2045,8 @@ async fn run_capturing_status(
                     let (captured, result) =
                         Box::pin(run_capturing_status(os.clone(), proc, &compound_cl)).await;
                     let compound_exit = captured_status(result, proc.last_exit);
+                    // The stage's refusal must not mask an exit in a later function.
+                    proc.refused_array = false;
                     let (tx, rx) = os::pipe(64);
                     let mut tasks = ForegroundTasks::new(os.as_ref());
                     let handle = tokio::task::spawn_local(async move {
@@ -2041,6 +2058,8 @@ async fn run_capturing_status(
                     tasks.own(&handle);
                     proc.set_channel_reader(0, rx);
                     let (mut exit, out) = execute_pipeline_capture(os.clone(), proc, tail).await;
+                    // The tail is a pipeline stage, so `exit` in it ends only that stage.
+                    proc.pending_exit = false;
                     let _ = handle.await;
                     proc.close(0);
                     if proc.opt_pipefail && exit == 0 {
@@ -2297,6 +2316,8 @@ async fn execute_item(
             // Set stdin on proc so the tail pipeline inherits it.
             proc.set_channel_reader(0, rx);
             let mut exit = execute_pipeline(os, proc, tail).await;
+            // The tail is a pipeline stage, so `exit` in it ends only that stage.
+            proc.pending_exit = false;
             let compound_exit = handle.await.unwrap_or(0);
             proc.close(0);
             if proc.opt_pipefail && exit == 0 {
@@ -2989,6 +3010,7 @@ async fn execute_pipeline_checked(
                         redirects: pipeline[0].redirects.clone(),
                     };
                     let exit = execute_pipeline(os, proc, &[fake_cmd]).await;
+                    proc.pending_exit = false;
                     return Err(ControlFlow::Exit(exit));
                 }
                 "command" => {
@@ -3038,15 +3060,18 @@ async fn execute_pipeline_checked(
                         args: pipeline[0].args[1..].to_vec(),
                         redirects: pipeline[0].redirects.clone(),
                     };
-                    return Ok(execute_pipeline(os, proc, &[fake_cmd]).await);
+                    let exit = execute_pipeline(os, proc, &[fake_cmd]).await;
+                    proc.pending_exit = false;
+                    return Ok(exit);
                 }
                 _ => {}
             }
         }
     }
     let exit = execute_pipeline(os, proc, pipeline).await;
-    // nounset errors are fatal — abort the shell
-    if proc.nounset_error {
+    // nounset errors and `exit` inside a function are fatal — abort the shell
+    let function_exited = std::mem::take(&mut proc.pending_exit);
+    if proc.nounset_error || function_exited {
         proc.nounset_error = false;
         return Err(ControlFlow::Exit(exit));
     }
@@ -3491,12 +3516,10 @@ async fn run_pipeline(
                 Ok(code) => code,
                 Err(ControlFlow::Return(code)) => code,
                 Err(ControlFlow::Exit(code)) => {
-                    shell_proc.depth -= 1;
-                    shell_proc.pop_local_scope();
-                    shell_proc.args = saved_args;
-                    let code =
-                        report_finished(os.as_ref(), shell_proc, requests[0].take(), code).await;
-                    return (code, String::new());
+                    if !std::mem::take(&mut shell_proc.refused_array) {
+                        shell_proc.pending_exit = true;
+                    }
+                    code
                 }
                 Err(_) => shell_proc.last_exit,
             };
