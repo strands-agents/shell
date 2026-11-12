@@ -379,7 +379,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 };
                 wprintln!(w, "curl: (1) Protocol \"{}\" {}", scheme, why)?;
             }
-            return Ok(1);
+            break Err(1);
         }
 
         // Inject credentials (only for original URL, not redirects)
@@ -441,23 +441,13 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     {
                         wprintln!(w, "curl: (28) Operation timed out")?;
                     }
-                    if let Some(ref fmt) = write_out {
-                        let vars = WriteOut {
-                            status: 0,
-                            content_type: "",
-                            size_download: 0,
-                            url_effective: &current_url,
-                        };
-                        let mut w = io::stdout()?;
-                        wprint!(w, "{}", expand_write_out(fmt, &vars))?;
-                    }
-                    return Ok(28);
+                    break Err(28);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                     if let Some(ref mut w) = err {
                         wprintln!(w, "curl: {}", e)?;
                     }
-                    return Ok(1);
+                    break Err(1);
                 }
                 Err(e) => {
                     if (!silent || show_error)
@@ -465,7 +455,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     {
                         wprintln!(w, "curl: (6) {}", e)?;
                     }
-                    return Ok(6);
+                    break Err(6);
                 }
             };
 
@@ -503,7 +493,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 redirects_left -= 1;
                 continue;
             }
-            break r;
+            break Ok(r);
         } else {
             // Redirect hop — minimal headers, no credentials
             let http_req = crate::os::HttpRequest {
@@ -523,23 +513,13 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     {
                         wprintln!(w, "curl: (28) Operation timed out")?;
                     }
-                    if let Some(ref fmt) = write_out {
-                        let vars = WriteOut {
-                            status: 0,
-                            content_type: "",
-                            size_download: 0,
-                            url_effective: &current_url,
-                        };
-                        let mut w = io::stdout()?;
-                        wprint!(w, "{}", expand_write_out(fmt, &vars))?;
-                    }
-                    return Ok(28);
+                    break Err(28);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                     if let Some(ref mut w) = err {
                         wprintln!(w, "curl: {}", e)?;
                     }
-                    return Ok(1);
+                    break Err(1);
                 }
                 Err(e) => {
                     if (!silent || show_error)
@@ -547,7 +527,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     {
                         wprintln!(w, "curl: (6) {}", e)?;
                     }
-                    return Ok(6);
+                    break Err(6);
                 }
             };
 
@@ -585,7 +565,38 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 redirects_left -= 1;
                 continue;
             }
-            break r;
+            break Ok(r);
+        }
+    };
+    let resp = match resp {
+        Ok(resp) => resp,
+        Err(code) => {
+            // Headers already received survive a failed redirect hop.
+            if !hop_headers.is_empty() || (code == 28 && write_out.is_some()) {
+                let mut out = io::stdout()?;
+                if !hop_headers.is_empty() {
+                    if let Some(ref path) = output {
+                        let fd = io::open(os, path, OpenFlags::write()).await?;
+                        io::take_writer(fd)?
+                            .write_all(hop_headers.as_bytes())
+                            .await?;
+                    } else {
+                        out.write_all(hop_headers.as_bytes()).await?;
+                    }
+                }
+                if code == 28
+                    && let Some(ref fmt) = write_out
+                {
+                    let vars = WriteOut {
+                        status: 0,
+                        content_type: "",
+                        size_download: 0,
+                        url_effective: &current_url,
+                    };
+                    wprint!(out, "{}", expand_write_out(fmt, &vars))?;
+                }
+            }
+            return Ok(code);
         }
     };
 
