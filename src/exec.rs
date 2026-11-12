@@ -7,7 +7,9 @@ use crate::builtins;
 use crate::command_fallback;
 use crate::commands;
 use crate::io::{CURRENT_KERNEL, CURRENT_PROCESS};
-use crate::os::{self, FdReader, Kernel, OpenFlags, Process, STDERR, STDIN, STDOUT};
+use crate::os::{
+    self, CommandRequest, FdReader, Kernel, OpenFlags, Process, STDERR, STDIN, STDOUT,
+};
 use crate::parser::{self, Connector, Item, Redirect, Word, WordPart};
 
 /// Foreground tasks that abort on drop when the kernel has a command fallback.
@@ -179,7 +181,7 @@ async fn run_script(
     let saved_args = std::mem::replace(&mut proc.args, args.to_vec());
     let saved_arg0 = std::mem::replace(&mut proc.arg0, script_path.to_string());
     proc.depth += 1;
-    let (exit, _) = execute_sourced(os, proc, &content).await;
+    let (exit, _) = execute_source_file(os, proc, &content, Some(script_path)).await;
     proc.depth -= 1;
     proc.args = saved_args;
     proc.arg0 = saved_arg0;
@@ -266,15 +268,27 @@ fn continues_line(line: &str) -> bool {
 /// Execute sourced file content incrementally, so aliases defined by earlier
 /// commands are visible when parsing later commands.
 pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &str) -> (i32, bool) {
+    execute_source_file(os, proc, input, None).await
+}
+
+/// [`execute_sourced`], naming `origin` and the line in a parse error.
+async fn execute_source_file(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    input: &str,
+    origin: Option<&str>,
+) -> (i32, bool) {
     let mut last_code = 0i32;
     let mut accum = String::new();
     let mut last_err = String::new();
+    let mut statement_line = 0;
     let lines: Vec<&str> = input.lines().collect();
     let mut i = 0;
 
     while i < lines.len() {
         if accum.is_empty() {
             accum = lines[i].to_string();
+            statement_line = i + 1;
         } else {
             accum.push('\n');
             accum.push_str(lines[i]);
@@ -292,7 +306,8 @@ pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &st
             }
         };
 
-        match parser::parse_with_aliases(&accum, &mut reader, &proc.aliases) {
+        match parser::parse_source(&accum, &mut reader, &proc.aliases, i < lines.len()) {
+            Ok(cl) if line_idx == i && i < lines.len() && ends_with_and_or(&cl) => {}
             Ok(cl) => {
                 i = line_idx; // advance past any lines consumed by heredoc
                 accum.clear();
@@ -319,7 +334,8 @@ pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &st
                 }
             }
             Err(e) if parser::is_definite_error(&e) && !continues_line(lines[i - 1]) => {
-                proc.err_msg(&format!("strands-shell: line {i}: {e}"));
+                let file = origin.map(|o| format!("{o}: ")).unwrap_or_default();
+                proc.err_msg(&format!("strands-shell: {file}line {i}: {e}"));
                 return (1, false);
             }
             Err(e) => {
@@ -330,16 +346,31 @@ pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &st
     }
 
     if !accum.is_empty() && !last_err.is_empty() {
-        proc.err_msg(&format!("strands-shell: {last_err}"));
+        let at = origin
+            .map(|o| format!("{o}: line {statement_line}: "))
+            .unwrap_or_default();
+        proc.err_msg(&format!("strands-shell: {at}{last_err}"));
         return (1, false);
     }
 
     (last_code, false)
 }
 
+/// Whether `cl` ends with `&&` or `||`, so its last command is on a later line.
+fn ends_with_and_or(cl: &parser::CommandLine) -> bool {
+    matches!(
+        cl.last(),
+        Some((_, Some(parser::Connector::And | parser::Connector::Or)))
+    )
+}
+
 /// Expand a Word into a String using the current environment.
 async fn expand_word(os: Arc<dyn Kernel>, proc: &mut Process, word: &Word) -> String {
     let mut result = String::new();
+    if parser::is_array_literal(word) {
+        refuse_array(proc);
+        return result;
+    }
     for part in word {
         expand_part(os.clone(), proc, part, &mut result).await;
     }
@@ -384,6 +415,10 @@ async fn expand_word_split(os: Arc<dyn Kernel>, proc: &mut Process, word: &Word)
         .get("IFS")
         .cloned()
         .unwrap_or_else(|| " \t\n".into());
+    if parser::is_array_literal(word) {
+        refuse_array(proc);
+        return Vec::new();
+    }
     let mut segments: Vec<Segment> = vec![Segment::new()];
 
     for part in word {
@@ -465,6 +500,26 @@ fn expand_part_split<'a>(
                     segments.last_mut().unwrap().push(&val, splittable, false);
                 }
             }
+            WordPart::VarOp(name, op, word, colon) if op == "-" || op == "+" => {
+                if quoted {
+                    // A quoted expansion is one field even when it comes out empty.
+                    segments.last_mut().unwrap().push("", false, false);
+                }
+                if uses_alternate_word(proc, name, op, *colon) {
+                    for p in word {
+                        if !quoted && let WordPart::Literal(s) = p {
+                            // Unquoted, the word's own text is split like an expansion.
+                            segments.last_mut().unwrap().push(s, true, true);
+                        } else {
+                            expand_part_split(os.clone(), proc, p, segments, ifs, quoted).await;
+                        }
+                    }
+                } else if op == "-"
+                    && let Some(v) = resolve_var(proc, name)
+                {
+                    segments.last_mut().unwrap().push(&v, !quoted, false);
+                }
+            }
             WordPart::VarOp(..)
             | WordPart::Backtick(_)
             | WordPart::DollarParen(_)
@@ -486,6 +541,33 @@ fn expand_part_split<'a>(
             }
         }
     })
+}
+
+/// Whether `${name-word}` or `${name+word}` expands to `word` rather than to the value.
+fn uses_alternate_word(proc: &Process, name: &str, op: &str, colon: bool) -> bool {
+    let is_unset_or_null = match resolve_var(proc, name) {
+        None => true,
+        Some(v) => colon && v.is_empty(),
+    };
+    is_unset_or_null == (op == "-")
+}
+
+/// The variable and value that `key=value` sets, where `key+=value` appends.
+fn assignment(proc: &Process, key: String, value: String) -> (String, String) {
+    match key.strip_suffix('+') {
+        Some(base) => {
+            let mut joined = proc.env.get(base).cloned().unwrap_or_default();
+            joined.push_str(&value);
+            (base.to_string(), joined)
+        }
+        None => (key, value),
+    }
+}
+
+/// Arrays parse so that a function body holding one defines as in bash; running one is refused.
+fn refuse_array(proc: &mut Process) {
+    proc.err_msg("strands-shell: arrays are not supported");
+    proc.nounset_error = true;
 }
 
 /// Perform IFS field splitting on a single segment.
@@ -1234,8 +1316,19 @@ fn resolve_var(proc: &Process, name: &str) -> Option<String> {
                 None
             }
         }
-        _ => proc.env.get(name).cloned(),
+        _ => match split_subscript(name) {
+            Some((base, "@" | "*" | "0")) => proc.env.get(base).cloned(),
+            Some(_) => None,
+            None => proc.env.get(name).cloned(),
+        },
     }
+}
+
+/// `name[subscript]` split in two, or `None` for a plain name.
+fn split_subscript(name: &str) -> Option<(&str, &str)> {
+    let open = name.find('[')?;
+    let inner = name[open + 1..].strip_suffix(']')?;
+    Some((&name[..open], inner))
 }
 
 /// Check nounset: if `set -u` is active and the variable is unset, print error and set flag.
@@ -1250,7 +1343,7 @@ fn check_nounset(proc: &mut Process, name: &str) -> bool {
         n if n.len() == 1 && n.as_bytes()[0].is_ascii_digit() => return false,
         _ => {}
     }
-    if proc.env.get(name).is_none() {
+    if resolve_var(proc, name).is_none() {
         proc.err_msg(&format!("strands-shell: {name}: parameter not set"));
         proc.nounset_error = true;
         return true;
@@ -1283,7 +1376,10 @@ fn expand_part<'a>(
                 };
                 match op.as_str() {
                     "len" => {
-                        let len = val.as_deref().unwrap_or("").len();
+                        let len = match split_subscript(name) {
+                            Some((_, "@" | "*")) => usize::from(val.is_some()),
+                            _ => val.as_deref().unwrap_or("").len(),
+                        };
                         out.push_str(&len.to_string());
                     }
                     "-" => {
@@ -1673,6 +1769,24 @@ async fn execute_captured_control_flow(
     result
 }
 
+/// Run one pipeline with its stdout captured, through the dispatch a direct run takes.
+async fn capture_pipeline_checked(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    pipeline: &[parser::Command],
+) -> (Result<i32, ControlFlow>, String) {
+    let saved_capture = std::mem::replace(&mut proc.capture, true);
+    let saved_output = std::mem::take(&mut proc.captured_output);
+    let mut saved_stdout = Process::empty();
+    proc.transfer_fd(STDOUT, &mut saved_stdout);
+    let result = Box::pin(execute_pipeline_checked(os, proc, pipeline)).await;
+    proc.capture = saved_capture;
+    proc.close(STDOUT);
+    saved_stdout.transfer_fd(STDOUT, proc);
+    let output = std::mem::replace(&mut proc.captured_output, saved_output);
+    (result, output)
+}
+
 /// The exit status of a captured command line that ran to its end or stopped on control flow.
 fn captured_status(result: Result<i32, ControlFlow>, last_exit: i32) -> i32 {
     match result {
@@ -1715,12 +1829,16 @@ async fn run_capturing_status(
                     }
                 }
                 Item::Pipeline(pipeline, negated) => {
-                    let (mut exit, out) =
-                        execute_pipeline_capture(os.clone(), proc, pipeline).await;
-                    if *negated {
-                        exit = if exit == 0 { 1 } else { 0 };
+                    match capture_pipeline_checked(os.clone(), proc, pipeline).await {
+                        (Ok(exit), out) => {
+                            let exit = if *negated { i32::from(exit == 0) } else { exit };
+                            (exit, out)
+                        }
+                        (Err(control), out) => {
+                            flow = Some(control);
+                            (proc.last_exit, out)
+                        }
                     }
-                    (exit, out)
                 }
                 Item::Group(cl) => {
                     let (s, result) = Box::pin(run_capturing_status(os.clone(), proc, cl)).await;
@@ -1739,8 +1857,10 @@ async fn run_capturing_status(
                         sub.err_msg(msg);
                         (1, String::new())
                     } else {
+                        proc.transfer_fd(STDIN, &mut sub);
                         let (s, result) =
                             Box::pin(run_capturing_status(os.clone(), &mut sub, cl)).await;
+                        sub.transfer_fd(STDIN, proc);
                         (captured_status(result, sub.last_exit), s)
                     }
                 }
@@ -1944,11 +2064,16 @@ async fn run_capturing_status(
                             item: item.clone(),
                             redirects: redirects.clone(),
                         };
-                        match Box::pin(execute_item(os.clone(), proc, &cr)).await {
-                            Ok(exit) => (exit, String::new()),
+                        let saved_capture = std::mem::replace(&mut proc.capture, true);
+                        let saved_output = std::mem::take(&mut proc.captured_output);
+                        let result = Box::pin(execute_item(os.clone(), proc, &cr)).await;
+                        proc.capture = saved_capture;
+                        let out = std::mem::replace(&mut proc.captured_output, saved_output);
+                        match result {
+                            Ok(exit) => (exit, out),
                             Err(control) => {
                                 flow = Some(control);
-                                (proc.last_exit, String::new())
+                                (proc.last_exit, out)
                             }
                         }
                     } else {
@@ -2075,7 +2200,9 @@ async fn execute_item(
                 sub.err_msg(msg);
                 return Ok(1);
             }
+            proc.transfer_fd(STDIN, &mut sub);
             let r = Box::pin(execute_command_line_inner(os, &mut sub, cl)).await;
+            sub.transfer_fd(STDIN, proc);
             if proc.capture {
                 proc.captured_output.push_str(&sub.captured_output);
                 proc.captured_stderr.push_str(&sub.captured_stderr);
@@ -2173,43 +2300,86 @@ async fn execute_item(
             }
             // For stdout/stderr redirects, capture output and write to target
             if !stdout_expanded.is_empty() {
-                // Open the targets before the body runs.
+                // Open the targets before the body runs. fd 1 and fd 2 each end at one sink,
+                // decided by the redirects in order.
+                let mut sinks = [GroupSink::Stdout, GroupSink::Stderr];
                 let mut writers = Vec::new();
                 for (redir, target) in &stdout_expanded {
-                    let fd_num = match redir {
+                    let index = match redir {
                         Redirect::Write(fd, _)
                         | Redirect::Append(fd, _)
                         | Redirect::Clobber(fd, _)
-                        | Redirect::DupWrite(fd, _) => *fd,
+                        | Redirect::DupWrite(fd, _) => match *fd {
+                            STDOUT => 0,
+                            STDERR => 1,
+                            _ => continue,
+                        },
                         _ => continue,
                     };
-                    if fd_num == STDOUT || fd_num == 1 {
-                        let flags = match redir {
-                            Redirect::Append(..) => OpenFlags::append(),
-                            _ => OpenFlags::write(),
+                    if let Redirect::DupWrite(..) = redir {
+                        sinks[index] = match target.as_str() {
+                            "1" => sinks[0],
+                            "2" => sinks[1],
+                            _ => continue,
                         };
-                        match os.open(proc, target, flags).await {
-                            Ok(fd) => writers.extend(proc.take_writer(fd).map(|w| (target, w))),
-                            Err(e) => {
-                                if !stdin_expanded.is_empty() {
-                                    proc.close(STDIN);
-                                    saved_stdin.transfer_fd(STDIN, proc);
-                                }
-                                proc.err_msg(&format!("strands-shell: {target}: {e}"));
-                                return Ok(1);
+                        continue;
+                    }
+                    let flags = match redir {
+                        Redirect::Append(..) => OpenFlags::append(),
+                        _ => OpenFlags::write(),
+                    };
+                    match os.open(proc, target, flags).await {
+                        Ok(fd) => {
+                            if let Ok(w) = proc.take_writer(fd) {
+                                sinks[index] = GroupSink::File(writers.len());
+                                writers.push((target, w, String::new()));
                             }
+                        }
+                        Err(e) => {
+                            if !stdin_expanded.is_empty() {
+                                proc.close(STDIN);
+                                saved_stdin.transfer_fd(STDIN, proc);
+                            }
+                            proc.err_msg(&format!("strands-shell: {target}: {e}"));
+                            return Ok(1);
                         }
                     }
                 }
+                // A redirected stream is captured while the body runs, even when the caller
+                // installed a writer on it.
+                let mut outer_fds = Process::empty();
+                let unredirected = [GroupSink::Stdout, GroupSink::Stderr];
+                for ((fd, sink), default) in
+                    [STDOUT, STDERR].into_iter().zip(sinks).zip(unredirected)
+                {
+                    if sink != default {
+                        proc.transfer_fd(fd, &mut outer_fds);
+                    }
+                }
+                let outer_stderr = std::mem::take(&mut proc.captured_stderr);
                 let inner_cl = vec![(*item.clone(), None)];
                 let (captured, result) =
                     Box::pin(run_capturing_status(os.clone(), proc, &inner_cl)).await;
+                let stderr_text = std::mem::replace(&mut proc.captured_stderr, outer_stderr);
+                for fd in [STDOUT, STDERR] {
+                    if outer_fds.has_fd(fd) {
+                        proc.close(fd);
+                        outer_fds.transfer_fd(fd, proc);
+                    }
+                }
                 if !stdin_expanded.is_empty() {
                     proc.close(STDIN);
                     saved_stdin.transfer_fd(STDIN, proc);
                 }
-                for (target, mut w) in writers {
-                    if let Err(e) = w.write_all(captured.as_bytes()).await {
+                for (sink, text) in [(sinks[0], &captured), (sinks[1], &stderr_text)] {
+                    match sink {
+                        GroupSink::Stdout => proc.write_stdout(text),
+                        GroupSink::Stderr => proc.write_stderr(text),
+                        GroupSink::File(index) => writers[index].2.push_str(text),
+                    }
+                }
+                for (target, mut w, text) in writers {
+                    if let Err(e) = w.write_all(text.as_bytes()).await {
                         proc.err_msg(&format!("strands-shell: {target}: {e}"));
                         proc.last_exit = 1;
                     }
@@ -2228,6 +2398,15 @@ async fn execute_item(
             }
         }
     }
+}
+
+/// Where one of a redirected group's two output streams ends.
+#[derive(Clone, Copy, PartialEq)]
+enum GroupSink {
+    Stdout,
+    Stderr,
+    /// The writer at this index among the group's opened targets.
+    File(usize),
 }
 
 async fn execute_if(
@@ -2489,7 +2668,13 @@ async fn run_special(
                 None
             };
             proc.depth += 1;
-            let (exit, should_exit) = Box::pin(execute_sourced(os.clone(), proc, &content)).await;
+            let (exit, should_exit) = Box::pin(execute_source_file(
+                os.clone(),
+                proc,
+                &content,
+                Some(&args[0]),
+            ))
+            .await;
             proc.depth -= 1;
             if let Some(saved) = saved_args {
                 proc.args = saved;
@@ -2525,19 +2710,45 @@ async fn run_special_redirected(
             | Redirect::DupRead(_, word) => expand_word(os.clone(), proc, word).await,
             Redirect::HereDoc(..) => String::new(),
         };
-        // `N<&N` and `N>&N` leave the caller's fd as it is.
-        if let Redirect::DupRead(fd, _) | Redirect::DupWrite(fd, _) = redir
-            && target == fd.to_string()
-        {
-            continue;
-        }
         redirects.push((redir.clone(), target));
     }
     if proc.nounset_error {
         proc.nounset_error = false;
         return Err(ControlFlow::Exit(2));
     }
+    let body_os = os.clone();
+    run_redirected(os, proc, &redirects, move |proc| {
+        Box::pin(run_special(body_os, proc, special, args))
+    })
+    .await
+    .unwrap_or(Ok(1))
+}
 
+/// Run `body` in the current shell with expanded redirections applied to its I/O.
+///
+/// Returns `None`, without running `body`, when a redirection fails.
+async fn run_redirected<F>(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    redirects: &[(Redirect, String)],
+    body: F,
+) -> Option<Result<i32, ControlFlow>>
+where
+    F: for<'p> FnOnce(
+        &'p mut Process,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<i32, ControlFlow>> + 'p>,
+    >,
+{
+    // `N<&N` and `N>&N` leave the caller's fd as it is.
+    let redirects: Vec<(Redirect, String)> = redirects
+        .iter()
+        .filter(|(redir, target)| {
+            !matches!(redir, Redirect::DupRead(fd, _) | Redirect::DupWrite(fd, _)
+                if *target == fd.to_string())
+        })
+        .cloned()
+        .collect();
     // Channels stand for the caller's stdout and stderr, so the redirections apply in order.
     let mut io_proc = proc.fork();
     let (out_tx, mut out_rx) = os::pipe(64);
@@ -2548,7 +2759,7 @@ async fn run_special_redirected(
         drop(io_proc);
         tokio::task::yield_now().await;
         proc.err_msg(&format!("strands-shell: {msg}"));
-        return Ok(1);
+        return None;
     }
 
     let mut saved_stdin = Process::empty();
@@ -2562,7 +2773,7 @@ async fn run_special_redirected(
     let saved_stderr = std::mem::take(&mut proc.captured_stderr);
     let saved_err_tx = proc.take_err_tx();
 
-    let mut result = Box::pin(run_special(os, proc, special, args)).await;
+    let mut result = body(proc).await;
 
     let stdout = std::mem::replace(&mut proc.captured_output, saved_output);
     let stderr = std::mem::replace(&mut proc.captured_stderr, saved_stderr);
@@ -2621,7 +2832,7 @@ async fn run_special_redirected(
     if !to_stderr.is_empty() {
         proc.write_stderr(&to_stderr);
     }
-    result
+    Some(result)
 }
 
 /// Print xtrace for a command about to execute.
@@ -2831,7 +3042,9 @@ async fn execute_pipeline(
                 .saturating_sub(shell_proc.captured_output.len());
             let end = os::floor_char_boundary(&output, remaining);
             shell_proc.captured_output.push_str(&output[..end]);
-            shell_proc.err_msg("strands-shell: output size limit exceeded");
+            if !shell_proc.output_limit_reported() {
+                shell_proc.err_msg("strands-shell: output size limit exceeded");
+            }
             return 1;
         }
         shell_proc.captured_output.push_str(&output);
@@ -2861,6 +3074,54 @@ async fn settle_host_writes(proc: &mut Process, exit: i32) -> i32 {
     }
 }
 
+/// Whether Shell runs `name` itself rather than through the command fallback.
+fn runs_in_shell(proc: &Process, name: &str) -> bool {
+    builtins::lookup(name).is_some()
+        || proc.get_function(name).is_some()
+        || commands::lookup(name).is_some()
+        || name == "lash"
+        || name == "sh"
+}
+
+/// Status of a command that ran but whose status the kernel could not record.
+const RECORD_FAILURE_STATUS: i32 = 125;
+
+/// A command the kernel allowed, reported as dropped unless its status is reported.
+struct CheckedCommand {
+    os: Arc<dyn Kernel>,
+    request: Option<CommandRequest>,
+}
+
+impl Drop for CheckedCommand {
+    fn drop(&mut self) {
+        if let Some(request) = self.request.take() {
+            self.os.command_dropped(&request);
+        }
+    }
+}
+
+/// Report a checked command's status to the kernel, and return the status the stage ends with.
+async fn report_finished(
+    os: &dyn Kernel,
+    proc: &mut Process,
+    command: Option<CheckedCommand>,
+    status: i32,
+) -> i32 {
+    let Some(request) = command.and_then(|mut command| command.request.take()) else {
+        return status;
+    };
+    match os.command_finished(&request, status).await {
+        Ok(()) => status,
+        Err(e) => {
+            proc.err_msg(&format!(
+                "strands-shell: {}: finished with status {status}, but the kernel could not record it: {e}",
+                request.program()
+            ));
+            RECORD_FAILURE_STATUS
+        }
+    }
+}
+
 async fn run_pipeline(
     os: Arc<dyn Kernel>,
     shell_proc: &mut Process,
@@ -2884,10 +3145,9 @@ async fn run_pipeline(
         expanded_args.push(expand_words(os.clone(), shell_proc, &cmd.args).await);
         let mut env = Vec::new();
         for (k, v) in &cmd.env {
-            env.push((
-                expand_word(os.clone(), shell_proc, k).await,
-                expand_word(os.clone(), shell_proc, v).await,
-            ));
+            let key = expand_word(os.clone(), shell_proc, k).await;
+            let value = expand_word(os.clone(), shell_proc, v).await;
+            env.push(assignment(shell_proc, key, value));
         }
         expanded_env.push(env);
         let mut redirs = Vec::new();
@@ -2975,6 +3235,42 @@ async fn run_pipeline(
         }
     }
 
+    // Ask the kernel about each command, before any stage starts.
+    let mut requests: Vec<Option<CheckedCommand>> = Vec::with_capacity(len);
+    for words in &expanded_args {
+        let Some((mut program, mut args)) = words.split_first() else {
+            requests.push(None);
+            continue;
+        };
+        // `builtin NAME` runs the builtin NAME, so the kernel decides NAME.
+        while program == "builtin"
+            && let Some((inner, rest)) = args.split_first()
+            && builtins::lookup(inner).is_some()
+        {
+            (program, args) = (inner, rest);
+        }
+        if !runs_in_shell(shell_proc, program) {
+            if os.command_fallback().is_some() {
+                let request = CommandRequest::new(program, args, &shell_proc.cwd);
+                if let Err(e) = os.check_fallback(&request).await {
+                    shell_proc.err_msg(&format!("strands-shell: {program}: {e}"));
+                    return (126, String::new());
+                }
+            }
+            requests.push(None);
+            continue;
+        }
+        let request = CommandRequest::new(program, args, &shell_proc.cwd);
+        if let Err(e) = os.check_command(&request).await {
+            shell_proc.err_msg(&format!("strands-shell: {program}: {e}"));
+            return (126, String::new());
+        }
+        requests.push(Some(CheckedCommand {
+            os: os.clone(),
+            request: Some(request),
+        }));
+    }
+
     // Single command: check for builtins
     if len == 1 {
         if let Some(f) = builtins::lookup(&expanded_args[0][0]) {
@@ -2986,14 +3282,26 @@ async fn run_pipeline(
             shell_proc.transfer_fd(STDIN, &mut io_proc);
             let (out_tx, out_rx) = os::pipe(64);
             let (err_tx, err_rx) = os::pipe(64);
-            io_proc.set_channel_writer(STDOUT, out_tx);
-            io_proc.set_channel_writer(STDERR, err_tx.clone());
+            // A writer the caller installed takes the place of the local pipe.
+            if shell_proc.inherit_channel_writer(STDOUT, &mut io_proc) {
+                drop(out_tx);
+            } else {
+                io_proc.set_channel_writer(STDOUT, out_tx);
+            }
+            let caller_stderr = shell_proc.inherit_channel_writer(STDERR, &mut io_proc);
+            if !caller_stderr {
+                io_proc.set_channel_writer(STDERR, err_tx.clone());
+            }
             shell_proc.set_err_tx(err_tx);
 
             // Apply redirects to the io_proc so builtins see them
             if let Err(e) = apply_redirects(&os, &mut io_proc, &expanded_redirects[0]).await {
                 shell_proc.clear_err_tx();
+                if caller_stderr && let Some(tx) = shell_proc.stderr_channel() {
+                    shell_proc.set_err_tx(tx);
+                }
                 shell_proc.err_msg(&format!("strands-shell: {e}"));
+                shell_proc.clear_err_tx();
                 return (1, String::new());
             }
             // Builtin diagnostics follow the command's own stderr redirection.
@@ -3097,10 +3405,9 @@ async fn run_pipeline(
                 shell_proc.captured_stderr.push_str(&stderr_str);
             }
 
-            return match result {
-                Ok(code) => (code, stdout_str),
-                Err(_) => (1, stdout_str),
-            };
+            let status = result.unwrap_or(1);
+            let status = report_finished(os.as_ref(), shell_proc, requests[0].take(), status).await;
+            return (status, stdout_str);
         }
 
         // Single command: check for functions
@@ -3109,19 +3416,40 @@ async fn run_pipeline(
                 std::mem::replace(&mut shell_proc.args, expanded_args[0][1..].to_vec());
             shell_proc.push_local_scope();
             shell_proc.depth += 1;
-            let exit = match Box::pin(execute_command_line_inner(
-                os.clone(),
-                shell_proc,
-                &func_body,
-            ))
-            .await
-            {
+            let result = if expanded_redirects[0].is_empty() {
+                Some(
+                    Box::pin(execute_command_line_inner(
+                        os.clone(),
+                        shell_proc,
+                        &func_body,
+                    ))
+                    .await,
+                )
+            } else {
+                let body_os = os.clone();
+                run_redirected(
+                    os.clone(),
+                    shell_proc,
+                    &expanded_redirects[0],
+                    move |proc| {
+                        Box::pin(async move {
+                            execute_command_line_inner(body_os, proc, &func_body).await
+                        })
+                    },
+                )
+                .await
+            };
+            // A failed redirect leaves the function's check unreported, so it is dropped.
+            let started = result.is_some();
+            let exit = match result.unwrap_or(Ok(1)) {
                 Ok(code) => code,
                 Err(ControlFlow::Return(code)) => code,
                 Err(ControlFlow::Exit(code)) => {
                     shell_proc.depth -= 1;
                     shell_proc.pop_local_scope();
                     shell_proc.args = saved_args;
+                    let code =
+                        report_finished(os.as_ref(), shell_proc, requests[0].take(), code).await;
                     return (code, String::new());
                 }
                 Err(_) => shell_proc.last_exit,
@@ -3133,6 +3461,11 @@ async fn run_pipeline(
                 std::mem::take(&mut shell_proc.captured_output)
             } else {
                 String::new()
+            };
+            let exit = if started {
+                report_finished(os.as_ref(), shell_proc, requests[0].take(), exit).await
+            } else {
+                exit
             };
             return (exit, func_output);
         }
@@ -3163,16 +3496,22 @@ async fn run_pipeline(
         procs[i + 1].set_channel_reader(STDIN, rx);
     }
 
-    // Last stage stdout: channel back to us
+    // Last stage stdout: the caller's writer, or a channel back to us
     let (last_tx, last_rx) = os::pipe(64);
-    procs[len - 1].set_channel_writer(STDOUT, last_tx);
+    if shell_proc.inherit_channel_writer(STDOUT, &mut procs[len - 1]) {
+        drop(last_tx);
+    } else {
+        procs[len - 1].set_channel_writer(STDOUT, last_tx);
+    }
 
-    // Every stage gets a stderr channel back to us
+    // Every stage gets the caller's stderr writer, or a stderr channel back to us
     let mut stderr_rxs = Vec::with_capacity(len);
     for p in &mut procs {
         let (tx, rx) = os::pipe(64);
-        p.set_err_tx(tx.clone());
-        p.set_channel_writer(STDERR, tx);
+        if !shell_proc.inherit_channel_writer(STDERR, p) {
+            p.set_channel_writer(STDERR, tx.clone());
+        }
+        p.set_err_tx(tx);
         stderr_rxs.push(rx);
     }
 
@@ -3214,6 +3553,9 @@ async fn run_pipeline(
                         if args.is_empty() {
                             return 0;
                         }
+                        // Capture both streams, so each reaches this stage's redirected fd.
+                        state_proc.capture = true;
+                        state_proc.clear_err_tx();
                         let exit = run_script(os, &mut state_proc, &args[0], &args[1..]).await;
                         let output = std::mem::take(&mut state_proc.captured_output);
                         if !output.is_empty()
@@ -3221,11 +3563,25 @@ async fn run_pipeline(
                         {
                             let _ = w.write_all(output.as_bytes()).await;
                         }
+                        let errors = std::mem::take(&mut state_proc.captured_stderr);
+                        if !errors.is_empty()
+                            && let Ok(mut w) = crate::io::stderr()
+                        {
+                            let _ = w.write_all(errors.as_bytes()).await;
+                        }
                         return exit;
                     }
                     if let Some(f) = builtin {
                         return match f(os.as_ref(), &mut state_proc, &args).await {
                             Ok(code) => code,
+                            // A reader that went away stops the writer quietly, as SIGPIPE does.
+                            Err(e)
+                                if e.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                                    io.kind() == std::io::ErrorKind::BrokenPipe
+                                }) =>
+                            {
+                                1
+                            }
                             Err(e) => {
                                 if let Ok(mut w) = crate::io::stderr() {
                                     let _ = w
@@ -3268,13 +3624,19 @@ async fn run_pipeline(
                         {
                             let _ = w.write_all(output.as_bytes()).await;
                         }
+                        let errors = std::mem::take(&mut state_proc.captured_stderr);
+                        if !errors.is_empty()
+                            && let Ok(mut w) = crate::io::stderr()
+                        {
+                            let _ = w.write_all(errors.as_bytes()).await;
+                        }
                         return exit;
                     }
                     unreachable!()
                 }),
             ));
             tasks.own(&handle);
-            handles.push(handle);
+            handles.push((i, handle));
         } else {
             // External commands
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
@@ -3319,7 +3681,7 @@ async fn run_pipeline(
                 }),
             ));
             tasks.own(&handle);
-            handles.push(handle);
+            handles.push((i, handle));
         }
     }
 
@@ -3396,9 +3758,10 @@ async fn run_pipeline(
 
     // Wait for all command tasks
     let mut last_exit = 0;
-    for handle in handles {
+    for (stage, handle) in handles {
         if let Ok(exit) = handle.await {
-            last_exit = exit;
+            last_exit =
+                report_finished(os.as_ref(), shell_proc, requests[stage].take(), exit).await;
         }
     }
 

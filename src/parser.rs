@@ -164,6 +164,7 @@ pub(crate) fn is_definite_error(err: &str) -> bool {
         || err.starts_with("expected filename after ")
         || err == "expected command before '|'"
         || err == "empty group"
+        || err == "Opened parentheses without closing"
 }
 
 /// Parse with a line reader for here-documents.
@@ -181,7 +182,17 @@ pub fn parse_with_aliases(
     read_line: &mut dyn FnMut(&str) -> Option<String>,
     aliases: &std::collections::HashMap<String, String>,
 ) -> Result<CommandLine, String> {
-    let mut tokens = tokenize(input)?;
+    parse_source(input, read_line, aliases, false)
+}
+
+/// Parse a source statement with `more_input` indicating whether another physical line is available.
+pub(crate) fn parse_source(
+    input: &str,
+    read_line: &mut dyn FnMut(&str) -> Option<String>,
+    aliases: &std::collections::HashMap<String, String>,
+    more_input: bool,
+) -> Result<CommandLine, String> {
+    let mut tokens = tokenize(input, more_input)?;
     if tokens.is_empty() {
         return Ok(vec![]);
     }
@@ -221,7 +232,7 @@ fn expand_aliases(tokens: &mut Vec<Token>, aliases: &std::collections::HashMap<S
                 {
                     trail_space = val.ends_with(' ') || val.ends_with('\t');
                     seen.insert(name.clone());
-                    if let Ok(mut expanded) = tokenize(val) {
+                    if let Ok(mut expanded) = tokenize(val, false) {
                         tokens.remove(i);
                         for (j, tok) in expanded.drain(..).enumerate() {
                             tokens.insert(i + j, tok);
@@ -232,7 +243,7 @@ fn expand_aliases(tokens: &mut Vec<Token>, aliases: &std::collections::HashMap<S
                 break;
             }
             if !seen.is_empty() {
-                let expanded_count = tokens.len() - before_len + 1;
+                let expanded_count = tokens.len().saturating_sub(before_len - 1);
                 i += expanded_count;
                 cmd_pos = trail_space;
                 continue;
@@ -264,6 +275,9 @@ fn resolve_heredocs(
                         }
                     }
                 }
+            }
+            Item::Subshell(inner) if is_compound_stage(inner) => {
+                resolve_compound_stage_heredocs(inner, read_line)?;
             }
             Item::Group(inner) | Item::Subshell(inner) => resolve_heredocs(inner, read_line)?,
             Item::If {
@@ -534,6 +548,20 @@ fn collect_var_name(chars: &mut std::iter::Peekable<std::str::Chars>) -> String 
             break;
         }
     }
+    if !name.is_empty() && chars.peek() == Some(&'[') {
+        let mut lookahead = chars.clone();
+        let mut subscript = String::new();
+        for ch in lookahead.by_ref() {
+            subscript.push(ch);
+            if ch == ']' {
+                break;
+            }
+        }
+        if subscript.ends_with(']') {
+            name.push_str(&subscript);
+            *chars = lookahead;
+        }
+    }
     name
 }
 
@@ -590,24 +618,10 @@ fn collect_brace_word(
             parts.push(WordPart::SingleQuoted(sq));
         } else if ch == '"' {
             chars.next();
-            // Simplified: collect as literal for now
-            let mut dq = String::new();
-            loop {
-                match chars.next() {
-                    Some('"') => break,
-                    Some('\\') => match chars.next() {
-                        Some(c @ ('$' | '`' | '"' | '\\')) => dq.push(c),
-                        Some(c) => {
-                            dq.push('\\');
-                            dq.push(c);
-                        }
-                        None => return Err("unterminated double quote".into()),
-                    },
-                    Some(c) => dq.push(c),
-                    None => return Err("unterminated double quote".into()),
-                }
+            if !lit.is_empty() {
+                parts.push(WordPart::Literal(std::mem::take(&mut lit)));
             }
-            lit.push_str(&dq);
+            parts.push(collect_double_quoted(chars)?);
         } else if ch == '`' {
             chars.next();
             if !lit.is_empty() {
@@ -660,6 +674,57 @@ fn collect_dollar_paren(
     Ok(cmd)
 }
 
+/// Collect a double-quoted region. Assumes the opening `"` has been consumed.
+fn collect_double_quoted(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+) -> Result<WordPart, String> {
+    let mut dq_parts: Vec<WordPart> = Vec::new();
+    let mut dq_lit = String::new();
+    loop {
+        match chars.next() {
+            Some('"') => break,
+            Some('\\') => match chars.next() {
+                Some(c @ ('$' | '`' | '"' | '\\')) => dq_lit.push(c),
+                Some('\n') => {} // line continuation
+                Some(c) => {
+                    dq_lit.push('\\');
+                    dq_lit.push(c);
+                }
+                None => return Err("unterminated escape".into()),
+            },
+            Some('$') => match collect_dollar(chars)? {
+                Some(part) => {
+                    if !dq_lit.is_empty() {
+                        dq_parts.push(WordPart::Literal(std::mem::take(&mut dq_lit)));
+                    }
+                    dq_parts.push(part);
+                }
+                None => dq_lit.push('$'),
+            },
+            Some('`') => {
+                if !dq_lit.is_empty() {
+                    dq_parts.push(WordPart::Literal(std::mem::take(&mut dq_lit)));
+                }
+                let mut cmd = String::new();
+                loop {
+                    match chars.next() {
+                        Some('`') => break,
+                        Some(c) => cmd.push(c),
+                        None => return Err("unterminated backtick".into()),
+                    }
+                }
+                dq_parts.push(WordPart::Backtick(cmd));
+            }
+            Some(c) => dq_lit.push(c),
+            None => return Err("unterminated double quote".into()),
+        }
+    }
+    if !dq_lit.is_empty() {
+        dq_parts.push(WordPart::Literal(dq_lit));
+    }
+    Ok(WordPart::DoubleQuoted(dq_parts))
+}
+
 /// Collect a $VAR, ${VAR}, ${VAR op WORD}, or $(cmd) from the char stream.
 /// Returns a WordPart or None (bare $).
 fn collect_dollar(
@@ -710,7 +775,8 @@ pub fn collect_dollar_pub(
     collect_dollar(chars)
 }
 
-fn tokenize(input: &str) -> Result<Vec<Token>, String> {
+/// Tokenize shell input, treating a final unquoted backslash as incomplete when `more_input` is true.
+fn tokenize(input: &str, more_input: bool) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
 
@@ -850,21 +916,26 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
 
                 while let Some(&ch) = chars.peek() {
+                    if ch == '(' && parts.is_empty() && is_assignment_prefix(&literal) {
+                        chars.next();
+                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                        let list = collect_array_literal(&mut chars)?;
+                        parts.push(WordPart::Literal(format!("({list})")));
+                        continue;
+                    }
                     if " \t\n\r|;&<>()#".contains(ch) {
                         break;
                     }
                     match ch {
                         '\\' => {
                             chars.next();
-                            if let Some(&next) = chars.peek() {
-                                if next == '\n' {
-                                    chars.next();
+                            match chars.next() {
+                                Some('\n') => {}
+                                Some(next) => literal.push(next),
+                                None if more_input => {
+                                    return Err("unterminated escape".into());
                                 }
-                                // line continuation
-                                else {
-                                    literal.push(next);
-                                    chars.next();
-                                }
+                                None => {}
                             }
                         }
                         '\'' => {
@@ -887,55 +958,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                                 parts.push(WordPart::Literal(std::mem::take(&mut literal)));
                             }
                             chars.next();
-                            let mut dq_parts: Vec<WordPart> = Vec::new();
-                            let mut dq_lit = String::new();
-                            loop {
-                                match chars.next() {
-                                    Some('"') => break,
-                                    Some('\\') => match chars.next() {
-                                        Some(c @ ('$' | '`' | '"' | '\\')) => dq_lit.push(c),
-                                        Some('\n') => {} // line continuation
-                                        Some(c) => {
-                                            dq_lit.push('\\');
-                                            dq_lit.push(c);
-                                        }
-                                        None => return Err("unterminated escape".into()),
-                                    },
-                                    Some('$') => match collect_dollar(&mut chars)? {
-                                        Some(part) => {
-                                            if !dq_lit.is_empty() {
-                                                dq_parts.push(WordPart::Literal(std::mem::take(
-                                                    &mut dq_lit,
-                                                )));
-                                            }
-                                            dq_parts.push(part);
-                                        }
-                                        None => dq_lit.push('$'),
-                                    },
-                                    Some('`') => {
-                                        if !dq_lit.is_empty() {
-                                            dq_parts.push(WordPart::Literal(std::mem::take(
-                                                &mut dq_lit,
-                                            )));
-                                        }
-                                        let mut cmd = String::new();
-                                        loop {
-                                            match chars.next() {
-                                                Some('`') => break,
-                                                Some(c) => cmd.push(c),
-                                                None => return Err("unterminated backtick".into()),
-                                            }
-                                        }
-                                        dq_parts.push(WordPart::Backtick(cmd));
-                                    }
-                                    Some(c) => dq_lit.push(c),
-                                    None => return Err("unterminated double quote".into()),
-                                }
-                            }
-                            if !dq_lit.is_empty() {
-                                dq_parts.push(WordPart::Literal(dq_lit));
-                            }
-                            parts.push(WordPart::DoubleQuoted(dq_parts));
+                            parts.push(collect_double_quoted(&mut chars)?);
                         }
                         '$' => {
                             chars.next();
@@ -973,10 +996,14 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 if !literal.is_empty() {
                     parts.push(WordPart::Literal(literal));
                 }
+                if parts.is_empty() {
+                    continue;
+                }
 
                 // For reserved word matching, also store the plain text form.
                 // Only use Token::Word for purely literal words (no quotes).
-                let all_literal = parts.iter().all(|p| matches!(p, WordPart::Literal(_)));
+                let all_literal = parts.iter().all(|p| matches!(p, WordPart::Literal(_)))
+                    && !is_array_literal(&parts);
                 if all_literal {
                     let s = parts
                         .iter()
@@ -994,6 +1021,74 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     }
 
     Ok(tokens)
+}
+
+/// Whether `text` is `name=`, `name+=`, or `name[index]=` — the spelling an array literal follows.
+fn is_assignment_prefix(text: &str) -> bool {
+    let Some(name) = text.strip_suffix('=') else {
+        return false;
+    };
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let name = match name.find('[') {
+        Some(open) if name.ends_with(']') => &name[..open],
+        Some(_) => return false,
+        None => name,
+    };
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Collect the text of an array literal. Assumes the opening `(` has been consumed.
+fn collect_array_literal(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+) -> Result<String, String> {
+    let mut text = String::new();
+    let mut depth = 1usize;
+    let mut quote: Option<char> = None;
+    loop {
+        let Some(ch) = chars.next() else {
+            return Err("unterminated array literal".into());
+        };
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else if ch == '\\' && q == '"' {
+                    text.push(ch);
+                    if let Some(next) = chars.next() {
+                        text.push(next);
+                    }
+                    continue;
+                }
+                text.push(ch);
+            }
+            None => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    text.push(ch);
+                }
+                '\\' => {
+                    text.push(ch);
+                    if let Some(next) = chars.next() {
+                        text.push(next);
+                    }
+                }
+                '(' => {
+                    depth += 1;
+                    text.push(ch);
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(text);
+                    }
+                    text.push(ch);
+                }
+                _ => text.push(ch),
+            },
+        }
+    }
 }
 
 /// Get the Word representation from a token.
@@ -1162,6 +1257,15 @@ fn parse_command_line<'a>(
             continue;
         }
 
+        // A pipeline feeding a compound command: `cmd | while read x; do ...; done`
+        if pipeline_tokens.last() == Some(&&Token::Pipe) && opens_a_compound(&tokens[i]) {
+            pipeline_tokens.pop();
+            let item = parse_pipeline_into_compound(tokens, &mut i, &mut pipeline_tokens, negated)?;
+            negated = false;
+            result.push((item, None));
+            continue;
+        }
+
         // Check for unexpected reserved words at command position
         if at_start && is_reserved(&tokens[i]) {
             // Handle { ... } group
@@ -1181,6 +1285,17 @@ fn parse_command_line<'a>(
 
         match &tokens[i] {
             Token::RParen => return Err("unexpected ')'".into()),
+            // Function definition: function name { body; } or function name() { body; }
+            Token::Word(keyword)
+                if at_start
+                    && keyword == "function"
+                    && matches!(tokens.get(i + 1), Some(tok @ Token::Word(_)) if !is_reserved(tok)) =>
+            {
+                let (item, rest) = parse_function_keyword(&tokens[i + 1..])?;
+                i = tokens.len() - rest.len();
+                result.push((item, None));
+                continue;
+            }
             // Function definition: name() { body; }
             Token::Word(name)
                 if at_start
@@ -1290,6 +1405,164 @@ fn parse_command_line<'a>(
     }
 
     Ok((result, &tokens[i..]))
+}
+
+/// Parse `name { body; }` or `name() { body; }` after the `function` keyword.
+fn parse_function_keyword(tokens: &[Token]) -> Result<(Item, &[Token]), String> {
+    let Some(Token::Word(name)) = tokens.first() else {
+        return Err("expected function name".into());
+    };
+    let mut rest = &tokens[1..];
+    if rest.first() == Some(&Token::LParen) && rest.get(1) == Some(&Token::RParen) {
+        rest = &rest[2..];
+    }
+    let rest = expect_word(rest, "{")?;
+    let (body, rest) = parse_command_line(rest, &["}"])?;
+    let rest = expect_word(rest, "}")?;
+    let item = Item::Function {
+        name: name.clone(),
+        body,
+    };
+    Ok((item, rest))
+}
+
+/// The function that stands for a compound command piped from a pipeline.
+pub(crate) const COMPOUND_STAGE: &str = "_strands_compound";
+
+/// Parse `head | compound [redirects] [| tail]`, with the compound at `tokens[*i]`.
+///
+/// The compound becomes the body of a function that the pipeline calls as one stage, in a subshell.
+fn parse_pipeline_into_compound<'a>(
+    tokens: &'a [Token],
+    i: &mut usize,
+    pipeline_tokens: &mut Vec<&'a Token>,
+    negated: bool,
+) -> Result<Item, String> {
+    let mut stages = build_pipeline(pipeline_tokens)?;
+    pipeline_tokens.clear();
+    let (compound, rest) = parse_compound(&tokens[*i..])?;
+    *i = tokens.len() - rest.len();
+    let (compound, tail) = match collect_compound_pipe(tokens, i, pipeline_tokens, compound, false)?
+    {
+        Item::CompoundPipeline { compound, tail, .. } => (*compound, tail),
+        compound => (compound, Vec::new()),
+    };
+    let (compound, redirects) = match compound {
+        Item::CompoundRedirect { item, redirects } => (*item, redirects),
+        compound => (compound, Vec::new()),
+    };
+    let body = match compound {
+        Item::Group(body) | Item::Subshell(body) => body,
+        compound => vec![(compound, None)],
+    };
+    stages.push(Command {
+        env: Vec::new(),
+        args: vec![
+            vec![WordPart::Literal(COMPOUND_STAGE.into())],
+            vec![WordPart::DoubleQuoted(vec![WordPart::Var("@".into())])],
+        ],
+        redirects,
+    });
+    stages.extend(tail);
+    Ok(Item::Subshell(vec![
+        (
+            Item::Function {
+                name: COMPOUND_STAGE.into(),
+                body,
+            },
+            Some(Connector::Semi),
+        ),
+        (Item::Pipeline(stages, negated), None),
+    ]))
+}
+
+/// Whether `cl` is the subshell body that [`parse_pipeline_into_compound`] builds.
+fn is_compound_stage(cl: &CommandLine) -> bool {
+    matches!(
+        cl.as_slice(),
+        [(Item::Function { name, .. }, Some(Connector::Semi)), (Item::Pipeline(..), None)]
+            if name == COMPOUND_STAGE
+    )
+}
+
+/// Fill the here-documents of a compound stage in the order they appear in the source.
+fn resolve_compound_stage_heredocs(
+    cl: &mut CommandLine,
+    read_line: &mut dyn FnMut(&str) -> Option<String>,
+) -> Result<(), String> {
+    let [
+        (Item::Function { body, .. }, _),
+        (Item::Pipeline(stages, _), _),
+    ] = cl.as_mut_slice()
+    else {
+        return Ok(());
+    };
+    let call = stages
+        .iter()
+        .position(|cmd| cmd.args.first() == Some(&vec![WordPart::Literal(COMPOUND_STAGE.into())]))
+        .unwrap_or(stages.len());
+    for cmd in &mut stages[..call] {
+        resolve_command_heredocs(cmd, read_line)?;
+    }
+    resolve_heredocs(body, read_line)?;
+    for cmd in &mut stages[call..] {
+        resolve_command_heredocs(cmd, read_line)?;
+    }
+    Ok(())
+}
+
+/// Fill the here-documents of one simple command.
+fn resolve_command_heredocs(
+    cmd: &mut Command,
+    read_line: &mut dyn FnMut(&str) -> Option<String>,
+) -> Result<(), String> {
+    for redir in &mut cmd.redirects {
+        if let Redirect::HereDoc(_, delim, body, strip, _) = redir {
+            *body = read_heredoc_body(delim, *strip, read_line)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `word` holds an array literal, `name=(…)`, which the tokenizer encodes as two adjacent literals.
+pub(crate) fn is_array_literal(word: &[WordPart]) -> bool {
+    word.windows(2).any(
+        |pair| matches!(pair, [WordPart::Literal(_), WordPart::Literal(list)] if list.starts_with('(')),
+    )
+}
+
+/// Whether `tok` begins a compound command.
+fn opens_a_compound(tok: &Token) -> bool {
+    match tok {
+        Token::LParen => true,
+        Token::Word(w) => matches!(w.as_str(), "{" | "if" | "while" | "until" | "for" | "case"),
+        _ => false,
+    }
+}
+
+/// Parse one compound command starting at `tokens[0]`.
+fn parse_compound(tokens: &[Token]) -> Result<(Item, &[Token]), String> {
+    match &tokens[0] {
+        Token::LParen => {
+            let (group, rest) = parse_command_line(&tokens[1..], &[")"])?;
+            let rest = expect_rparen(rest)?;
+            if group.is_empty() {
+                return Err("empty group".into());
+            }
+            Ok((Item::Subshell(group), rest))
+        }
+        Token::Word(w) if w == "{" => {
+            let (group, rest) = parse_command_line(&tokens[1..], &["}"])?;
+            let rest = expect_word(rest, "}")?;
+            Ok((Item::Group(group), rest))
+        }
+        Token::Word(w) if w == "if" => parse_if(&tokens[1..]),
+        Token::Word(w) if w == "while" => parse_while_until(&tokens[1..], false),
+        Token::Word(w) if w == "until" => parse_while_until(&tokens[1..], true),
+        Token::Word(w) if w == "for" => parse_for(&tokens[1..]),
+        Token::Word(w) if w == "case" => parse_case(&tokens[1..]),
+        other => Err(format!("unexpected '{}'", tok_name(other))),
+    }
 }
 
 /// Expect `)` at the front of the slice, consuming it.
@@ -1649,6 +1922,20 @@ mod tests {
     }
 
     #[test]
+    fn line_continuations_do_not_create_words() {
+        for (continued, joined) in [
+            ("printf '%s' one \\\n  two", "printf '%s' one two"),
+            (
+                "if false || {\n  true; \\\n  }; then :; fi",
+                "if false || {\n  true;   }; then :; fi",
+            ),
+            ("printf '%s' '' \\\n  \"\"", "printf '%s' '' \"\""),
+        ] {
+            assert_eq!(p(continued).unwrap(), p(joined).unwrap(), "{continued}");
+        }
+    }
+
+    #[test]
     fn simple_command() {
         let result = p("ls -la /tmp").unwrap();
         let p = pipelines(&result);
@@ -1974,6 +2261,8 @@ mod tests {
             "| echo",
             "( )",
             "echo a; ;;",
+            "echo *(N)",
+            "echo a (",
         ] {
             let err = p(input).unwrap_err();
             assert!(is_definite_error(&err), "{input:?}: {err}");
@@ -1993,5 +2282,178 @@ mod tests {
             let err = p(input).unwrap_err();
             assert!(!is_definite_error(&err), "{input:?}: {err}");
         }
+    }
+
+    fn lit(s: &str) -> WordPart {
+        WordPart::Literal(s.into())
+    }
+
+    fn simple(args: &[&str]) -> Command {
+        Command {
+            env: Vec::new(),
+            args: args.iter().map(|a| vec![lit(a)]).collect(),
+            redirects: Vec::new(),
+        }
+    }
+
+    fn compound_call(redirects: Vec<Redirect>) -> Command {
+        Command {
+            env: Vec::new(),
+            args: vec![
+                vec![lit(COMPOUND_STAGE)],
+                vec![WordPart::DoubleQuoted(vec![WordPart::Var("@".into())])],
+            ],
+            redirects,
+        }
+    }
+
+    #[test]
+    fn a_pipe_into_a_loop_becomes_a_function_stage_in_a_subshell() {
+        let cl = p("a | while read l; do b; done").unwrap();
+        let body = vec![(
+            Item::While {
+                condition: vec![(
+                    Item::Pipeline(vec![simple(&["read", "l"])], false),
+                    Some(Connector::Semi),
+                )],
+                body: vec![(
+                    Item::Pipeline(vec![simple(&["b"])], false),
+                    Some(Connector::Semi),
+                )],
+            },
+            None,
+        )];
+        let expected = vec![(
+            Item::Subshell(vec![
+                (
+                    Item::Function {
+                        name: COMPOUND_STAGE.into(),
+                        body,
+                    },
+                    Some(Connector::Semi),
+                ),
+                (
+                    Item::Pipeline(vec![simple(&["a"]), compound_call(Vec::new())], false),
+                    None,
+                ),
+            ]),
+            None,
+        )];
+        assert_eq!(cl, expected);
+    }
+
+    #[test]
+    fn a_piped_group_gives_its_body_to_the_stage_and_keeps_redirects_and_tail() {
+        let cl = p("! a | { b; } 2>e | c && d").unwrap();
+        let [
+            (Item::Subshell(inner), Some(Connector::And)),
+            (Item::Pipeline(..), None),
+        ] = cl.as_slice()
+        else {
+            panic!("{cl:?}");
+        };
+        let expected = vec![
+            (
+                Item::Function {
+                    name: COMPOUND_STAGE.into(),
+                    body: vec![(
+                        Item::Pipeline(vec![simple(&["b"])], false),
+                        Some(Connector::Semi),
+                    )],
+                },
+                Some(Connector::Semi),
+            ),
+            (
+                Item::Pipeline(
+                    vec![
+                        simple(&["a"]),
+                        compound_call(vec![Redirect::Write(2, vec![lit("e")])]),
+                        simple(&["c"]),
+                    ],
+                    true,
+                ),
+                None,
+            ),
+        ];
+        assert_eq!(inner, &expected);
+    }
+
+    #[test]
+    fn a_piped_subshell_gives_its_body_to_the_stage() {
+        let cl = p("a | ( b )").unwrap();
+        let [(Item::Subshell(inner), None)] = cl.as_slice() else {
+            panic!("{cl:?}");
+        };
+        assert!(matches!(
+            inner.as_slice(),
+            [(Item::Function { body, .. }, _), _]
+                if body == &vec![(Item::Pipeline(vec![simple(&["b"])], false), None)]
+        ));
+    }
+
+    #[test]
+    fn here_documents_around_a_compound_stage_fill_in_source_order() {
+        let mut lines = ["one", "A", "two", "B", "three", "C"]
+            .into_iter()
+            .map(String::from);
+        let cl = parse_with_reader("cat <<A | while read l; do cat <<B; done <<C", &mut |_| {
+            lines.next()
+        })
+        .unwrap();
+        let [(Item::Subshell(inner), None)] = cl.as_slice() else {
+            panic!("{cl:?}");
+        };
+        let [
+            (Item::Function { body, .. }, _),
+            (Item::Pipeline(stages, _), _),
+        ] = inner.as_slice()
+        else {
+            panic!("{inner:?}");
+        };
+        let heredoc = |cmd: &Command| match cmd.redirects.as_slice() {
+            [Redirect::HereDoc(_, _, body, _, _)] => body.clone(),
+            other => panic!("{other:?}"),
+        };
+        let [
+            (
+                Item::While {
+                    body: loop_body, ..
+                },
+                _,
+            ),
+        ] = body.as_slice()
+        else {
+            panic!("{body:?}");
+        };
+        let [(Item::Pipeline(inner_cat, _), _)] = loop_body.as_slice() else {
+            panic!("{loop_body:?}");
+        };
+        assert_eq!(heredoc(&stages[0]), "one\n");
+        assert_eq!(heredoc(&inner_cat[0]), "two\n");
+        assert_eq!(heredoc(&stages[1]), "three\n");
+    }
+
+    #[test]
+    fn an_array_literal_is_two_adjacent_literals_and_an_escaped_one_is_one() {
+        let cl = p("x=(1 \"2 3\") y=\\(a\\) z+=() cmd w=(4)").unwrap();
+        let cmd = &pipelines(&cl)[0].0[0];
+        assert_eq!(
+            cmd.env,
+            vec![
+                (vec![lit("x")], vec![lit(""), lit("(1 \"2 3\")")]),
+                (vec![lit("y")], vec![lit("(a)")]),
+                (vec![lit("z+")], vec![lit(""), lit("()")]),
+            ]
+        );
+        assert_eq!(cmd.args[1], vec![lit("w="), lit("(4)")]);
+        assert!(is_array_literal(&cmd.env[0].1));
+        assert!(!is_array_literal(&cmd.env[1].1));
+        assert!(is_array_literal(&cmd.env[2].1));
+        assert!(is_array_literal(&cmd.args[1]));
+        assert!(!is_array_literal(&[
+            lit("a"),
+            WordPart::Var("b".into()),
+            lit("(c)")
+        ]));
     }
 }
