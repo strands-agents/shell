@@ -181,7 +181,7 @@ async fn run_script(
     let saved_args = std::mem::replace(&mut proc.args, args.to_vec());
     let saved_arg0 = std::mem::replace(&mut proc.arg0, script_path.to_string());
     proc.depth += 1;
-    let (exit, _) = execute_sourced(os, proc, &content).await;
+    let (exit, _) = execute_source_file(os, proc, &content, Some(script_path)).await;
     proc.depth -= 1;
     proc.args = saved_args;
     proc.arg0 = saved_arg0;
@@ -268,15 +268,27 @@ fn continues_line(line: &str) -> bool {
 /// Execute sourced file content incrementally, so aliases defined by earlier
 /// commands are visible when parsing later commands.
 pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &str) -> (i32, bool) {
+    execute_source_file(os, proc, input, None).await
+}
+
+/// [`execute_sourced`], naming `origin` and the line in a parse error.
+async fn execute_source_file(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    input: &str,
+    origin: Option<&str>,
+) -> (i32, bool) {
     let mut last_code = 0i32;
     let mut accum = String::new();
     let mut last_err = String::new();
+    let mut statement_line = 0;
     let lines: Vec<&str> = input.lines().collect();
     let mut i = 0;
 
     while i < lines.len() {
         if accum.is_empty() {
             accum = lines[i].to_string();
+            statement_line = i + 1;
         } else {
             accum.push('\n');
             accum.push_str(lines[i]);
@@ -295,6 +307,7 @@ pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &st
         };
 
         match parser::parse_source(&accum, &mut reader, &proc.aliases, i < lines.len()) {
+            Ok(cl) if line_idx == i && i < lines.len() && ends_with_and_or(&cl) => {}
             Ok(cl) => {
                 i = line_idx; // advance past any lines consumed by heredoc
                 accum.clear();
@@ -321,7 +334,8 @@ pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &st
                 }
             }
             Err(e) if parser::is_definite_error(&e) && !continues_line(lines[i - 1]) => {
-                proc.err_msg(&format!("strands-shell: line {i}: {e}"));
+                let file = origin.map(|o| format!("{o}: ")).unwrap_or_default();
+                proc.err_msg(&format!("strands-shell: {file}line {i}: {e}"));
                 return (1, false);
             }
             Err(e) => {
@@ -332,11 +346,22 @@ pub async fn execute_sourced(os: Arc<dyn Kernel>, proc: &mut Process, input: &st
     }
 
     if !accum.is_empty() && !last_err.is_empty() {
-        proc.err_msg(&format!("strands-shell: {last_err}"));
+        let at = origin
+            .map(|o| format!("{o}: line {statement_line}: "))
+            .unwrap_or_default();
+        proc.err_msg(&format!("strands-shell: {at}{last_err}"));
         return (1, false);
     }
 
     (last_code, false)
+}
+
+/// Whether `cl` ends with `&&` or `||`, so its last command is on a later line.
+fn ends_with_and_or(cl: &parser::CommandLine) -> bool {
+    matches!(
+        cl.last(),
+        Some((_, Some(parser::Connector::And | parser::Connector::Or)))
+    )
 }
 
 /// Expand a Word into a String using the current environment.
@@ -2626,7 +2651,13 @@ async fn run_special(
                 None
             };
             proc.depth += 1;
-            let (exit, should_exit) = Box::pin(execute_sourced(os.clone(), proc, &content)).await;
+            let (exit, should_exit) = Box::pin(execute_source_file(
+                os.clone(),
+                proc,
+                &content,
+                Some(&args[0]),
+            ))
+            .await;
             proc.depth -= 1;
             if let Some(saved) = saved_args {
                 proc.args = saved;

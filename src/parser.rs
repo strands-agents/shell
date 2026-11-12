@@ -164,6 +164,7 @@ pub(crate) fn is_definite_error(err: &str) -> bool {
         || err.starts_with("expected filename after ")
         || err == "expected command before '|'"
         || err == "empty group"
+        || err == "Opened parentheses without closing"
 }
 
 /// Parse with a line reader for here-documents.
@@ -2260,6 +2261,8 @@ mod tests {
             "| echo",
             "( )",
             "echo a; ;;",
+            "echo *(N)",
+            "echo a (",
         ] {
             let err = p(input).unwrap_err();
             assert!(is_definite_error(&err), "{input:?}: {err}");
