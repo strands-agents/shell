@@ -9475,6 +9475,28 @@ fn grep_perl_matches_like_gnu() {
 }
 
 #[test]
+fn grep_perl_vertical_whitespace() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let input = "printf 'a\u{000b}b\\na\u{000c}b\\na\u{000d}b\\na\u{0085}b\\na\u{2028}b\\na\u{2029}b\\naxb\\n'";
+        for (pattern, count) in [
+            (r"a\vb", "6\n"),
+            (r"a[\v]b", "6\n"),
+            (r"a[^\v]b", "1\n"),
+            (r"a[\vx]b", "7\n"),
+        ] {
+            let out = shell
+                .run(&format!("{input} | grep -cP '{pattern}'"))
+                .await;
+            assert_eq!(out.stdout, count, "{pattern}");
+            assert_eq!(out.stderr, "", "{pattern}");
+            assert_eq!(out.status, 0, "{pattern}");
+        }
+    }));
+}
+
+#[test]
 fn grep_perl_rejects_unsupported_constructs() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
@@ -9535,7 +9557,16 @@ fn grep_perl_rejects_unsupported_constructs() {
         ] {
             let out = shell.run(cmd).await;
             assert_eq!(out.stdout, "", "{cmd}: stdout");
-            assert_eq!(out.stderr, format!("grep: {err}\n"), "{cmd}: stderr");
+            let guidance = if err.starts_with("-P does not support") {
+                " (Rust regex engine); for extraction, match surrounding text with -o and trim it with sed or cut"
+            } else {
+                ""
+            };
+            assert_eq!(
+                out.stderr,
+                format!("grep: {err}{guidance}\n"),
+                "{cmd}: stderr"
+            );
             assert_eq!(out.status, 2, "{cmd}: status");
         }
     }));

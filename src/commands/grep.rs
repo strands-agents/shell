@@ -16,8 +16,9 @@ Options:
   -x, --line-regexp         match whole lines only
   -F, --fixed-strings       interpret PATTERN as fixed string
   -E, --extended-regexp     interpret PATTERN as extended regex (default)
-  -P, --perl-regexp         interpret PATTERN as a Perl regex (no lookaround,
-                            backreferences, atomic groups or possessive quantifiers)
+  -P, --perl-regexp         interpret PATTERN as a Perl-compatible subset
+                            (Rust regex engine; no lookaround, backreferences,
+                            atomic groups, possessive quantifiers, \\K or (?x))
   -e, --regexp PATTERN      use PATTERN for matching
   -q, --quiet, --silent     suppress all output
   -H, --with-filename       print filename with matches
@@ -353,11 +354,16 @@ fn perl_to_rust_regex(pat: &str) -> Result<String, &'static str> {
 }
 
 /// Writes the escape `\ch`; PCRE's `\<` and `\>` are literals, which the crate spells `<` and `>`.
+/// PCRE's `\v` includes every vertical whitespace character, not just VT.
 fn push_perl_escape(out: &mut String, ch: char) {
-    if ch != '<' && ch != '>' {
-        out.push('\\');
+    match ch {
+        '<' | '>' => out.push(ch),
+        'v' => out.push_str(r"[\x0A-\x0D\x{85}\x{2028}\x{2029}]"),
+        _ => {
+            out.push('\\');
+            out.push(ch);
+        }
     }
-    out.push(ch);
 }
 
 /// Builds the -P regex, refusing PCRE constructs the `regex` crate would reject or mis-match.
@@ -366,7 +372,11 @@ fn build_perl_regex(opts: &mut Opts) -> Result<regex::bytes::Regex, String> {
         return Err("conflicting matchers specified".into());
     }
     for p in &mut opts.patterns {
-        *p = perl_to_rust_regex(p).map_err(|name| format!("-P does not support {name}"))?;
+        *p = perl_to_rust_regex(p).map_err(|name| {
+            format!(
+                "-P does not support {name} (Rust regex engine); for extraction, match surrounding text with -o and trim it with sed or cut"
+            )
+        })?;
     }
     build_regex(opts).map_err(|e| e.to_string())
 }
