@@ -135,19 +135,15 @@ fn format_string(fmt: &str, params: &[String]) -> Vec<u8> {
                             }
                             'd' | 'i' => {
                                 let n: i64 = param.parse().unwrap_or(0);
-                                out.push_str(&n.to_string());
+                                out.push_str(&format_signed(&parse_spec(&spec), n));
                             }
-                            'o' => {
+                            'u' | 'o' | 'x' | 'X' => {
                                 let n: i64 = param.parse().unwrap_or(0);
-                                out.push_str(&format!("{:o}", n));
+                                out.push_str(&format_unsigned(&parse_spec(&spec), conv, n as u64));
                             }
-                            'x' => {
-                                let n: i64 = param.parse().unwrap_or(0);
-                                out.push_str(&format!("{:x}", n));
-                            }
-                            'X' => {
-                                let n: i64 = param.parse().unwrap_or(0);
-                                out.push_str(&format!("{:X}", n));
+                            'f' | 'F' | 'e' | 'E' | 'g' | 'G' => {
+                                let x: f64 = param.trim().parse().unwrap_or(0.0);
+                                out.push_str(&format_float(&parse_spec(&spec), conv, x));
                             }
                             'c' => {
                                 if let Some(ch) = param.chars().next() {
@@ -178,6 +174,186 @@ fn format_string(fmt: &str, params: &[String]) -> Vec<u8> {
         }
     }
     out.0
+}
+
+/// Largest width or precision honoured; larger values are clamped so a huge
+/// field can't exhaust memory (Rust's formatter also rejects precisions above
+/// `u16::MAX`).
+const MAX_FIELD: usize = u16::MAX as usize;
+
+/// Flags, width and precision of one numeric conversion.
+#[derive(Default)]
+struct Spec {
+    left: bool,
+    zero: bool,
+    plus: bool,
+    space: bool,
+    alt: bool,
+    width: usize,
+    precision: Option<usize>,
+}
+
+fn parse_spec(spec: &str) -> Spec {
+    let mut out = Spec::default();
+    let rest = spec.trim_start_matches(|c| {
+        match c {
+            '-' => out.left = true,
+            '0' => out.zero = true,
+            '+' => out.plus = true,
+            ' ' => out.space = true,
+            '#' => out.alt = true,
+            _ => return false,
+        }
+        true
+    });
+    // Digits only, so a failed parse means overflow: clamp it too.
+    let field = |s: &str| s.parse().map_or(MAX_FIELD, |n: usize| n.min(MAX_FIELD));
+    let (width, precision) = match rest.split_once('.') {
+        Some((w, p)) => (w, Some(if p.is_empty() { 0 } else { field(p) })),
+        None => (rest, None),
+    };
+    out.width = if width.is_empty() { 0 } else { field(width) };
+    out.precision = precision;
+    out
+}
+
+/// Pads `prefix` + `body` to the field width: spaces on the right for `-`,
+/// zeros after the prefix for `0` (when `zero_ok`), spaces on the left otherwise.
+fn pad(spec: &Spec, prefix: &str, body: &str, zero_ok: bool) -> String {
+    let fill = spec.width.saturating_sub(prefix.len() + body.len());
+    if spec.left {
+        format!("{prefix}{body}{}", " ".repeat(fill))
+    } else if spec.zero && zero_ok {
+        format!("{prefix}{}{body}", "0".repeat(fill))
+    } else {
+        format!("{}{prefix}{body}", " ".repeat(fill))
+    }
+}
+
+/// Applies an integer precision: the minimum number of digits, where a zero
+/// value with precision 0 prints no digits at all.
+fn int_digits(digits: String, spec: &Spec) -> String {
+    match spec.precision {
+        Some(0) if digits == "0" => String::new(),
+        Some(p) if digits.len() < p => format!("{}{digits}", "0".repeat(p - digits.len())),
+        _ => digits,
+    }
+}
+
+/// `%d`/`%i`: a sign from `-`, `+` or space, then the digits.
+fn format_signed(spec: &Spec, n: i64) -> String {
+    let sign = if n < 0 {
+        "-"
+    } else if spec.plus {
+        "+"
+    } else if spec.space {
+        " "
+    } else {
+        ""
+    };
+    let body = int_digits(n.unsigned_abs().to_string(), spec);
+    pad(spec, sign, &body, spec.precision.is_none())
+}
+
+/// `%u`/`%o`/`%x`/`%X`; `#` gives octal a leading 0 and nonzero hex a `0x`.
+fn format_unsigned(spec: &Spec, conv: char, n: u64) -> String {
+    let digits = match conv {
+        'u' => n.to_string(),
+        'o' => format!("{n:o}"),
+        'x' => format!("{n:x}"),
+        _ => format!("{n:X}"),
+    };
+    let mut body = int_digits(digits, spec);
+    let mut prefix = "";
+    if spec.alt && conv == 'o' && !body.starts_with('0') {
+        body.insert(0, '0');
+    } else if spec.alt && n != 0 && conv == 'x' {
+        prefix = "0x";
+    } else if spec.alt && n != 0 && conv == 'X' {
+        prefix = "0X";
+    }
+    pad(spec, prefix, &body, spec.precision.is_none())
+}
+
+/// `%f`/`%e`/`%g` and their uppercase forms.
+fn format_float(spec: &Spec, conv: char, x: f64) -> String {
+    let sign = if x.is_sign_negative() {
+        "-"
+    } else if spec.plus {
+        "+"
+    } else if spec.space {
+        " "
+    } else {
+        ""
+    };
+    let a = x.abs();
+    let p = spec.precision.unwrap_or(6);
+    let body = if a.is_nan() {
+        "nan".to_string()
+    } else if a.is_infinite() {
+        "inf".to_string()
+    } else {
+        match conv.to_ascii_lowercase() {
+            'f' => fixed(a, p, spec.alt),
+            'e' => exponent(a, p, spec.alt),
+            _ => general(a, p, spec.alt),
+        }
+    };
+    let body = if conv.is_ascii_uppercase() {
+        body.to_ascii_uppercase()
+    } else {
+        body
+    };
+    pad(spec, sign, &body, x.is_finite())
+}
+
+/// `%f`: `p` digits after the point; `#` keeps the point when `p` is 0.
+fn fixed(a: f64, p: usize, alt: bool) -> String {
+    let mut s = format!("{a:.p$}");
+    if alt && p == 0 {
+        s.push('.');
+    }
+    s
+}
+
+/// `%e`: one digit, `p` decimals, and a signed exponent of at least two digits.
+fn exponent(a: f64, p: usize, alt: bool) -> String {
+    let s = format!("{a:.p$e}");
+    let (mantissa, exp) = s.split_once('e').unwrap_or((&s, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let dot = if alt && p == 0 { "." } else { "" };
+    let exp_sign = if exp < 0 { '-' } else { '+' };
+    format!("{mantissa}{dot}e{exp_sign}{:02}", exp.unsigned_abs())
+}
+
+/// `%g`: `%e` when the exponent is below -4 or at least the precision, `%f`
+/// otherwise, with `p` significant digits and trailing zeros removed unless `#`.
+fn general(a: f64, p: usize, alt: bool) -> String {
+    // The `%f` form uses up to p + 3 decimals (exponent -4); keep that in range.
+    let p = p.clamp(1, MAX_FIELD - 3);
+    let exp: i32 = if a == 0.0 {
+        0
+    } else {
+        let s = format!("{a:.*e}", p - 1);
+        s.split_once('e')
+            .and_then(|(_, e)| e.parse().ok())
+            .unwrap_or(0)
+    };
+    let s = if exp >= -4 && i64::from(exp) < p as i64 {
+        fixed(a, (p as i64 - 1 - i64::from(exp)) as usize, alt)
+    } else {
+        exponent(a, p - 1, alt)
+    };
+    if alt {
+        return s;
+    }
+    let (mantissa, exp) = s.split_at(s.find('e').unwrap_or(s.len()));
+    let mantissa = if mantissa.contains('.') {
+        mantissa.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        mantissa
+    };
+    format!("{mantissa}{exp}")
 }
 
 /// Expand every backslash escape in a `%b` argument. Returns true on `\c`.
