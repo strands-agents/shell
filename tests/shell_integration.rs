@@ -1009,6 +1009,38 @@ fn redir_fd_only_when_digit_touches_operator() {
     }));
 }
 
+#[test]
+fn redir_dup_output_target_before_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for cmd in [
+            "echo hi 2>&1>/tmp/out; cat /tmp/out",
+            "echo hi >&2>>/tmp/out; cat /tmp/out",
+            "{ echo hi; } 2>&1>/tmp/out; cat /tmp/out",
+            "echo hi >/tmp/out 2>&1</tmp/out; cat /tmp/out",
+            "echo hi 2>&1>|/tmp/out; cat /tmp/out",
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let out = shell.run(cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: status");
+            assert_eq!(out.stdout, "hi\n", "{cmd}: stdout");
+            assert_eq!(out.stderr, "", "{cmd}: stderr");
+        }
+    }));
+}
+
+#[test]
+fn redir_dup_input_target_before_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("printf 'hi\\n' >/tmp/in; cat <&1</tmp/in").await;
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout, "hi\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
 // Redirect in variable expansion
 expect!(
     redir_var_filename,

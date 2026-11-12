@@ -999,10 +999,12 @@ fn tokenize(input: &str, more_input: bool) -> Result<Vec<Token>, String> {
                 }
                 // POSIX IO_NUMBER: an unquoted digit delimited by `<` or `>`
                 // (`2>err`). `2 > err` stays a word followed by `> err`.
+                // After `>&` or `<&`, the digit is the duplication target.
                 if parts.is_empty()
                     && c.is_ascii_digit()
                     && literal.len() == 1
                     && matches!(chars.peek(), Some('<' | '>'))
+                    && !matches!(tokens.last(), Some(Token::DupOut | Token::DupIn))
                 {
                     tokens.push(Token::IoNumber((c as u8 - b'0') as u32));
                     continue;
@@ -1928,6 +1930,20 @@ mod tests {
             ("printf '%s' '' \\\n  \"\"", "printf '%s' '' \"\""),
         ] {
             assert_eq!(p(continued).unwrap(), p(joined).unwrap(), "{continued}");
+        }
+    }
+
+    #[test]
+    fn duplication_target_before_redirect_stays_a_word() {
+        for (adjacent, spaced) in [
+            ("echo hi 2>&1>out", "echo hi 2>&1 >out"),
+            ("echo hi >&2>>out", "echo hi >&2 >>out"),
+            ("cat 0<in 0<&0>out", "cat 0<in 0<&0 >out"),
+            ("cat <&0<in", "cat <&0 <in"),
+            ("cat <&3<>in", "cat <&3 <>in"),
+            ("{ cat; } 0<&3>out", "{ cat; } 0<&3 >out"),
+        ] {
+            assert_eq!(p(adjacent).unwrap(), p(spaced).unwrap(), "{adjacent}");
         }
     }
 
