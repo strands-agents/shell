@@ -903,3 +903,89 @@ fn without_a_handler_dropping_run_keeps_legacy_task_ownership() {
         );
     });
 }
+
+/// Counts the handler futures that are alive.
+struct Running(Arc<AtomicUsize>);
+
+impl Running {
+    fn new(count: Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A shell whose `blocked` command never returns, and the count of those still running.
+fn blocking_shell() -> (Shell, Arc<AtomicUsize>, Arc<Notify>) {
+    let running = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(Notify::new());
+    let (count, start) = (running.clone(), started.clone());
+    let shell = host_shell(move |_ctx| {
+        let (count, start) = (count.clone(), start.clone());
+        Box::pin(async move {
+            let _running = Running::new(count);
+            start.notify_one();
+            pending::<()>().await;
+            Ok(Some(0))
+        })
+    });
+    (shell, running, started)
+}
+
+#[test]
+fn dropping_the_shell_stops_its_background_commands() {
+    block_on(async {
+        for script in ["blocked &", "(blocked &)"] {
+            let (mut shell, running, started) = blocking_shell();
+            let out = tokio::time::timeout(Duration::from_secs(5), shell.run(script))
+                .await
+                .unwrap_or_else(|_| panic!("{script} did not return"));
+            assert_eq!(out.status, 0, "{script}: {}", out.stderr);
+            tokio::time::timeout(Duration::from_secs(5), started.notified())
+                .await
+                .unwrap_or_else(|_| panic!("the handler never started in {script}"));
+            assert_eq!(shell.run("echo ready").await.stdout, "ready\n");
+            assert_eq!(
+                running.load(Ordering::SeqCst),
+                1,
+                "an open shell stopped its background command in {script}"
+            );
+            drop(shell);
+            settle().await;
+            assert_eq!(
+                running.load(Ordering::SeqCst),
+                0,
+                "dropping the shell left the background command running in {script}"
+            );
+        }
+    });
+}
+
+#[test]
+fn cancelling_wait_stops_its_background_commands() {
+    block_on(async {
+        let (mut shell, running, _started) = blocking_shell();
+        let out = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                shell.run("blocked & blocked & wait"),
+            ),
+        )
+        .await
+        .expect("the outer timeout fired");
+        assert!(out.is_err(), "wait returned before cancellation");
+        settle().await;
+        assert_eq!(
+            running.load(Ordering::SeqCst),
+            0,
+            "cancelling wait left a background command running"
+        );
+        assert_eq!(shell.run("echo ready").await.stdout, "ready\n");
+    });
+}

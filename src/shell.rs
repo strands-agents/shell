@@ -17,7 +17,7 @@ use tokio::io::AsyncWriteExt;
 use crate::exec;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mcp_client::{McpConfigEntry, NamedMcpClient};
-use crate::os::{Kernel, OpenFlags, Process};
+use crate::os::{Kernel, OpenFlags, Process, Tasks};
 use crate::vfs_config::{
     BindEntry, BindMode, CredEntry, CredKind, VfsConfig, build_vfs, resolve_creds,
 };
@@ -327,6 +327,8 @@ pub struct Shell {
     mcp_clients: Rc<Vec<NamedMcpClient>>,
     #[cfg(not(target_arch = "wasm32"))]
     mcp_config: Vec<McpConfigEntry>,
+    /// Aborts the background jobs of `proc` when the shell drops.
+    _background_jobs: Tasks,
 }
 
 impl Shell {
@@ -365,7 +367,8 @@ impl Shell {
     /// }
     /// ```
     pub fn with_kernel(kernel: Arc<dyn Kernel>) -> Self {
-        let proc = kernel.new_process();
+        let mut proc = kernel.new_process();
+        let background_jobs = proc.own_background_jobs();
         Self {
             kernel,
             proc,
@@ -376,6 +379,7 @@ impl Shell {
             mcp_clients: Rc::new(Vec::new()),
             #[cfg(not(target_arch = "wasm32"))]
             mcp_config: Vec::new(),
+            _background_jobs: background_jobs,
         }
     }
 
@@ -1179,6 +1183,7 @@ impl ShellBuilder {
             allowed_url_prefixes: self.allowed_url_prefixes,
         });
         let mut proc = kernel.new_process();
+        let background_jobs = proc.own_background_jobs();
 
         proc.max_depth = self.max_depth;
         proc.max_output = self.max_output;
@@ -1212,6 +1217,7 @@ impl ShellBuilder {
             mcp_clients: Rc::new(Vec::new()),
             #[cfg(not(target_arch = "wasm32"))]
             mcp_config: self.mcp,
+            _background_jobs: background_jobs,
         })
     }
 }

@@ -2147,7 +2147,7 @@ async fn execute_command_line_inner(
                     let stderr = std::mem::take(&mut sub.captured_stderr);
                     (code, stdout, stderr)
                 });
-                proc.bg_jobs.push(handle);
+                proc.add_background_job(handle);
                 last_exit = 0;
                 proc.last_exit = 0;
                 continue;
