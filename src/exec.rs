@@ -151,12 +151,27 @@ async fn resolve_executable(
 }
 
 /// Read a script file and execute it via execute_sourced in a child context.
+/// `sh -c command_string [command_name [argument...]]` runs the string instead,
+/// with `$0` defaulting to the invoked name (`proc.arg0`).
 async fn run_script(
     os: Arc<dyn Kernel>,
     proc: &mut Process,
     script_path: &str,
     args: &[String],
 ) -> i32 {
+    if script_path == "-c" {
+        // A single `--` ends the options, as in `sh -c -- 'cmd'`.
+        let args = args.strip_prefix(&["--".to_string()]).unwrap_or(args);
+        let Some((command, rest)) = args.split_first() else {
+            proc.err_msg(&format!("{}: -c: option requires an argument", proc.arg0));
+            return 2;
+        };
+        let (arg0, args) = match rest.split_first() {
+            Some((name, args)) => (name.clone(), args),
+            None => (proc.arg0.clone(), rest),
+        };
+        return run_sourced(os, proc, command, "-c", arg0, args).await;
+    }
     let fd = match os.open(proc, script_path, OpenFlags::read()).await {
         Ok(fd) => fd,
         Err(e) => {
@@ -178,10 +193,31 @@ async fn run_script(
             return 126;
         }
     };
+    run_sourced(
+        os,
+        proc,
+        &content,
+        script_path,
+        script_path.to_string(),
+        args,
+    )
+    .await
+}
+
+/// Run `content` with `$0` and the positional parameters set, restoring them after.
+/// `origin` names the script (or `-c`) in parse errors.
+async fn run_sourced(
+    os: Arc<dyn Kernel>,
+    proc: &mut Process,
+    content: &str,
+    origin: &str,
+    arg0: String,
+    args: &[String],
+) -> i32 {
     let saved_args = std::mem::replace(&mut proc.args, args.to_vec());
-    let saved_arg0 = std::mem::replace(&mut proc.arg0, script_path.to_string());
+    let saved_arg0 = std::mem::replace(&mut proc.arg0, arg0);
     proc.depth += 1;
-    let (exit, _) = execute_source_file(os, proc, &content, Some(script_path)).await;
+    let (exit, _) = execute_source_file(os, proc, content, Some(origin)).await;
     proc.depth -= 1;
     proc.args = saved_args;
     proc.arg0 = saved_arg0;
@@ -3556,6 +3592,10 @@ async fn run_pipeline(
             // Builtins/functions: child has pipe fds (for I/O via CURRENT_PROCESS),
             // state_proc is a fork with env/functions but no fds (for builtin &mut Process)
             let mut state_proc = child.fork();
+            if is_script {
+                // The child shell's argv[0], used as `$0` by `sh -c`.
+                state_proc.arg0 = name.clone();
+            }
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
                 CURRENT_PROCESS.scope(RefCell::new(child), async move {

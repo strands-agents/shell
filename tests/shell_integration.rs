@@ -8100,6 +8100,78 @@ expect!(
 );
 expect!(dquote_backslash_special_dquote, r#"echo "a\"b""#, r#"a"b"#);
 
+// ── sh -c command_string ────────────────────────────────────────────
+
+expect!(sh_c_runs_string, "sh -c 'echo hi'", "hi");
+expect!(lash_c_runs_string, "lash -c 'echo hi'", "hi");
+expect!(
+    sh_c_positional_params,
+    "sh -c 'echo $0 $# $1 $2' name a b",
+    "name 2 a b"
+);
+expect!(sh_c_default_arg0, "sh -c 'echo $0 $#'", "sh 0");
+expect!(lash_c_default_arg0, "lash -c 'echo $0'", "lash");
+expect!(
+    sh_c_quoted_args,
+    "sh -c 'printf \"<%s>\" \"$@\"' n 'x y' z",
+    "<x y><z>"
+);
+expect!(sh_c_exit_status, "sh -c 'exit 3'; echo $?", "3");
+expect!(
+    sh_c_exit_stops,
+    "sh -c 'echo a; exit 4; echo b'; echo $?",
+    "a\n4"
+);
+expect!(sh_c_multiple_statements, "sh -c 'a=1; echo $a'", "1");
+expect!(sh_c_multiline, "sh -c 'echo a\necho b'", "a\nb");
+expect!(sh_c_var_not_leaked, "sh -c 'b=2'; echo \"[$b]\"", "[]");
+expect!(sh_c_cd_not_leaked, "sh -c 'cd /tmp'; pwd", "/home/lash");
+expect!(sh_c_empty_string, "sh -c ''; echo $?", "0");
+expect!(
+    sh_c_stdout_redirect,
+    "sh -c 'echo hi' > /tmp/shc; cat /tmp/shc",
+    "hi"
+);
+expect!(sh_c_in_pipeline, "sh -c 'echo hi' | tr a-z A-Z", "HI");
+expect_output!(
+    sh_c_missing_argument,
+    "sh -c",
+    "",
+    "sh: -c: option requires an argument\n",
+    2
+);
+expect_output!(
+    sh_c_parse_error_names_line,
+    "sh -c 'echo a\n)'",
+    "a\n",
+    "strands-shell: -c: line 2: unexpected ')'\n",
+    1
+);
+expect!(sh_c_double_dash, "sh -c -- 'echo hi'", "hi");
+expect!(sh_c_double_dash_params, "sh -c -- 'echo $0 $1' n a", "n a");
+expect!(sh_c_double_dash_as_name, "sh -c 'echo $0 $1' -- a", "-- a");
+expect_output!(
+    sh_c_double_dash_missing_argument,
+    "sh -c --",
+    "",
+    "sh: -c: option requires an argument\n",
+    2
+);
+
+#[test]
+fn script_args_and_isolation_unchanged() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .run("printf 'X=1\\necho $0 $# $1 $2\\n' > /tmp/args.sh")
+            .await;
+        let out = shell.run("sh /tmp/args.sh a 'b c'; echo \"[$X]\"").await;
+        assert_eq!(out.stdout, "/tmp/args.sh 2 a b c\n[]\n");
+        assert_eq!(out.status, 0);
+    }));
+}
+
 // ── Script execution via sh ─────────────────────────────────────────
 
 /// Runs `cmd` after writing a `cat` script and a `read` script.
