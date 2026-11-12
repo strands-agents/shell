@@ -4049,6 +4049,87 @@ expect!(
     "printf 'abcdef' > /tmp/hr; head -c 4 /tmp/hr > /tmp/hr.part && mv /tmp/hr.part /tmp/hr; cat /tmp/hr",
     "abcd"
 );
+expect!(
+    head_lines_all_but_last_from_file,
+    "printf 'a\\nb\\nc\\nd\\n' > /tmp/hn; head -n -2 /tmp/hn",
+    "a\nb"
+);
+expect!(
+    head_lines_all_but_last_attached,
+    "printf 'a\\nb\\nc\\nd\\n' | head -n-3",
+    "a"
+);
+expect!(
+    head_lines_all_but_last_long,
+    "printf 'a\\nb\\nc\\nd\\n' | head --lines=-1",
+    "a\nb\nc"
+);
+shell_test!(
+    head_lines_all_but_last_zero_prints_everything,
+    "printf 'a\\nb\\nc' | head -n -0",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "a\nb\nc");
+        assert_eq!(out.status, 0);
+    }
+);
+expect!(
+    head_lines_all_but_last_more_than_input,
+    "printf 'a\\nb\\n' | head -n -5",
+    ""
+);
+shell_test!(
+    head_lines_all_but_last_counts_unterminated_line,
+    "printf 'a\\nb\\nc' | head -n -1",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "a\nb\n");
+        assert_eq!(out.status, 0);
+    }
+);
+expect!(
+    head_lines_all_but_last_then_bytes_last_wins,
+    "printf 'a\\nb\\nc\\n' | head -n -1 -c 1",
+    "a"
+);
+shell_test!(
+    head_bytes_all_but_last,
+    "printf 'abcdef' > /tmp/hc; head -c -2 /tmp/hc; head -c-4 /tmp/hc; head --bytes=-5 /tmp/hc",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "abcdaba");
+        assert_eq!(out.status, 0);
+    }
+);
+expect!(
+    head_bytes_all_but_last_zero,
+    "printf 'abc' | head -c -0",
+    "abc"
+);
+expect!(
+    head_bytes_all_but_last_more_than_input,
+    "printf 'abc' | head -c -10",
+    ""
+);
+expect!(
+    head_bytes_all_but_last_then_lines_last_wins,
+    "printf 'a\\nb\\nc\\n' | head -c -1 -n 2",
+    "a\nb"
+);
+shell_test!(
+    head_all_but_last_error_quotes_whole_value,
+    "head -n -x; head -c -",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert!(
+            out.stderr.contains("cannot parse argument \"-x\""),
+            "stderr: {:?}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("cannot parse argument \"-\""),
+            "stderr: {:?}",
+            out.stderr
+        );
+        assert_eq!(out.status, 1);
+    }
+);
 
 // ── ls single file long format ──────────────────────────────────────
 
