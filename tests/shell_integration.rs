@@ -7328,8 +7328,10 @@ fn ln_force_keeps_direct_bind_files_when_linking_fails() {
             .run("cd /mnt/w; ln -sf missing link; ln -sf missing plain")
             .await;
         assert_ne!(out.status, 0);
+        assert!(!out.stderr.contains("invalid option"), "{}", out.stderr);
         let out = shell.run("cd /mnt/w; ln -sf plain old").await;
         assert_ne!(out.status, 0);
+        assert!(!out.stderr.contains("invalid option"), "{}", out.stderr);
         assert!(!out.stderr.contains("same file"), "{}", out.stderr);
         assert_eq!(std::fs::read_to_string(dir.join("old")).unwrap(), "old");
         assert_eq!(std::fs::read_to_string(dir.join("plain")).unwrap(), "plain");
@@ -8875,6 +8877,28 @@ expect_output!(
     "",
     0
 );
+#[test]
+fn ln_force_replacements_preserve_inode_budget() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().max_inodes(128).build().unwrap();
+        let out = shell
+            .run("echo keep >/tmp/source; echo old >/tmp/link")
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        for i in 0..200 {
+            let out = shell.run("ln -sf /tmp/source /tmp/link").await;
+            assert_eq!(out.status, 0, "replacement {i}: {}", out.stderr);
+            assert!(out.stderr.is_empty(), "replacement {i}: {}", out.stderr);
+        }
+        let out = shell.run("touch /tmp/after_replacements").await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        let out = shell.run("cat /tmp/source; readlink /tmp/link").await;
+        assert_eq!(out.stdout, "keep\n/tmp/source\n");
+        assert!(out.stderr.is_empty(), "{}", out.stderr);
+    }));
+}
+
 expect!(
     ln_force_replaces_a_file,
     "cd /tmp && echo a > a && echo b > b && ln -sf a b && readlink b && cat b",
