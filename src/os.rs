@@ -1099,10 +1099,23 @@ pub trait Kernel: Send + Sync {
     /// Check access permissions (ACCESS_R, ACCESS_W, ACCESS_X).
     async fn access(&self, proc: &Process, path: &str, mode: i32) -> bool;
     /// Canonicalize a path (resolve symlinks).
-    ///
-    /// `mkdir -p` does not create an ancestor whose canonicalize fails with
-    /// [`io::ErrorKind::PermissionDenied`].
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf>;
+    /// Stat a path (follows symlinks), and fail when it is missing or the lookup is refused.
+    ///
+    /// `mkdir -p` makes this one lookup for each ancestor, and does not create an ancestor
+    /// whose lookup fails with [`io::ErrorKind::PermissionDenied`]. The default calls
+    /// [`Kernel::stat`], and for a missing path returns the error from
+    /// [`Kernel::canonicalize`].
+    async fn lookup(&self, proc: &Process, path: &str) -> io::Result<FileStat> {
+        let stat = self.stat(proc, path).await;
+        if stat.exists {
+            return Ok(stat);
+        }
+        match self.canonicalize(proc, path).await {
+            Ok(_) => Err(io::ErrorKind::NotFound.into()),
+            Err(err) => Err(err),
+        }
+    }
     /// Check if a path is an executable file.
     async fn is_executable(&self, proc: &Process, path: &str) -> bool;
     /// Expand a glob pattern relative to the process cwd. Returns sorted matches.
