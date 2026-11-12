@@ -2937,6 +2937,21 @@ expect_streams!(
     "e\n"
 );
 expect_streams!(
+    compound_pipe_pipefail_stderr,
+    "{ echo off >&2; exit 3; } | cat; echo $?; \
+     set -o pipefail; { echo on >&2; exit 3; } | cat; echo $?; \
+     f() { return 4; }; { echo tail >&2; exit 3; } | f; echo $?",
+    "0\n3\n4\n",
+    "off\non\ntail\n"
+);
+expect_streams!(
+    compound_pipe_pipefail_return_and_negation_stderr,
+    "set -o pipefail; f() { { echo ret >&2; return 5; } | cat; }; f; echo $?; \
+     ! { echo neg >&2; false; } | cat; echo $?",
+    "5\n0\n",
+    "ret\nneg\n"
+);
+expect_streams!(
     compound_pipe_in_substitution_stderr,
     "x=$({ echo o; echo e >&2; } | cat); echo \"x=$x\"",
     "x=o\n",
