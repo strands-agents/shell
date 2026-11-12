@@ -3483,7 +3483,7 @@ async fn run_pipeline(
 
     // Build a process for each stage
     let mut procs: Vec<Process> = (0..len).map(|_| shell_proc.fork()).collect();
-    // Only the last stage's host writes decide the status.
+    // Track each earlier stage's writes separately from the last stage.
     let early_host_writes: Vec<os::HostWrites> = procs[..len - 1]
         .iter_mut()
         .map(Process::isolate_host_writes)
@@ -3769,20 +3769,13 @@ async fn run_pipeline(
         stderr_drains.push(handle);
     }
 
-    // Wait for all command tasks
-    let mut last_exit = 0;
-    let mut last_failure = 0;
+    // Wait for all command tasks.
+    let mut stage_exits = vec![0; len];
     for (stage, handle) in handles {
         if let Ok(exit) = handle.await {
-            last_exit =
+            stage_exits[stage] =
                 report_finished(os.as_ref(), shell_proc, requests[stage].take(), exit).await;
-            if last_exit != 0 {
-                last_failure = last_exit;
-            }
         }
-    }
-    if shell_proc.opt_pipefail {
-        last_exit = last_failure;
     }
 
     let stdout_str = if let Some(h) = stdout_drain {
@@ -3797,11 +3790,25 @@ async fn run_pipeline(
     if capture && !stderr_str.is_empty() {
         shell_proc.captured_stderr.push_str(&stderr_str);
     }
-    for writes in early_host_writes {
-        for failure in writes.settle().await {
+    for (stage, writes) in early_host_writes.into_iter().enumerate() {
+        let failures = writes.settle().await;
+        for failure in &failures {
             shell_proc.err_msg(&format!("strands-shell: {failure}"));
         }
+        if stage_exits[stage] == 0 && !failures.is_empty() {
+            stage_exits[stage] = 1;
+        }
     }
+    stage_exits[len - 1] = settle_host_writes(shell_proc, stage_exits[len - 1]).await;
+    let last_exit = if shell_proc.opt_pipefail {
+        stage_exits
+            .into_iter()
+            .rev()
+            .find(|&exit| exit != 0)
+            .unwrap_or(0)
+    } else {
+        stage_exits[len - 1]
+    };
 
     (last_exit, stdout_str)
 }

@@ -6840,6 +6840,21 @@ fn bind_direct_write_error_fails_the_command() {
             "stderr: {}",
             out.stderr
         );
+        assert_eq!(shell.run("set -o pipefail").await.status, 0);
+        for (cmd, expected) in [
+            ("echo hi > /mnt/w/ro | true; echo $?", "1\n"),
+            (
+                "f() { return 3; }; f | echo hi > /mnt/w/ro | true; echo $?",
+                "1\n",
+            ),
+            ("f | echo hi > /mnt/w/ro; echo $?", "1\n"),
+            ("echo hi > /mnt/w/ro | f; echo $?", "3\n"),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, expected, "{cmd}: stderr: {}", out.stderr);
+            assert!(out.stderr.contains("/mnt/w/ro: Permission denied"));
+        }
+        assert_eq!(shell.run("set +o pipefail").await.status, 0);
         let out = shell
             .run("{ echo x; } > /mnt/w/ro & true || echo stolen; wait")
             .await;
