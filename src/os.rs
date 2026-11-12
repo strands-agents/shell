@@ -1099,6 +1099,9 @@ pub trait Kernel: Send + Sync {
     /// Check access permissions (ACCESS_R, ACCESS_W, ACCESS_X).
     async fn access(&self, proc: &Process, path: &str, mode: i32) -> bool;
     /// Canonicalize a path (resolve symlinks).
+    ///
+    /// `mkdir -p` does not create an ancestor whose canonicalize fails with
+    /// [`io::ErrorKind::PermissionDenied`].
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf>;
     /// Check if a path is an executable file.
     async fn is_executable(&self, proc: &Process, path: &str) -> bool;

@@ -60,11 +60,8 @@ async fn cmd_mkdir(os: &dyn Kernel, args: &[String]) -> CommandResult {
 
 /// Whether the kernel refuses to look up `path`, rather than reporting it missing.
 async fn lookup_refused(os: &dyn Kernel, path: &str) -> bool {
-    match io::canonicalize(os, path).await {
-        Ok(_) => false,
-        Err(err) => !matches!(
-            err.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-        ),
-    }
+    matches!(
+        io::canonicalize(os, path).await,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied
+    )
 }
