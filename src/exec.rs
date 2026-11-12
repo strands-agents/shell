@@ -1744,15 +1744,6 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
     output
 }
 
-/// Execute a command line, capturing all stdout into a String instead of printing it.
-async fn run_capturing(
-    os: Arc<dyn Kernel>,
-    proc: &mut Process,
-    command_line: &parser::CommandLine,
-) -> String {
-    run_capturing_status(os, proc, command_line).await.0
-}
-
 /// Whether `pipeline` is a lone `break`, `continue`, `exit` or `return`, with or without `builtin`.
 fn is_control_flow(pipeline: &[parser::Command]) -> bool {
     let [command] = pipeline else {
@@ -1843,8 +1834,8 @@ fn captured_status(result: Result<i32, ControlFlow>, last_exit: i32) -> i32 {
     }
 }
 
-/// [`run_capturing`], also returning the exit status of the last item it ran, or the
-/// control flow that stopped it.
+/// Execute a command line, capturing stdout along with the exit status of the last
+/// item it ran or the control flow that stopped it.
 async fn run_capturing_status(
     os: Arc<dyn Kernel>,
     proc: &mut Process,
