@@ -9,7 +9,7 @@ Print the target of a symbolic link, or a canonical file name.
   -f, --canonicalize            follow every symlink; all but the last
                                 component must exist
   -e, --canonicalize-existing   follow every symlink; all components must exist
-  -m, --canonicalize-missing    follow every symlink; no component must exist
+  -m, --canonicalize-missing    follow every symlink; components need not exist
   -n, --no-newline              do not output the trailing newline";
 
 /// How strictly `canonicalize` requires path components to exist.
@@ -206,15 +206,13 @@ struct Lookup {
 
 async fn lookup(os: &dyn Kernel, path: &str) -> Lookup {
     let st = io::lstat(os, path).await;
-    let link_target = if st.is_symlink {
-        io::read_link(os, path).await.ok()
-    } else {
-        None
-    };
+    // Direct-bind metadata follows links, but read_link returns their stored target.
+    let link_target = io::read_link(os, path).await.ok();
+    let is_symlink = st.is_symlink || link_target.is_some();
     Lookup {
-        exists: st.exists,
-        is_dir: st.is_dir,
-        is_symlink: st.is_symlink,
+        exists: st.exists || is_symlink,
+        is_dir: st.is_dir && !is_symlink,
+        is_symlink,
         link_target,
     }
 }

@@ -6903,6 +6903,52 @@ fn bind_direct_readlink_prints_stored_link_text() {
 
 #[cfg(unix)]
 #[test]
+fn bind_direct_readlink_canonicalizes_symlinks() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_canonicalize");
+        std::fs::create_dir(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/f"), "x").unwrap();
+        for (target, name) in [
+            ("d", "ld"),
+            ("ld/f", "file"),
+            ("missing", "dangling"),
+            ("loop2", "loop1"),
+            ("loop1", "loop2"),
+        ] {
+            std::os::unix::fs::symlink(target, dir.join(name)).unwrap();
+        }
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        for (args, stdout, status) in [
+            ("-f /b/ld", "/b/d\n", 0),
+            ("-e /b/ld", "/b/d\n", 0),
+            ("-m /b/ld", "/b/d\n", 0),
+            ("-f /b/file", "/b/d/f\n", 0),
+            ("-e /b/file", "/b/d/f\n", 0),
+            ("-m /b/file", "/b/d/f\n", 0),
+            ("-fn /b/file", "/b/d/f", 0),
+            ("-n /b/file", "ld/f", 0),
+            ("-f /b/ld/../file", "/b/d/f\n", 0),
+            ("-f /b/dangling", "/b/missing\n", 0),
+            ("-e /b/dangling", "", 1),
+            ("-m /b/dangling", "/b/missing\n", 0),
+            ("-f /b/loop1", "", 1),
+            ("-e /b/loop1", "", 1),
+            ("-m /b/loop1", "/b/loop1\n", 0),
+        ] {
+            let out = shell.run(&format!("readlink {args}")).await;
+            assert_eq!(out.stdout, stdout, "{args}");
+            assert_eq!(out.stderr, "", "{args}");
+            assert_eq!(out.status, status, "{args}");
+        }
+    }));
+}
+
+#[cfg(unix)]
+#[test]
 fn bind_direct_readlink_does_not_follow_a_directory_out_of_the_bind() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
