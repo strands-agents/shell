@@ -1,4 +1,6 @@
 use crate::prelude::*;
+use jaq_core::box_iter::box_once;
+use jaq_core::load::{Arena, File, Loader};
 
 const HELP: &str = "Usage: jq [OPTIONS] FILTER [FILE]
 JSON processor.
@@ -27,8 +29,6 @@ fn run_filter(
     compact: bool,
     named_args: &[(String, serde_json::Value)],
 ) -> Result<Vec<String>, String> {
-    use jaq_core::load::{Arena, File, Loader};
-
     let loader = Loader::new(jaq_std::defs().chain(jaq_json::defs()));
     let arena = Arena::default();
     let program = File {
@@ -47,7 +47,6 @@ fn run_filter(
     // We replace them with safe stubs that return errors.
     const BLOCKED: &[&str] = &["env", "halt", "halt_error"];
 
-    use jaq_core::box_iter::box_once;
     let safe_funs = jaq_std::funs()
         .chain(jaq_json::funs())
         .filter(|(name, _, _)| !BLOCKED.contains(name));
@@ -213,6 +212,10 @@ async fn cmd_jq(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 };
                 let name = name.string()?;
                 let text = text.string()?;
+                // Like jq, the first binding wins without parsing later JSON.
+                if named_args.iter().any(|(n, _)| *n == name) {
+                    continue;
+                }
                 let value = if is_json {
                     match serde_json::from_str(&text) {
                         Ok(v) => v,
@@ -225,10 +228,7 @@ async fn cmd_jq(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 } else {
                     serde_json::Value::String(text)
                 };
-                // Like jq, the first binding of a name wins.
-                if !named_args.iter().any(|(n, _)| *n == name) {
-                    named_args.push((name, value));
-                }
+                named_args.push((name, value));
             }
             Short('h') | Long("help") => {
                 let mut w = io::stdout()?;

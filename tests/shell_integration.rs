@@ -4196,6 +4196,16 @@ expect!(
 );
 expect!(jq_arg_first_wins, "jq -n --arg a 1 --arg a 2 '$a'", "\"1\"");
 expect!(
+    jq_arg_duplicate_json_not_parsed,
+    "jq -n --arg a first --argjson a invalid '$a'",
+    "\"first\""
+);
+expect!(
+    jq_argjson_duplicate_not_parsed,
+    "jq -n --argjson a 1 --argjson a invalid '$a'",
+    "1"
+);
+expect!(
     jq_arg_in_def,
     "jq -n -r --arg a x 'def f: $a + \"y\"; f'",
     "xy"
