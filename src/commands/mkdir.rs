@@ -43,8 +43,8 @@ async fn cmd_mkdir(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 path.push_str(part);
                 let is_ancestor = target.is_some_and(|target| index < target);
                 let skip = if is_ancestor {
-                    match io::lookup(os, &path).await {
-                        Ok(_) => true,
+                    match io::try_stat(os, &path).await {
+                        Ok(stat) => stat.exists,
                         Err(err) => err.kind() == std::io::ErrorKind::PermissionDenied,
                     }
                 } else {

@@ -109,10 +109,10 @@ pub async fn stat(os: &dyn Kernel, path: &str) -> crate::os::FileStat {
     result
 }
 
-/// Look up a path via the kernel using the current process for path resolution.
-pub(crate) async fn lookup(os: &dyn Kernel, path: &str) -> std::io::Result<crate::os::FileStat> {
+/// Stat a path, and report a missing or refused path as an error, via the kernel using the current process for path resolution.
+pub(crate) async fn try_stat(os: &dyn Kernel, path: &str) -> std::io::Result<crate::os::FileStat> {
     let proc = CURRENT_PROCESS.with(|p| p.replace(Process::empty()));
-    let result = os.lookup(&proc, path).await;
+    let result = os.try_stat(&proc, path).await;
     CURRENT_PROCESS.with(|p| p.replace(proc));
     result
 }

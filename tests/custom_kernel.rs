@@ -315,7 +315,7 @@ impl Kernel for MemKernel {
     }
 }
 
-/// A `MemKernel` that records each path lookup, and answers [`Kernel::lookup`]
+/// A `MemKernel` that records each path lookup, and answers [`Kernel::try_stat`]
 /// with one lookup.
 struct CountingKernel {
     inner: Arc<MemKernel>,
@@ -382,7 +382,7 @@ impl Kernel for CountingKernel {
         self.inner.canonicalize(proc, path).await
     }
 
-    async fn lookup(&self, proc: &Process, path: &str) -> io::Result<FileStat> {
+    async fn try_stat(&self, proc: &Process, path: &str) -> io::Result<FileStat> {
         self.record(proc, path);
         let abs = resolve(proc, path);
         if lookup_refused(&abs) {

@@ -1099,14 +1099,18 @@ pub trait Kernel: Send + Sync {
     /// Check access permissions (ACCESS_R, ACCESS_W, ACCESS_X).
     async fn access(&self, proc: &Process, path: &str, mode: i32) -> bool;
     /// Canonicalize a path (resolve symlinks).
-    async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf>;
-    /// Stat a path (follows symlinks), and fail when it is missing or the lookup is refused.
     ///
-    /// `mkdir -p` makes this one lookup for each ancestor, and does not create an ancestor
-    /// whose lookup fails with [`io::ErrorKind::PermissionDenied`]. The default calls
-    /// [`Kernel::stat`], and for a missing path returns the error from
-    /// [`Kernel::canonicalize`].
-    async fn lookup(&self, proc: &Process, path: &str) -> io::Result<FileStat> {
+    /// The default [`Kernel::try_stat`] reports a missing path as refused when this fails with
+    /// [`io::ErrorKind::PermissionDenied`].
+    async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf>;
+    /// Stat a path, following symlinks. `Ok` means the path exists,
+    /// `Err(PermissionDenied)` means the kernel refuses to look it up, and any other error
+    /// means it is missing.
+    ///
+    /// `mkdir -p` makes this one lookup for each ancestor and does not create a refused one.
+    /// The default calls [`Kernel::stat`], then [`Kernel::canonicalize`] for a missing path, so
+    /// refusing in `canonicalize` still works. A kernel that wraps another must forward this.
+    async fn try_stat(&self, proc: &Process, path: &str) -> io::Result<FileStat> {
         let stat = self.stat(proc, path).await;
         if stat.exists {
             return Ok(stat);
