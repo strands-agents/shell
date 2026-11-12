@@ -2188,6 +2188,73 @@ expect!(
     "a b\nc d"
 );
 
+// GNU: 123 if any invocation failed, not just the last one.
+expect!(
+    xargs_status_failure_in_middle,
+    "echo a > a; echo b > b; printf 'a\\nnosuch\\nb\\n' | xargs -n 1 cat; echo st=$?",
+    "a\nb\nst=123"
+);
+expect!(
+    xargs_status_all_succeed,
+    "echo a > a; echo b > b; printf 'a\\nb\\n' | xargs -n 1 cat; echo st=$?",
+    "a\nb\nst=0"
+);
+expect!(
+    xargs_status_failure_last,
+    "echo a > a; printf 'a\\nnosuch\\n' | xargs -n 1 cat; echo st=$?",
+    "a\nst=123"
+);
+expect!(
+    xargs_status_failure_with_replace,
+    "echo a > a; printf 'nosuch\\na\\n' | xargs -I X cat X; echo st=$?",
+    "a\nst=123"
+);
+expect!(
+    xargs_status_any_nonzero_is_123,
+    "printf 'echo run $1; exit $1\\n' > e.sh; printf '200\\n0\\n' | xargs -n 1 sh e.sh; echo st=$?",
+    "run 200\nrun 0\nst=123"
+);
+expect_output!(
+    xargs_status_not_found,
+    "printf 'a\\nb\\n' | xargs -n 1 nosuchcmd",
+    "",
+    "strands-shell: nosuchcmd: command not found\n",
+    127
+);
+
+// GNU: a command exiting 255 stops xargs, which exits 124.
+shell_test!(
+    xargs_status_255_stops,
+    "printf 'echo run $1; exit $1\\n' > e.sh; printf '0\\n255\\n7\\n' | xargs -n 1 sh e.sh",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "run 0\nrun 255\n");
+        assert_eq!(out.stderr, "xargs: sh: exited with status 255; aborting\n");
+        assert_eq!(out.status, 124);
+    }
+);
+
+#[test]
+fn xargs_status_timeout() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut statuses = Vec::new();
+        for command in [
+            "echo 2 | xargs sleep",
+            "printf '2\\n2\\n' | xargs -n 1 sleep",
+            "printf '2\\n2\\n' | xargs -I X sleep X",
+        ] {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert!(out.stderr.contains("execution timeout exceeded"));
+            statuses.push(out.status);
+        }
+        assert_eq!(statuses, vec![1, 1, 1]);
+    }));
+}
+
 // ── Arithmetic: assignment operators ────────────────────────────────
 
 expect!(arith_assign, "echo $((X = 5))", "5");
