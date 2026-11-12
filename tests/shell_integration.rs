@@ -595,7 +595,10 @@ fn sourced_parse_error_stops_file_and_names_line() {
             .await;
         let out = shell.run(". /tmp/bad.sh; echo \"after $?\"").await;
         assert_eq!(out.stdout, "one\ntwo\nafter 1\n");
-        assert_eq!(out.stderr, "strands-shell: line 3: unexpected ')'\n");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: /tmp/bad.sh: line 3: unexpected ')'\n"
+        );
     }));
 }
 
@@ -1943,6 +1946,107 @@ printf 'a\n' | \
             assert_eq!(out.stderr, "", "{command}");
             assert_eq!(out.stdout, "<hello>\n<world>\nb\n", "{command}");
         }
+    }));
+}
+
+/// Writes `script` to `path` in `shell`.
+async fn write_script(shell: &mut Shell, path: &str, script: &str) {
+    let setup = shell
+        .run(&format!(
+            "printf '%s' '{}' > {path}",
+            script.replace('\'', "'\\''")
+        ))
+        .await;
+    assert_eq!(setup.status, 0, "{}", setup.stderr);
+}
+
+#[test]
+fn and_or_at_line_end_joins_source_lines() {
+    let script = "false &&\necho AND_SKIPPED\ntrue ||\necho OR_SKIPPED\n\
+                  true &&\n  echo AND_RAN\nfalse ||\n\n  echo OR_RAN\n";
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for command in [
+            script,
+            ". /tmp/and_or.sh",
+            "source /tmp/and_or.sh",
+            "sh /tmp/and_or.sh",
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            write_script(&mut shell, "/tmp/and_or.sh", script).await;
+            let out = shell.run(command).await;
+            assert_eq!(out.stderr, "", "{command}");
+            assert_eq!(out.stdout, "AND_RAN\nOR_RAN\n", "{command}");
+            assert_eq!(out.status, 0, "{command}");
+        }
+    }));
+}
+
+#[test]
+fn and_or_at_line_end_keeps_the_guard_status() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, status) in [
+            ("false &&\necho skipped\n", "1"),
+            ("true ||\necho skipped\n", "0"),
+        ] {
+            for run in [".", "source", "sh"] {
+                let mut shell = Shell::builder().build().unwrap();
+                write_script(&mut shell, "/tmp/guard.sh", script).await;
+                let out = shell.run(&format!("{run} /tmp/guard.sh; echo $?")).await;
+                assert_eq!(out.stdout, format!("{status}\n"), "{run} {script:?}");
+                assert_eq!(out.stderr, "", "{run} {script:?}");
+            }
+        }
+    }));
+}
+
+#[test]
+fn sourced_parse_error_names_the_file_and_line() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, stdout, stderr) in [
+            (
+                "echo ONE\necho )\necho THREE\n",
+                "ONE\nafter 1\n",
+                "strands-shell: /tmp/bad.sh: line 2: unexpected ')'\n",
+            ),
+            (
+                "echo FIRST\necho \"open\necho SECOND\n",
+                "FIRST\nafter 1\n",
+                "strands-shell: /tmp/bad.sh: line 2: unterminated double quote\n",
+            ),
+        ] {
+            for run in [".", "source", "sh"] {
+                let mut shell = Shell::builder().build().unwrap();
+                write_script(&mut shell, "/tmp/bad.sh", script).await;
+                let out = shell
+                    .run(&format!("{run} /tmp/bad.sh; echo after $?"))
+                    .await;
+                assert_eq!(out.stdout, stdout, "{run} {script:?}");
+                assert_eq!(out.stderr, stderr, "{run} {script:?}");
+            }
+        }
+    }));
+}
+
+#[test]
+fn sourced_parse_error_stops_the_file_and_the_caller_continues() {
+    let script = "echo BEFORE\nbefore() { echo BEFORE_FN; }\nbad() { echo *(N); }\n\
+                  after() { echo AFTER_FN; }\necho AFTER\necho \"never closed\n";
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        write_script(&mut shell, "/tmp/stop.sh", script).await;
+        let out = shell
+            .run(". /tmp/stop.sh; echo rc=$?; before; after; echo DONE")
+            .await;
+        assert_eq!(out.stdout, "BEFORE\nrc=1\nBEFORE_FN\nDONE\n");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: /tmp/stop.sh: line 3: Opened parentheses without closing\n\
+             strands-shell: after: command not found\n"
+        );
     }));
 }
 
