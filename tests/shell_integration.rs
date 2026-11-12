@@ -2252,6 +2252,59 @@ expect_streams!(
     CD_NOPE
 );
 
+// ── xargs forwards the child's stderr ───────────────────────────────
+
+const CAT_NOPE: &str = "strands-shell: cat: no such file or directory: /nope\n";
+
+expect_streams!(
+    xargs_child_stderr_forwarded,
+    "printf '/nope\\n' | xargs cat",
+    "",
+    CAT_NOPE
+);
+expect_streams!(
+    xargs_command_not_found_reported,
+    "printf 'a\\n' | xargs nosuchcmd; echo \"status=$?\"",
+    "status=127\n",
+    "strands-shell: nosuchcmd: command not found\n"
+);
+expect_streams!(
+    xargs_child_stderr_to_dev_null,
+    "printf '/nope\\n' | xargs cat 2>/dev/null; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    xargs_child_stderr_to_file,
+    "printf '/nope\\n' | xargs cat 2>/tmp/xerr; cat /tmp/xerr",
+    CAT_NOPE,
+    ""
+);
+expect_streams!(
+    xargs_child_stderr_merged_into_pipe,
+    "printf '/nope\\n' | xargs cat 2>&1 | grep -c nope",
+    "1\n",
+    ""
+);
+expect_streams!(
+    xargs_child_stderr_keeps_order_per_invocation,
+    "echo x > /tmp/xf; x=$(printf '/tmp/xf /nope /tmp/xf\\n' | xargs -n 1 cat 2>&1); echo \"$x\"",
+    format!("x\n{CAT_NOPE}x\n"),
+    ""
+);
+expect_streams!(
+    xargs_replace_child_stderr_forwarded,
+    "printf '/nope\\n' | xargs -I X cat X",
+    "",
+    CAT_NOPE
+);
+expect_streams!(
+    xargs_child_stdout_unaffected,
+    "echo hi > /tmp/xg; printf '/tmp/xg\\n' | xargs cat",
+    "hi\n",
+    ""
+);
+
 // ── Heredoc expansion ───────────────────────────────────────────────
 
 #[test]

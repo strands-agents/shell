@@ -88,6 +88,7 @@ pub fn builtin_xargs<'a>(
 
         let os_arc = io::kernel();
         let mut w = io::stdout()?;
+        let mut ew = io::stderr().ok();
         let mut status = 0;
 
         if let Some(ref repl) = replace {
@@ -101,6 +102,9 @@ pub fn builtin_xargs<'a>(
                 let (exit, _) =
                     Box::pin(crate::exec::execute(os_arc.clone(), &mut sub, &line)).await;
                 w.write_all(sub.captured_output.as_bytes()).await?;
+                if let Some(ew) = ew.as_mut() {
+                    ew.write_all(sub.captured_stderr.as_bytes()).await?;
+                }
                 status = exit;
             }
         } else {
@@ -117,6 +121,9 @@ pub fn builtin_xargs<'a>(
                 let (exit, _) =
                     Box::pin(crate::exec::execute(os_arc.clone(), &mut sub, &line)).await;
                 w.write_all(sub.captured_output.as_bytes()).await?;
+                if let Some(ew) = ew.as_mut() {
+                    ew.write_all(sub.captured_stderr.as_bytes()).await?;
+                }
                 status = exit;
             }
         }
