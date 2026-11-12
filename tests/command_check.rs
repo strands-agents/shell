@@ -1,8 +1,9 @@
-//! A custom kernel that decides each command Shell runs itself.
+//! A custom kernel that decides each command before it runs.
 //!
 //! `CheckingKernel` forwards every operation to the default kernel, records
 //! each `check_command`, `command_finished`, and `command_dropped` call, and
-//! refuses the programs it is given.
+//! refuses the programs it is given. `FallbackKernel` also has a command
+//! fallback and records each `check_fallback` call.
 
 use std::future::Future;
 use std::io;
@@ -13,7 +14,8 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use strands_shell::Shell;
 use strands_shell::os::{
-    CommandRequest, DirEntry, Fd, FileStat, HttpRequest, HttpResponse, Kernel, OpenFlags, Process,
+    CommandContext, CommandFallback, CommandRequest, DirEntry, Fd, FileStat, HttpRequest,
+    HttpResponse, Kernel, OpenFlags, Process,
 };
 
 /// Implement `Kernel` for a type with an `inner` kernel: the given methods,
@@ -130,6 +132,7 @@ enum Event {
     Check(String, Vec<String>, PathBuf),
     Finished(String, Vec<String>, PathBuf, i32),
     Dropped(String, Vec<String>, PathBuf),
+    CheckFallback(String, Vec<String>, PathBuf),
 }
 
 struct CheckingKernel {
@@ -211,6 +214,98 @@ forwarding_kernel!(PlainKernel {
     }
 });
 
+/// A kernel with a command fallback that records each program it runs,
+/// and refuses the fallback programs it is given.
+struct FallbackKernel {
+    inner: Arc<dyn Kernel>,
+    events: Arc<Mutex<Vec<Event>>>,
+    ran: Arc<Mutex<Vec<String>>>,
+    has_fallback: bool,
+    denied: &'static [&'static str],
+}
+
+#[async_trait]
+impl CommandFallback for FallbackKernel {
+    async fn run(&self, ctx: &mut CommandContext) -> io::Result<Option<i32>> {
+        self.ran.lock().unwrap().push(ctx.program().to_string());
+        Ok(Some(0))
+    }
+}
+
+forwarding_kernel!(FallbackKernel {
+    fn command_fallback(&self) -> Option<&dyn CommandFallback> {
+        self.has_fallback.then_some(self as &dyn CommandFallback)
+    }
+
+    async fn check_command(&self, request: &CommandRequest) -> io::Result<()> {
+        self.events.lock().unwrap().push(Event::Check(
+            request.program().to_string(),
+            request.args().to_vec(),
+            request.cwd().to_path_buf(),
+        ));
+        Ok(())
+    }
+
+    async fn check_fallback(&self, request: &CommandRequest) -> io::Result<()> {
+        self.events.lock().unwrap().push(Event::CheckFallback(
+            request.program().to_string(),
+            request.args().to_vec(),
+            request.cwd().to_path_buf(),
+        ));
+        if self.denied.contains(&request.program()) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "denied by policy",
+            ));
+        }
+        Ok(())
+    }
+
+    fn command_dropped(&self, request: &CommandRequest) {
+        self.events.lock().unwrap().push(Event::Dropped(
+            request.program().to_string(),
+            request.args().to_vec(),
+            request.cwd().to_path_buf(),
+        ));
+    }
+});
+
+/// A kernel with a command fallback that keeps the default `check_fallback`.
+struct DefaultFallbackKernel {
+    inner: Arc<dyn Kernel>,
+    ran: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl CommandFallback for DefaultFallbackKernel {
+    async fn run(&self, ctx: &mut CommandContext) -> io::Result<Option<i32>> {
+        self.ran.lock().unwrap().push(ctx.program().to_string());
+        Ok(Some(0))
+    }
+}
+
+forwarding_kernel!(DefaultFallbackKernel {
+    fn command_fallback(&self) -> Option<&dyn CommandFallback> {
+        Some(self)
+    }
+});
+
+type FallbackShell = (Shell, Arc<Mutex<Vec<Event>>>, Arc<Mutex<Vec<String>>>);
+
+fn fallback_shell(has_fallback: bool, denied: &'static [&'static str]) -> FallbackShell {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let inner = Shell::builder().build().unwrap().kernel().clone();
+    let shell = Shell::with_kernel(Arc::new(FallbackKernel {
+        inner,
+        events: events.clone(),
+        ran: ran.clone(),
+        has_fallback,
+        denied,
+    }));
+    (shell, events, ran)
+}
+
 fn checking_shell() -> (Shell, Arc<Mutex<Vec<Event>>>) {
     shell_with(&["rm"], false)
 }
@@ -262,7 +357,7 @@ fn checked_programs(events: &Mutex<Vec<Event>>) -> Vec<String> {
         .iter()
         .filter_map(|event| match event {
             Event::Check(program, ..) => Some(program.clone()),
-            Event::Finished(..) | Event::Dropped(..) => None,
+            Event::Finished(..) | Event::Dropped(..) | Event::CheckFallback(..) => None,
         })
         .collect()
 }
@@ -351,7 +446,7 @@ fn nested_commands_are_checked() {
 }
 
 #[test]
-fn commands_for_the_fallback_are_not_checked() {
+fn unknown_commands_without_a_fallback_are_not_checked() {
     block_on(async {
         let (mut shell, events) = checking_shell();
         let out = shell.run("missing arg").await;
@@ -636,5 +731,98 @@ fn a_failed_record_is_reported_and_changes_the_status() {
             "strands-shell: echo: finished with status 0, but the kernel could not record it: store unavailable\n"
         );
         assert_eq!(finished(&events).len(), 1);
+    });
+}
+
+fn check_fallback(program: &str, args: &[&str]) -> Event {
+    Event::CheckFallback(program.into(), strings(args), PathBuf::from("/home/lash"))
+}
+
+#[test]
+fn a_refused_fallback_stage_stops_every_stage() {
+    block_on(async {
+        let (mut shell, _, ran) = fallback_shell(true, &["tool"]);
+        let out = shell.run("mkdir /tmp/made | tool a").await;
+        assert_eq!(out.status, 126);
+        assert_eq!(out.stderr, "strands-shell: tool: denied by policy\n");
+        assert!(ran.lock().unwrap().is_empty());
+        assert_eq!(shell.run("test -e /tmp/made").await.status, 1);
+    });
+}
+
+#[test]
+fn allowed_stages_before_a_refused_fallback_stage_are_reported_as_dropped() {
+    block_on(async {
+        let (mut shell, events, _) = fallback_shell(true, &["tool"]);
+        let out = shell.run("echo a | other b | tool c").await;
+        assert_eq!(out.status, 126);
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                check("echo", &["a"]),
+                check_fallback("other", &["b"]),
+                check_fallback("tool", &["c"]),
+                dropped("echo", &["a"]),
+            ]
+        );
+    });
+}
+
+#[test]
+fn an_allowed_fallback_stage_is_asked_before_any_stage_runs() {
+    block_on(async {
+        let (mut shell, events, ran) = fallback_shell(true, &[]);
+        let out = shell.run("tool a | true").await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(
+            events.lock().unwrap()[..2],
+            [check_fallback("tool", &["a"]), check("true", &[])]
+        );
+        assert_eq!(*ran.lock().unwrap(), ["tool"]);
+    });
+}
+
+#[test]
+fn a_command_shell_runs_itself_is_not_sent_to_check_fallback() {
+    block_on(async {
+        let (mut shell, events, ran) = fallback_shell(true, &["tool"]);
+        let out = shell.run("tool() { true; }; tool a").await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, Event::CheckFallback(..))),
+            "{events:?}"
+        );
+        assert!(ran.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn a_kernel_without_a_fallback_is_not_asked_about_fallback_stages() {
+    block_on(async {
+        let (mut shell, events, _) = fallback_shell(false, &["tool"]);
+        let out = shell.run("tool a").await;
+        assert_eq!(out.status, 127);
+        assert!(events.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn a_kernel_without_check_fallback_runs_fallback_stages_as_before() {
+    block_on(async {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let inner = Shell::builder().build().unwrap().kernel().clone();
+        let mut shell = Shell::with_kernel(Arc::new(DefaultFallbackKernel {
+            inner,
+            ran: ran.clone(),
+        }));
+        let out = shell.run("mkdir /tmp/made | tool a").await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(out.stderr, "");
+        assert_eq!(*ran.lock().unwrap(), ["tool"]);
+        assert_eq!(shell.run("test -d /tmp/made").await.status, 0);
     });
 }
