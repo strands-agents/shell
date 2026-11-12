@@ -2009,6 +2009,8 @@ async fn run_capturing_status(
                     let (captured, result) =
                         Box::pin(run_capturing_status(os.clone(), proc, &compound_cl)).await;
                     let compound_exit = captured_status(result, proc.last_exit);
+                    // The stage's refusal must not mask an exit in a later function.
+                    proc.refused_array = false;
                     let (tx, rx) = os::pipe(64);
                     let mut tasks = ForegroundTasks::new(os.as_ref());
                     let handle = tokio::task::spawn_local(async move {
