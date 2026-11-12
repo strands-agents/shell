@@ -6156,6 +6156,21 @@ fn builder_bind_direct_host() {
 }
 
 #[test]
+fn mkdir_p_creates_missing_ancestors_inside_a_direct_bind() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_direct_mkdir_p");
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/direct")
+            .build()
+            .unwrap();
+        let out = shell.run("mkdir -p /mnt/direct/a/b/c").await;
+        assert_eq!((out.status, out.stderr.as_str()), (0, ""));
+        assert!(dir.join("a/b/c").is_dir());
+    }));
+}
+
+#[test]
 fn builder_bind_direct_readonly_host() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
