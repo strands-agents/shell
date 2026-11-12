@@ -8225,6 +8225,13 @@ expect_output!(
     7
 );
 expect_output!(
+    array_refusal_does_not_hide_a_later_function_exit,
+    "f() { arr=(1); }; f; g() { exit 7; }; g; echo after",
+    "",
+    "strands-shell: arrays are not supported\n",
+    7
+);
+expect_output!(
     function_exit_no_arg_uses_last_status,
     "f() { false; exit; }; f; echo after",
     "",

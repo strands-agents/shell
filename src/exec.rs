@@ -192,6 +192,7 @@ async fn run_script(
 /// Returns (exit_code, should_exit).
 pub async fn execute(os: Arc<dyn Kernel>, proc: &mut Process, input: &str) -> (i32, bool) {
     proc.pending_exit = false;
+    proc.refused_array = false;
     let result = if proc.max_input > 0 && input.len() > proc.max_input {
         proc.err_msg("strands-shell: input too large");
         (1, false)
@@ -234,6 +235,7 @@ pub async fn execute_with_reader(
 ) -> (i32, bool) {
     // Never carry a function's pending exit into a new top-level command.
     proc.pending_exit = false;
+    proc.refused_array = false;
     if proc.max_input > 0 && input.len() > proc.max_input {
         proc.err_msg("strands-shell: input too large");
         return (1, false);
@@ -570,6 +572,7 @@ fn assignment(proc: &Process, key: String, value: String) -> (String, String) {
 /// Arrays parse so that a function body holding one defines as in bash; running one is refused.
 fn refuse_array(proc: &mut Process) {
     proc.err_msg("strands-shell: arrays are not supported");
+    proc.refused_array = true;
     proc.nounset_error = true;
 }
 
@@ -3474,7 +3477,9 @@ async fn run_pipeline(
                 Ok(code) => code,
                 Err(ControlFlow::Return(code)) => code,
                 Err(ControlFlow::Exit(code)) => {
-                    shell_proc.pending_exit = true;
+                    if !std::mem::take(&mut shell_proc.refused_array) {
+                        shell_proc.pending_exit = true;
+                    }
                     code
                 }
                 Err(_) => shell_proc.last_exit,
