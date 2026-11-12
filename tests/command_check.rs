@@ -682,6 +682,29 @@ fn a_command_that_finished_is_not_reported_as_dropped() {
 }
 
 #[test]
+fn a_sleep_cut_short_by_the_deadline_reports_a_failure() {
+    block_on(async {
+        let (mut shell, events) = checking_shell();
+        shell.proc.deadline = Some(tokio::time::Instant::now() + Duration::from_millis(50));
+        let out = shell.run("sleep 5").await;
+        assert_eq!(
+            finished(&events),
+            [Event::Finished(
+                "sleep".into(),
+                strings(&["5"]),
+                PathBuf::from("/home/lash"),
+                1
+            )]
+        );
+        assert_eq!(out.status, 1);
+        assert_eq!(
+            out.stderr,
+            "strands-shell: sleep: execution timeout exceeded\n"
+        );
+    });
+}
+
+#[test]
 fn a_kernel_without_command_dropped_sees_no_change() {
     block_on(async {
         for (script, status, stderr, expected) in [

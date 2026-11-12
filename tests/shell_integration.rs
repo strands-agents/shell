@@ -4574,10 +4574,10 @@ fn timeout_interrupts_sleep_with_failure() {
             .build()
             .unwrap();
         let out = shell.run("sleep 5").await;
-        assert_ne!(out.status, 0, "sleep past the deadline must fail");
+        assert_eq!(out.status, 1, "sleep past the deadline must fail");
         assert_eq!(
             out.stderr.trim(),
-            "strands-shell: execution timeout exceeded",
+            "strands-shell: sleep: execution timeout exceeded",
             "stderr={:?}",
             out.stderr
         );
