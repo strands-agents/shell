@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use strands_shell::Shell;
 
 fn rt() -> (tokio::runtime::Runtime, tokio::task::LocalSet) {
@@ -4068,6 +4070,187 @@ expect!(
     ls_all,
     "mkdir -p /tmp/lsa; touch /tmp/lsa/.hidden; touch /tmp/lsa/visible; ls -a /tmp/lsa",
     ".hidden\nvisible"
+);
+
+expect!(
+    ls_h_without_l_lists_names,
+    "mkdir -p /tmp/lsh; touch /tmp/lsh/a /tmp/lsh/b; ls -h /tmp/lsh",
+    "a\nb"
+);
+
+expect!(
+    ls_lh_pipes_into_grep,
+    "mkdir -p /tmp/lsg; touch /tmp/lsg/foo /tmp/lsg/bar; ls -lh /tmp/lsg | grep -c foo",
+    "1"
+);
+
+/// Bind a host dir holding files with fixed sizes, modes and mtimes.
+/// `files` is (name, size, mtime seconds since epoch).
+#[cfg(unix)]
+fn ls_fixture(name: &str, files: &[(&str, u64, u64)]) -> TestDir {
+    let dir = TestDir::new(name);
+    for &(file, len, secs) in files {
+        let path = dir.join(file);
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(len).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    dir
+}
+
+#[cfg(unix)]
+fn run_ls_fixture(dir: &TestDir, cmd: &str) -> strands_shell::Output {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/fx")
+            .build()
+            .unwrap();
+        shell.run(cmd).await
+    }))
+}
+
+// 2020-01-01T00:00:00Z, far enough in the past that -l prints the year.
+#[cfg(unix)]
+const LS_T0: u64 = 1_577_836_800;
+
+#[cfg(unix)]
+#[test]
+fn ls_long_format_unchanged() {
+    let dir = ls_fixture("ls_long_fmt", &[("f", 1536, LS_T0)]);
+    let out = run_ls_fixture(&dir, "ls -l /fx");
+    assert_eq!(out.stdout, "-rw-r--r--     1536 Jan  1  2020 f\n");
+    assert_eq!(out.status, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_lh_prints_human_sizes() {
+    // Expected sizes from GNU coreutils `ls -lh`.
+    let files = [
+        ("a", 0, LS_T0),
+        ("b", 1023, LS_T0),
+        ("c", 1024, LS_T0),
+        ("d", 1025, LS_T0),
+        ("e", 10239, LS_T0),
+        ("f", 5_000_000, LS_T0),
+    ];
+    let dir = ls_fixture("ls_lh", &files);
+    let out = run_ls_fixture(&dir, "ls -lh /fx");
+    assert_eq!(
+        out.stdout,
+        "-rw-r--r--        0 Jan  1  2020 a\n\
+         -rw-r--r--     1023 Jan  1  2020 b\n\
+         -rw-r--r--     1.0K Jan  1  2020 c\n\
+         -rw-r--r--     1.1K Jan  1  2020 d\n\
+         -rw-r--r--      10K Jan  1  2020 e\n\
+         -rw-r--r--     4.8M Jan  1  2020 f\n"
+    );
+    assert_eq!(out.status, 0);
+    let single = run_ls_fixture(&dir, "ls --human-readable -l /fx/f");
+    assert_eq!(single.stdout, "-rw-r--r--     4.8M Jan  1  2020 /fx/f\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_sort_by_time_and_size() {
+    // Ties (a/b on mtime, b/c on size) fall back to name order, like GNU.
+    let files = [
+        ("a", 10, LS_T0 + 100),
+        ("b", 30, LS_T0 + 100),
+        ("c", 30, LS_T0 + 300),
+        ("d", 20, LS_T0),
+    ];
+    let dir = ls_fixture("ls_sort", &files);
+    let ls = |flags: &str| run_ls_fixture(&dir, &format!("ls {flags} /fx")).stdout;
+    assert_eq!(ls("-t"), "c\na\nb\nd\n");
+    assert_eq!(ls("-tr"), "d\nb\na\nc\n");
+    assert_eq!(ls("-S"), "b\nc\nd\na\n");
+    assert_eq!(ls("-Sr"), "a\nd\nc\nb\n");
+    assert_eq!(ls("-r"), "d\nc\nb\na\n");
+    assert_eq!(
+        ls("-lt"),
+        "-rw-r--r--       30 Jan  1  2020 c\n\
+         -rw-r--r--       10 Jan  1  2020 a\n\
+         -rw-r--r--       30 Jan  1  2020 b\n\
+         -rw-r--r--       20 Jan  1  2020 d\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_sorts_file_operands() {
+    let files = [
+        ("a.log", 10, LS_T0 + 100),
+        ("b.log", 30, LS_T0 + 100),
+        ("c.log", 30, LS_T0 + 300),
+        ("d.log", 20, LS_T0),
+    ];
+    let dir = ls_fixture("ls_sort_operands", &files);
+    for (flags, want) in [
+        ("-t", "/fx/c.log\n/fx/a.log\n/fx/b.log\n/fx/d.log\n"),
+        ("-tr", "/fx/d.log\n/fx/b.log\n/fx/a.log\n/fx/c.log\n"),
+        ("-S", "/fx/b.log\n/fx/c.log\n/fx/d.log\n/fx/a.log\n"),
+        ("-Sr", "/fx/a.log\n/fx/d.log\n/fx/c.log\n/fx/b.log\n"),
+        ("-r", "/fx/d.log\n/fx/c.log\n/fx/b.log\n/fx/a.log\n"),
+    ] {
+        let out = run_ls_fixture(
+            &dir,
+            &format!("ls {flags} /fx/a.log /fx/b.log /fx/c.log /fx/d.log"),
+        );
+        assert_eq!(out.stdout, want, "{flags}");
+        assert_eq!(out.stderr, "", "{flags}");
+        assert_eq!(out.status, 0, "{flags}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_sorts_mixed_operands_with_files_first() {
+    let dir = ls_fixture(
+        "ls_sort_mixed",
+        &[("old", 10, LS_T0), ("new", 20, LS_T0 + 100)],
+    );
+    for (name, secs) in [("adir", LS_T0), ("zdir", LS_T0 + 100)] {
+        std::fs::create_dir(dir.join(name)).unwrap();
+        std::fs::File::open(dir.join(name))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+    for (flags, want) in [
+        ("-t", "/fx/new\n/fx/old\n\n/fx/zdir:\n\n/fx/adir:\n"),
+        ("-tr", "/fx/old\n/fx/new\n\n/fx/adir:\n\n/fx/zdir:\n"),
+    ] {
+        let out = run_ls_fixture(
+            &dir,
+            &format!("ls {flags} /fx/adir /fx/old /fx/zdir /fx/new"),
+        );
+        assert_eq!(out.stdout, want, "{flags}");
+        assert_eq!(out.stderr, "", "{flags}");
+        assert_eq!(out.status, 0, "{flags}");
+    }
+}
+
+expect!(
+    ls_sorts_glob_operands,
+    "mkdir /tmp/lsglob; cd /tmp/lsglob; printf x > a.log; printf xxx > b.log; \
+     printf xx > c.log; ls -S *.log | head -1",
+    "b.log"
+);
+expect!(
+    ls_sort_includes_hidden_with_a,
+    "mkdir /tmp/lshidden; printf x > /tmp/lshidden/a; printf xx > /tmp/lshidden/.hidden; \
+     ls -aS /tmp/lshidden",
+    ".hidden\na"
+);
+expect!(
+    ls_sort_recurses,
+    "mkdir -p /tmp/lsrecursive/a /tmp/lsrecursive/b; printf x > /tmp/lsrecursive/a/small; \
+     printf xx > /tmp/lsrecursive/a/big; ls -RS /tmp/lsrecursive",
+    "/tmp/lsrecursive:\na\nb\n\n/tmp/lsrecursive/a:\nbig\nsmall\n\n/tmp/lsrecursive/b:"
 );
 
 // ── tail coverage ───────────────────────────────────────────────────
@@ -9867,7 +10050,7 @@ expect!(
 expect!(
     ls_help,
     "ls --help | head -n 1",
-    "Usage: ls [-laR1] [FILE]..."
+    "Usage: ls [-laR1hrSt] [FILE]..."
 );
 
 // ── sed coverage ────────────────────────────────────────────────────
