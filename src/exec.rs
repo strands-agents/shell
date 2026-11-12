@@ -1845,6 +1845,7 @@ async fn run_capturing_status(
                         (Err(ControlFlow::Exit(exit)), out)
                             if matches!(connector, Some(Connector::Background)) =>
                         {
+                            proc.refused_array = false;
                             let exit = if *negated { i32::from(exit == 0) } else { exit };
                             (exit, out)
                         }

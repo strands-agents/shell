@@ -8352,6 +8352,21 @@ expect!(
     "[no]"
 );
 expect!(
+    background_array_refusal_does_not_hide_function_exit,
+    "g() { exit 4; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    background_array_refusal_does_not_hide_function_nounset,
+    "g() { set -u; echo $missing; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    background_array_refusal_does_not_hide_function_expansion_error,
+    "g() { echo ${missing?stop}; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
     function_exit_in_background_job_keeps_shell,
     "f() { exit 3; }; f & echo no; wait $!; echo \"bg $?\"",
     "no\nbg 3"

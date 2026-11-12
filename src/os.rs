@@ -150,7 +150,7 @@ pub struct Process {
     /// Set when a nounset error occurs during expansion.
     pub nounset_error: bool,
     /// Set when `exit` ran inside a function called by a single-command pipeline.
-    pub pending_exit: bool,
+    pub(crate) pending_exit: bool,
     /// An unsupported array aborts its function without requesting a shell exit.
     pub(crate) refused_array: bool,
     /// PID of last background job (for $!).
