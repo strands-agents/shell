@@ -1,0 +1,6 @@
+status: 0
+stderr: empty
+--- stdout
+1 small
+5 medium
+10 large

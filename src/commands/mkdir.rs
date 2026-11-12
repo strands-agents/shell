@@ -29,8 +29,10 @@ async fn cmd_mkdir(os: &dyn Kernel, args: &[String]) -> CommandResult {
     for dir in &dirs {
         if parents {
             // Build each component
+            let parts: Vec<&str> = dir.split('/').collect();
+            let target = parts.iter().rposition(|part| !part.is_empty());
             let mut path = String::new();
-            for part in dir.split('/') {
+            for (index, part) in parts.iter().enumerate() {
                 if part.is_empty() && path.is_empty() {
                     path.push('/');
                     continue;
@@ -40,13 +42,26 @@ async fn cmd_mkdir(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 }
                 path.push_str(part);
                 let st = io::stat(os, &path).await;
-                if !st.exists {
-                    io::create_dir(os, &path).await?;
+                if st.exists {
+                    continue;
                 }
+                let is_ancestor = target.is_some_and(|target| index < target);
+                if is_ancestor && lookup_refused(os, &path).await {
+                    continue;
+                }
+                io::create_dir(os, &path).await?;
             }
         } else {
             io::create_dir(os, dir).await?;
         }
     }
     Ok(0)
+}
+
+/// Whether the kernel refuses to look up `path`, rather than reporting it missing.
+async fn lookup_refused(os: &dyn Kernel, path: &str) -> bool {
+    matches!(
+        io::canonicalize(os, path).await,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied
+    )
 }

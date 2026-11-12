@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -129,6 +129,8 @@ impl FdKind {
     }
 }
 
+const OUTPUT_LIMIT_MESSAGE: &str = "strands-shell: output size limit exceeded\n";
+
 /// Per-process state. Each shell/subshell gets its own.
 pub struct Process {
     /// Virtual PID (not the real OS PID).
@@ -161,6 +163,8 @@ pub struct Process {
     pub readonly_vars: Arc<std::collections::HashSet<String>>,
     /// Shell aliases.
     pub aliases: Arc<HashMap<String, String>>,
+    /// Shell options turned on with `shopt -s`.
+    pub(crate) shopts: std::collections::BTreeSet<String>,
     /// Command hash table (name → full path).
     pub hash_table: Arc<HashMap<String, String>>,
     /// Optional stderr channel for sandboxed error output.
@@ -332,6 +336,7 @@ impl Process {
             optoff: -1,
             readonly_vars: Arc::new(std::collections::HashSet::new()),
             aliases: Arc::new(HashMap::new()),
+            shopts: std::collections::BTreeSet::new(),
             hash_table: Arc::new(HashMap::new()),
             err_tx: None,
             depth: 0,
@@ -374,6 +379,7 @@ impl Process {
             optoff: -1,
             readonly_vars: Arc::new(std::collections::HashSet::new()),
             aliases: Arc::new(HashMap::new()),
+            shopts: std::collections::BTreeSet::new(),
             hash_table: Arc::new(HashMap::new()),
             err_tx: None,
             depth: 0,
@@ -456,6 +462,7 @@ impl Process {
             optoff: self.optoff,
             readonly_vars: self.readonly_vars.clone(),
             aliases: self.aliases.clone(),
+            shopts: self.shopts.clone(),
             hash_table: self.hash_table.clone(),
             err_tx: self.err_tx.clone(),
             depth: self.depth,
@@ -495,6 +502,23 @@ impl Process {
                 error_flag: None,
             },
         );
+    }
+
+    /// Copy the channel writer on `fd` into `target`. Returns `false` when `fd` holds no channel writer.
+    pub(crate) fn inherit_channel_writer(&self, fd: Fd, target: &mut Process) -> bool {
+        match self.fds.get(&fd) {
+            Some(FdKind::ChannelWriter { tx, error_flag }) => {
+                target.fds.insert(
+                    fd,
+                    FdKind::ChannelWriter {
+                        tx: tx.clone(),
+                        error_flag: error_flag.clone(),
+                    },
+                );
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Remove an fd from this process and install it in another.
@@ -619,6 +643,11 @@ impl Process {
         }
     }
 
+    /// Whether the last captured stderr line already reports the output limit.
+    pub(crate) fn output_limit_reported(&self) -> bool {
+        self.capture && self.captured_stderr.ends_with(OUTPUT_LIMIT_MESSAGE)
+    }
+
     /// Remove the stderr channel and return it.
     pub(crate) fn take_err_tx(&mut self) -> Option<mpsc::Sender<Bytes>> {
         self.err_tx.take()
@@ -630,8 +659,9 @@ impl Process {
             let _ = tx.try_send(Bytes::from(format!("{msg}\n")));
         } else if self.capture {
             if self.max_output > 0 && self.captured_output.len() + msg.len() > self.max_output {
-                self.captured_stderr
-                    .push_str("strands-shell: output size limit exceeded\n");
+                if !self.output_limit_reported() {
+                    self.captured_stderr.push_str(OUTPUT_LIMIT_MESSAGE);
+                }
                 self.last_exit = 1;
                 return;
             }
@@ -639,6 +669,29 @@ impl Process {
             self.captured_output.push('\n');
         } else {
             println!("{msg}");
+        }
+    }
+
+    /// Write text to stdout by the route [`out_msg`](Self::out_msg) takes, without adding a newline.
+    pub(crate) fn write_stdout(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(FdKind::ChannelWriter { tx, .. }) = self.fds.get(&STDOUT) {
+            let _ = tx.try_send(Bytes::from(text.to_string()));
+        } else if self.capture {
+            if self.max_output > 0 && self.captured_output.len() + text.len() > self.max_output {
+                self.captured_stderr
+                    .push_str("strands-shell: output size limit exceeded\n");
+                self.last_exit = 1;
+                return;
+            }
+            self.captured_output.push_str(text);
+        } else {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(text.as_bytes());
+            let _ = out.flush();
         }
     }
 
@@ -999,6 +1052,39 @@ pub struct HttpResponse {
     pub reason: String,
 }
 
+/// One command, as [`Kernel::check_command`] or [`Kernel::check_fallback`] sees it.
+#[derive(Debug)]
+pub struct CommandRequest {
+    program: String,
+    args: Vec<String>,
+    cwd: PathBuf,
+}
+
+impl CommandRequest {
+    pub(crate) fn new(program: &str, args: &[String], cwd: &Path) -> Self {
+        Self {
+            program: program.to_string(),
+            args: args.to_vec(),
+            cwd: cwd.to_path_buf(),
+        }
+    }
+
+    /// The program name after expansion and multicall or shebang resolution.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// The expanded arguments, without the program name.
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// The virtual working directory.
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+}
+
 /// The core kernel abstraction. All methods take &self — the kernel is shared.
 #[async_trait]
 pub trait Kernel: Send + Sync {
@@ -1013,6 +1099,9 @@ pub trait Kernel: Send + Sync {
     /// Check access permissions (ACCESS_R, ACCESS_W, ACCESS_X).
     async fn access(&self, proc: &Process, path: &str, mode: i32) -> bool;
     /// Canonicalize a path (resolve symlinks).
+    ///
+    /// `mkdir -p` does not create an ancestor whose canonicalize fails with
+    /// [`io::ErrorKind::PermissionDenied`].
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf>;
     /// Check if a path is an executable file.
     async fn is_executable(&self, proc: &Process, path: &str) -> bool;
@@ -1063,4 +1152,65 @@ pub trait Kernel: Send + Sync {
     fn command_fallback(&self) -> Option<&dyn CommandFallback> {
         None
     }
+    /// Decide whether a command that Shell implements may run.
+    ///
+    /// Shell calls this for each pipeline stage that names a builtin,
+    /// function, registered command, or script, after expansion and
+    /// resolution, and before any stage starts. For `builtin NAME`, where
+    /// `NAME` is a builtin, Shell asks about `NAME`. Commands that `eval`,
+    /// `source`, traps, `find -exec`, `xargs`, and Lua run come here too, but
+    /// `eval`, `source`, `.`, `exec`, `command`, `exit`, `return`, `break`,
+    /// and `continue` themselves do not.
+    /// Commands for [`Kernel::command_fallback`] go to
+    /// [`Kernel::check_fallback`] instead. An `Err` stops the pipeline: Shell
+    /// writes the error to stderr and returns 126. The default allows every
+    /// command.
+    async fn check_command(&self, _request: &CommandRequest) -> io::Result<()> {
+        Ok(())
+    }
+    /// Decide whether a command for [`Kernel::command_fallback`] may run.
+    ///
+    /// Shell calls this for each pipeline stage that goes to the fallback,
+    /// after expansion and resolution, and before any stage starts, in the
+    /// same pass as [`Kernel::check_command`]. Shell does not call it when
+    /// [`Kernel::command_fallback`] returns `None`. An `Err` stops the
+    /// pipeline: Shell writes the error to stderr, returns 126, and reports
+    /// each command that [`Kernel::check_command`] allowed to
+    /// [`Kernel::command_dropped`]. Shell reports a command for the fallback
+    /// to neither [`Kernel::command_finished`] nor [`Kernel::command_dropped`].
+    /// It also sees names the fallback would decline with `Ok(None)`; refusing
+    /// one stops the pipeline with 126 rather than 127 `command not found`.
+    /// The default allows every command.
+    async fn check_fallback(&self, _request: &CommandRequest) -> io::Result<()> {
+        Ok(())
+    }
+    /// Report the status of a command that [`Kernel::check_command`] allowed
+    /// and Shell ran.
+    ///
+    /// `request` has the same program, args, and cwd that Shell passed to
+    /// [`Kernel::check_command`].
+    /// `status` is the stage's own status, before Shell adjusts the pipeline
+    /// status for a failed host write or the output limit. A command that was
+    /// allowed but ended with no status is reported to
+    /// [`Kernel::command_dropped`] instead. An `Err` cannot undo the command:
+    /// Shell writes the error to stderr and the stage's status becomes 125.
+    /// The default does nothing.
+    async fn command_finished(&self, _request: &CommandRequest, _status: i32) -> io::Result<()> {
+        Ok(())
+    }
+    /// Report that a command [`Kernel::check_command`] allowed ended with no
+    /// status.
+    ///
+    /// Shell calls this instead of [`Kernel::command_finished`] when an
+    /// allowed command never started, because a redirect failed or another
+    /// stage of its pipeline was refused, and when Shell stopped waiting for
+    /// it, because its task failed or the pipeline was cancelled. The command
+    /// may or may not have had an effect. After a cancel it may still be
+    /// running, and calling the kernel, unless the kernel has a
+    /// [`Kernel::command_fallback`]. Shell may call this while dropping a
+    /// future, so it must not block. `request` has the same program,
+    /// args, and cwd that Shell passed to [`Kernel::check_command`]. Shell
+    /// calls this at most once for each allowed command, and never for one
+    /// it reported to [`Kernel::command_finished`]. The default does nothing.
+    fn command_dropped(&self, _request: &CommandRequest) {}
 }
