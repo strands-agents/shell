@@ -534,6 +534,37 @@ expect!(comment_only, "# this is a comment", "");
 expect!(trailing_semicolon, "echo hello;", "hello");
 expect!(whitespace_only, "   ", "");
 
+// `#` starts a comment only at the start of a word.
+#[test]
+fn hash_inside_word_is_literal() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (cmd, want) in [
+            ("echo a#b", "a#b\n"),
+            (r##"echo "issue"#123"##, "issue#123\n"),
+            ("x=a#b; echo $x", "a#b\n"),
+            ("x=1; echo $x#y", "1#y\n"),
+            ("echo $(echo a)#b", "a#b\n"),
+            ("case a#b in a#b) echo ok;; esac", "ok\n"),
+            ("for i in 1#2 3; do echo $i; done", "1#2\n3\n"),
+            ("echo $#x", "0x\n"),
+            ("echo #c", "\n"),
+            ("echo a;#c", "a\n"),
+            ("cat <<E#F\nbody\nE#F\necho after", "body\nafter\n"),
+            (
+                "# leading\nx=a#b # trailing\n  # indented\necho $x#c\n\
+                 echo one && # after and\necho two\nf() { echo in#f; } # after brace\nf",
+                "a#b#c\none\ntwo\nin#f\n",
+            ),
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, want, "{cmd:?}");
+            assert_eq!(out.status, 0, "{cmd:?}: status");
+        }
+    }));
+}
+
 // ── Shell builder env ───────────────────────────────────────────────
 
 #[test]
@@ -595,7 +626,10 @@ fn sourced_parse_error_stops_file_and_names_line() {
             .await;
         let out = shell.run(". /tmp/bad.sh; echo \"after $?\"").await;
         assert_eq!(out.stdout, "one\ntwo\nafter 1\n");
-        assert_eq!(out.stderr, "strands-shell: line 3: unexpected ')'\n");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: /tmp/bad.sh: line 3: unexpected ')'\n"
+        );
     }));
 }
 
@@ -1413,6 +1447,149 @@ expect_output!(
     0
 );
 
+// ── Function call redirections ──────────────────────────────────────
+
+expect_output!(
+    function_stdout_redirect,
+    "f() { echo x; }; f > /tmp/f; echo \"[$(cat /tmp/f)]\"",
+    "[x]\n",
+    "",
+    0
+);
+expect_output!(
+    function_append_redirect,
+    "f() { echo x; }; f > /tmp/f; f >> /tmp/f; cat /tmp/f",
+    "x\nx\n",
+    "",
+    0
+);
+expect_output!(
+    function_dev_null_redirect,
+    "f() { echo x; }; f > /dev/null; echo $?",
+    "0\n",
+    "",
+    0
+);
+expect_output!(
+    function_stderr_redirect,
+    "g() { echo y >&2; echo o; }; g 2> /tmp/e; echo \"[$(cat /tmp/e)]\"",
+    "o\n[y]\n",
+    "",
+    0
+);
+expect_output!(
+    function_stdin_redirect,
+    "printf 'hello\\n' > /tmp/in; h() { read l; echo \"got $l\"; }; h < /tmp/in",
+    "got hello\n",
+    "",
+    0
+);
+expect_output!(
+    function_heredoc_redirect,
+    "h() { read l; echo \"got $l\"; }; h <<EOF\nfrom heredoc\nEOF",
+    "got from heredoc\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_nested_call,
+    "f() { echo x; }; outer() { f; echo z; }; outer > /tmp/b; cat /tmp/b",
+    "x\nz\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_order,
+    "m() { echo a; echo b >&2; }; m 2>&1 > /tmp/h; echo \"[$(cat /tmp/h)]\"",
+    "b\n[a]\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_return_status,
+    "r() { echo r; return 3; }; r > /tmp/d; echo \"$? [$(cat /tmp/d)]\"",
+    "3 [r]\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_keeps_state,
+    "s() { cd /tmp; W=set; }; s > /dev/null; echo \"$PWD $W\"",
+    "/tmp set\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_restores_locals_and_args,
+    "lo() { local L=in; echo \"$L $1\"; }; L=outer; set -- a; lo q > /tmp/l; echo \"$L $1 [$(cat /tmp/l)]\"",
+    "outer a [in q]\n",
+    "",
+    0
+);
+expect_output!(
+    function_self_dup_keeps_caller_stdin,
+    "printf '1\\n2\\n3\\n4\\n' > /tmp/q; f() { read m; }; while read l; do f <&0; echo \"$l$m\"; done < /tmp/q",
+    "12\n34\n",
+    "",
+    0
+);
+
+#[test]
+fn function_redirect_failure_skips_body() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("f() { echo ran; }; f > /nonexistent/dir/x; echo \"status=$?\"")
+            .await;
+        assert_eq!(out.stdout, "status=1\n");
+        assert!(out.stderr.contains("/nonexistent/dir"), "{}", out.stderr);
+    }));
+}
+
+#[test]
+fn function_redirect_set_e_exits() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("se() { set -e; echo before; false; echo no; }; se > /tmp/se; echo after")
+            .await;
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+        let out = shell.run("cat /tmp/se").await;
+        assert_eq!(out.stdout, "before\n");
+    }));
+}
+
+#[test]
+fn function_redirect_recursion_limit() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .max_depth(4)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = shell.run("f() { f > /dev/null; }; f").await;
+        assert_ne!(out.status, 0, "recursive function should be blocked");
+    }));
+}
+
+#[test]
+fn function_redirect_from_cli() {
+    let dir = TestDir::new("function_redirect_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("f() { echo out; echo err >&2; }; f > /tmp/o 2> /tmp/e; f > /dev/null 2>&1; cat /tmp/o /tmp/e")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "out\nerr\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert!(out.status.success());
+}
+
 // ── find builtin ────────────────────────────────────────────────────
 
 #[test]
@@ -1774,6 +1951,161 @@ expect!(subshell_exit_code, "(exit 42); echo $?", "42");
 // ── source / dot command ────────────────────────────────────────────
 
 #[test]
+fn line_continuations_join_source_lines() {
+    let script = r#"pri\
+ntf '<%s>\n' hel\
+lo \
+  world
+true || \
+  printf unexpected
+printf 'a\n' | \
+  tr a b
+"#;
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for command in [script, ". /tmp/continued.sh", "sh /tmp/continued.sh"] {
+            let mut shell = Shell::builder().build().unwrap();
+            let setup = shell
+                .run(&format!(
+                    "printf '%s' '{}' > /tmp/continued.sh",
+                    script.replace('\'', "'\\''")
+                ))
+                .await;
+            assert_eq!(setup.status, 0, "{}", setup.stderr);
+            let out = shell.run(command).await;
+            assert_eq!(out.status, 0, "{command}: {}", out.stderr);
+            assert_eq!(out.stderr, "", "{command}");
+            assert_eq!(out.stdout, "<hello>\n<world>\nb\n", "{command}");
+        }
+    }));
+}
+
+/// Writes `script` to `path` in `shell`.
+async fn write_script(shell: &mut Shell, path: &str, script: &str) {
+    let setup = shell
+        .run(&format!(
+            "printf '%s' '{}' > {path}",
+            script.replace('\'', "'\\''")
+        ))
+        .await;
+    assert_eq!(setup.status, 0, "{}", setup.stderr);
+}
+
+#[test]
+fn and_or_at_line_end_joins_source_lines() {
+    let script = "false &&\necho AND_SKIPPED\ntrue ||\necho OR_SKIPPED\n\
+                  true &&\n  echo AND_RAN\nfalse ||\n\n  echo OR_RAN\n";
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for command in [
+            script,
+            ". /tmp/and_or.sh",
+            "source /tmp/and_or.sh",
+            "sh /tmp/and_or.sh",
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            write_script(&mut shell, "/tmp/and_or.sh", script).await;
+            let out = shell.run(command).await;
+            assert_eq!(out.stderr, "", "{command}");
+            assert_eq!(out.stdout, "AND_RAN\nOR_RAN\n", "{command}");
+            assert_eq!(out.status, 0, "{command}");
+        }
+    }));
+}
+
+#[test]
+fn and_or_at_line_end_keeps_the_guard_status() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, status) in [
+            ("false &&\necho skipped\n", "1"),
+            ("true ||\necho skipped\n", "0"),
+        ] {
+            for run in [".", "source", "sh"] {
+                let mut shell = Shell::builder().build().unwrap();
+                write_script(&mut shell, "/tmp/guard.sh", script).await;
+                let out = shell.run(&format!("{run} /tmp/guard.sh; echo $?")).await;
+                assert_eq!(out.stdout, format!("{status}\n"), "{run} {script:?}");
+                assert_eq!(out.stderr, "", "{run} {script:?}");
+            }
+        }
+    }));
+}
+
+#[test]
+fn sourced_parse_error_names_the_file_and_line() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, stdout, stderr) in [
+            (
+                "echo ONE\necho )\necho THREE\n",
+                "ONE\nafter 1\n",
+                "strands-shell: /tmp/bad.sh: line 2: unexpected ')'\n",
+            ),
+            (
+                "echo FIRST\necho \"open\necho SECOND\n",
+                "FIRST\nafter 1\n",
+                "strands-shell: /tmp/bad.sh: line 2: unterminated double quote\n",
+            ),
+        ] {
+            for run in [".", "source", "sh"] {
+                let mut shell = Shell::builder().build().unwrap();
+                write_script(&mut shell, "/tmp/bad.sh", script).await;
+                let out = shell
+                    .run(&format!("{run} /tmp/bad.sh; echo after $?"))
+                    .await;
+                assert_eq!(out.stdout, stdout, "{run} {script:?}");
+                assert_eq!(out.stderr, stderr, "{run} {script:?}");
+            }
+        }
+    }));
+}
+
+#[test]
+fn sourced_parse_error_stops_the_file_and_the_caller_continues() {
+    let script = "echo BEFORE\nbefore() { echo BEFORE_FN; }\nbad() { echo *(N); }\n\
+                  after() { echo AFTER_FN; }\necho AFTER\necho \"never closed\n";
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        write_script(&mut shell, "/tmp/stop.sh", script).await;
+        let out = shell
+            .run(". /tmp/stop.sh; echo rc=$?; before; after; echo DONE")
+            .await;
+        assert_eq!(out.stdout, "BEFORE\nrc=1\nBEFORE_FN\nDONE\n");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: /tmp/stop.sh: line 3: Opened parentheses without closing\n\
+             strands-shell: after: command not found\n"
+        );
+    }));
+}
+
+#[test]
+fn line_continuations_preserve_quoting_and_input_boundaries() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            ("printf '<%s>' 'a\\\nb' \"c\\\nd\"", "<a\\\nb><cd>"),
+            ("printf '<%s>' \\\\\nprintf next", "<\\>next"),
+            ("printf first # comment \\\nprintf next", "firstnext"),
+            (
+                "cat \\\n  <<'EOF'\na\\\nb\nEOF\nprintf after",
+                "a\\\nb\nafter",
+            ),
+            ("printf '<%s>' word\\\n", "<word>"),
+            ("alias a=''\nalias b=''\na b printf after", "after"),
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 0, "{script}: {}", out.stderr);
+            assert_eq!(out.stderr, "", "{script}");
+            assert_eq!(out.stdout, expected, "{script}");
+        }
+    }));
+}
+
+#[test]
 fn source_dot_script() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
@@ -1949,6 +2281,59 @@ expect_streams!(
     "x=$(cd /nope); echo \"[$x]\"",
     "[]\n",
     CD_NOPE
+);
+
+// ── xargs forwards the child's stderr ───────────────────────────────
+
+const CAT_NOPE: &str = "strands-shell: cat: no such file or directory: /nope\n";
+
+expect_streams!(
+    xargs_child_stderr_forwarded,
+    "printf '/nope\\n' | xargs cat",
+    "",
+    CAT_NOPE
+);
+expect_streams!(
+    xargs_command_not_found_reported,
+    "printf 'a\\n' | xargs nosuchcmd; echo \"status=$?\"",
+    "status=127\n",
+    "strands-shell: nosuchcmd: command not found\n"
+);
+expect_streams!(
+    xargs_child_stderr_to_dev_null,
+    "printf '/nope\\n' | xargs cat 2>/dev/null; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    xargs_child_stderr_to_file,
+    "printf '/nope\\n' | xargs cat 2>/tmp/xerr; cat /tmp/xerr",
+    CAT_NOPE,
+    ""
+);
+expect_streams!(
+    xargs_child_stderr_merged_into_pipe,
+    "printf '/nope\\n' | xargs cat 2>&1 | grep -c nope",
+    "1\n",
+    ""
+);
+expect_streams!(
+    xargs_child_stderr_keeps_order_per_invocation,
+    "echo x > /tmp/xf; x=$(printf '/tmp/xf /nope /tmp/xf\\n' | xargs -n 1 cat 2>&1); echo \"$x\"",
+    format!("x\n{CAT_NOPE}x\n"),
+    ""
+);
+expect_streams!(
+    xargs_replace_child_stderr_forwarded,
+    "printf '/nope\\n' | xargs -I X cat X",
+    "",
+    CAT_NOPE
+);
+expect_streams!(
+    xargs_child_stdout_unaffected,
+    "echo hi > /tmp/xg; printf '/tmp/xg\\n' | xargs cat",
+    "hi\n",
+    ""
 );
 
 // ── Heredoc expansion ───────────────────────────────────────────────
@@ -2899,7 +3284,47 @@ expect!(
     "printf '%b' 'hello\\nworld'",
     "hello\nworld"
 );
-expect!(printf_octal_escape, "printf '\\0101'", "A");
+// Like bash, a format-string octal escape is `\` plus 1-3 digits, so
+// `\0101` is `\010` then `1`; `%b` also accepts `\0` plus 3 digits.
+expect!(printf_octal_escape, "printf '\\101\\n'", "A");
+expect!(printf_octal_escape_leading_zero, "printf '\\0101'", "\x081");
+expect!(printf_octal_escape_max_digits, "printf '\\1012'", "A2");
+expect!(printf_hex_escape, "printf 'a\\x41b\\n'", "aAb");
+expect!(
+    printf_hex_escape_max_digits,
+    "printf '\\x414\\x4|'",
+    "A4\x04|"
+);
+expect!(
+    printf_hex_escape_no_digits,
+    "printf '\\xg' 2>/dev/null",
+    "\\xg"
+);
+expect!(printf_hex_escape_nul, "printf '\\x00z' | wc -c", "2");
+expect!(
+    printf_hex_escape_raw_byte,
+    "printf '\\xff\\200' | wc -c",
+    "2"
+);
+expect!(printf_unicode_escape, "printf '\\u00e9\\U0001F600'", "é😀");
+expect!(
+    printf_format_backslash_c_is_literal,
+    r"printf 'x\cy'",
+    r"x\cy"
+);
+expect!(
+    printf_b_octal_escape,
+    r"printf '%b|' '\0101' '\101' '\01012'",
+    "A|A|A2|"
+);
+expect!(printf_b_hex_escape, r"printf '%b' 'a\x41b'", "aAb");
+expect_output!(
+    printf_b_backslash_c_stops_output,
+    r"printf '%s %b %s\n' 1 '\c' 3 4 5 6",
+    "1 ",
+    "",
+    0
+);
 
 // ── chmod coverage ──────────────────────────────────────────────────
 
@@ -4062,6 +4487,66 @@ expect!(
     find_exec_plus,
     "echo a > /tmp/fep1; echo b > /tmp/fep2; find /tmp/fep1 /tmp/fep2 -name 'fep*' -exec cat {} +",
     "a\nb"
+);
+
+// ── find -exec forwards the child's stderr ──────────────────────────
+
+const FIND_CAT_NOPE: &str = "strands-shell: cat: no such file or directory: /nope\n";
+
+expect_streams!(
+    find_exec_child_stderr_forwarded,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\;",
+    "",
+    FIND_CAT_NOPE
+);
+expect_streams!(
+    find_exec_plus_child_stderr_forwarded,
+    "echo x > /tmp/fes; find /tmp/fes -exec nosuchcmd {} +",
+    "",
+    "strands-shell: nosuchcmd: command not found\n"
+);
+expect_streams!(
+    find_exec_command_not_found_reported,
+    "echo x > /tmp/fes; find /tmp/fes -exec nosuchcmd \\;",
+    "",
+    "strands-shell: nosuchcmd: command not found\n"
+);
+expect_streams!(
+    find_exec_child_stderr_to_dev_null,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\; 2>/dev/null; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    find_exec_plus_child_stderr_to_dev_null,
+    "echo x > /tmp/fes; find /tmp/fes -exec nosuchcmd {} + 2>/dev/null; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    find_exec_child_stderr_to_file,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\; 2>/tmp/fes_err; cat /tmp/fes_err",
+    FIND_CAT_NOPE,
+    ""
+);
+expect_streams!(
+    find_exec_child_stderr_keeps_order_across_execs,
+    "mkdir /tmp/feo; echo x > /tmp/feo/a; echo y > /tmp/feo/b; \
+     o=$(find /tmp/feo -type f -exec cat {} \\; -exec cat /nope \\; 2>&1); echo \"$o\"",
+    format!("x\n{FIND_CAT_NOPE}y\n{FIND_CAT_NOPE}"),
+    ""
+);
+expect_streams!(
+    find_exec_child_stderr_merged_into_pipe,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\; 2>&1 | grep -c nope",
+    "1\n",
+    ""
+);
+expect_streams!(
+    find_exec_child_stdout_unaffected,
+    "echo hi > /tmp/fes; find /tmp/fes -exec cat {} \\;",
+    "hi\n",
+    ""
 );
 
 // ── printf additional format specifiers ───────────────────────────
@@ -5506,6 +5991,51 @@ expect!(
 expect!(sed_replace_newline, "echo 'a b' | sed 's/ /\\n/'", "a\nb");
 expect!(sed_replace_tab, "printf 'a b' | sed 's/ /\\t/'", "a\tb");
 
+// ── sed basic and extended regex syntax ────────────────────────────
+
+expect!(
+    sed_bre_literal_parens,
+    "echo 'call(x)' | sed 's/call(x)/run(x)/'",
+    "run(x)"
+);
+expect!(
+    sed_bre_literal_metachars,
+    "echo 'a+b?c|d{1}' | sed 's/a+b?c|d{1}/ok/'",
+    "ok"
+);
+expect!(
+    sed_bre_gnu_operators,
+    r#"echo 'aab' | sed 's/a\+\(b\|c\)\?/X/'"#,
+    "X"
+);
+expect!(sed_bre_interval, r#"echo 'aaa' | sed 's/a\{2\}/X/'"#, "Xa");
+expect!(
+    sed_bre_leading_star_inner_dollar,
+    "echo '*$(CC)' | sed 's/^*$(CC)/ok/'",
+    "ok"
+);
+expect!(sed_bre_final_dollar, "echo 'b b' | sed 's/b$/X/'", "b X");
+expect!(
+    sed_bre_dollar_before_group_end,
+    r#"echo 'b b' | sed 's/\(b$\)/[\1]/'"#,
+    "b [b]"
+);
+expect!(
+    sed_bre_address,
+    "printf 'f(x)\\ng(y)\\n' | sed -n '/f(x)/p'",
+    "f(x)"
+);
+expect!(
+    sed_ere_flag,
+    r#"echo 'ab' | sed -E 's/(a|z)+(b)/\2\1/'"#,
+    "ba"
+);
+expect!(
+    sed_ere_escaped_parens,
+    r#"echo 'f(x)' | sed -rn '/f\(x\)/s/f\(x\)/g/p'"#,
+    "g"
+);
+
 // ── set +e disables errexit ────────────────────────────────────────
 
 expect!(
@@ -5910,6 +6440,21 @@ fn builder_bind_direct_host() {
             .unwrap();
         let out = shell.run("cat /mnt/direct/hello.txt").await;
         assert_eq!(out.stdout.trim(), "direct_content");
+    }));
+}
+
+#[test]
+fn mkdir_p_creates_missing_ancestors_inside_a_direct_bind() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_direct_mkdir_p");
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/direct")
+            .build()
+            .unwrap();
+        let out = shell.run("mkdir -p /mnt/direct/a/b/c").await;
+        assert_eq!((out.status, out.stderr.as_str()), (0, ""));
+        assert!(dir.join("a/b/c").is_dir());
     }));
 }
 
@@ -6725,6 +7270,69 @@ fn script_args_and_isolation_unchanged() {
 }
 
 // ── Script execution via sh ─────────────────────────────────────────
+
+/// Runs `cmd` after writing a `cat` script and a `read` script.
+async fn run_with_stdin_scripts(cmd: &str) -> strands_shell::Output {
+    let mut shell = Shell::builder().build().unwrap();
+    shell
+        .run(
+            "printf 'cat\\n' > /tmp/cat.sh; printf 'read l; echo got $l\\n' > /tmp/read.sh; \
+             printf '#!/bin/sh\\ncat\\n' > /tmp/catx.sh; chmod +x /tmp/catx.sh",
+        )
+        .await;
+    shell.run(cmd).await
+}
+
+#[test]
+fn script_reads_piped_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin_scripts("echo x | sh /tmp/cat.sh").await;
+        assert_eq!(out.stdout, "x\n");
+        let out = run_with_stdin_scripts("echo x | sh /tmp/read.sh").await;
+        assert_eq!(out.stdout, "got x\n");
+        assert_eq!(out.stderr, "");
+        let out = run_with_stdin_scripts("echo x | /tmp/catx.sh | tr a-z A-Z").await;
+        assert_eq!(out.stdout, "X\n");
+    }));
+}
+
+#[test]
+fn script_reads_redirected_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out =
+            run_with_stdin_scripts("printf 'a\\nb\\n' > /tmp/in; sh /tmp/cat.sh < /tmp/in").await;
+        assert_eq!(out.stdout, "a\nb\n");
+        let out = run_with_stdin_scripts("sh /tmp/read.sh <<EOF\nhd\nEOF").await;
+        assert_eq!(out.stdout, "got hd\n");
+        let out = run_with_stdin_scripts("sh /tmp/read.sh < /dev/null; echo $?").await;
+        assert_eq!(out.stdout, "got\n0\n");
+    }));
+}
+
+#[test]
+fn script_stdin_edge_cases() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        // Reads only the first line of a multi-line pipe.
+        let out = run_with_stdin_scripts("printf 'a\\nb\\nc\\n' | sh /tmp/read.sh").await;
+        assert_eq!(out.stdout, "got a\n");
+        // A script that ignores its piped stdin still succeeds.
+        let out = run_with_stdin_scripts(
+            "printf 'true\\n' > /tmp/noop.sh; printf 'a\\n' | sh /tmp/noop.sh; echo $?",
+        )
+        .await;
+        assert_eq!(out.stdout, "0\n");
+        // No stdin at all: unchanged.
+        let out = run_with_stdin_scripts("sh /tmp/cat.sh; echo rc=$?").await;
+        assert_eq!(out.stdout, "rc=0\n");
+        // The pipe does not outlive the pipeline.
+        let out =
+            run_with_stdin_scripts("echo x | sh /tmp/read.sh; read z; echo \"rc=$? z=$z\"").await;
+        assert_eq!(out.stdout, "got x\nrc=1 z=\n");
+    }));
+}
 
 #[test]
 fn script_multiline_sh() {
@@ -8841,6 +9449,35 @@ shell_test!(
 
 expect_status!(date_invalid_arg, "date foo", 1);
 
+shell_test!(
+    date_epoch_seconds,
+    "date +%s",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 0);
+        let secs: u64 = out.stdout.trim().parse().expect("digits");
+        let host = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(host.abs_diff(secs) < 60, "stdout: {}", out.stdout);
+    }
+);
+
+shell_test!(
+    date_composite_specifiers_match_parts,
+    "date '+%F %T|%Y-%m-%d %H:%M:%S'",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 0);
+        let re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$").unwrap();
+        let (composite, parts) = out.stdout.trim().split_once('|').unwrap();
+        assert!(re.is_match(composite), "stdout: {}", out.stdout);
+        // Both halves are formatted from the same instant.
+        assert_eq!(composite, parts);
+    }
+);
+
+expect!(date_percent_escape, "date '+%%Y 100%%'", "%Y 100%");
+
 // ── sleep ───────────────────────────────────────────────────────────
 
 expect_status!(sleep_zero, "sleep 0", 0);
@@ -9986,6 +10623,50 @@ expect_writers!(
     "",
     |stderr: &str| assert_eq!(stderr, "")
 );
+expect_writers!(
+    group_redirect_takes_both_streams_away_from_writers,
+    "{ echo out; ls /nope; unalias missing; } >/dev/null 2>&1; echo done",
+    "done\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    group_redirect_takes_many_stderr_lines_away_from_writer,
+    "{ i=0; while [ $i -lt 300 ]; do echo line >&2; i=$((i+1)); done; } 2>/dev/null; echo done",
+    "done\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    group_stderr_to_file_leaves_stdout_on_writer,
+    "{ echo out; ls /nope; } 2>/tmp/group_err.txt; grep -c nope /tmp/group_err.txt",
+    "out\n1\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    unredirected_group_streams_to_writers,
+    "{ echo out; ls /nope; }",
+    "out\n",
+    |stderr: &str| assert!(stderr.contains("/nope"), "stderr: {stderr:?}")
+);
+
+#[test]
+fn group_stderr_follows_stdout_writer_before_stdout_moves_to_file() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let (output, stdout, stderr) = run_with_writers(
+            &mut shell,
+            "{ echo out; ls /nope; } 2>&1 >/tmp/group_out.txt; cat /tmp/group_out.txt",
+        )
+        .await;
+        assert!(
+            stdout.contains("/nope") && stdout.ends_with("out\n"),
+            "stdout: {stdout:?}"
+        );
+        assert_eq!(stderr, "", "stderr writer must be empty");
+        assert_eq!(output.stdout, "", "captured stdout must be empty");
+        assert_eq!(output.stderr, "", "captured stderr must be empty");
+    }));
+}
 
 #[test]
 fn writer_receives_bytes_that_are_not_utf8() {
