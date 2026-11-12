@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use strands_shell::Shell;
 
 fn rt() -> (tokio::runtime::Runtime, tokio::task::LocalSet) {
@@ -1151,6 +1153,85 @@ fn redir_fd_close() {
     }));
 }
 
+// A digit is a redirect's fd only when written right before `<` or `>`;
+// `echo 3 > f` writes `3`. Expected outputs are bash's.
+#[test]
+fn redir_fd_only_when_digit_touches_operator() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, stdout, stderr) in [
+            // A separated digit is an argument.
+            ("echo 3 > /tmp/n; cat /tmp/n", "3\n", ""),
+            ("echo 1 > /tmp/n; cat /tmp/n", "1\n", ""),
+            ("echo a 2 > /tmp/n; cat /tmp/n", "a 2\n", ""),
+            ("printf '%s\\n' 42 > /tmp/n; cat /tmp/n", "42\n", ""),
+            ("echo 0 > /tmp/n; cat /tmp/n", "0\n", ""),
+            ("echo 4 >> /tmp/a; cat /tmp/a", "4\n", ""),
+            ("echo 5 < /dev/null", "5\n", ""),
+            ("echo 2 >| /tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo 7 <> /tmp/rw; cat /tmp/rw", "7\n", ""),
+            ("echo 2 >& 1", "2\n", ""),
+            ("echo 3 2 >&2", "", "3 2\n"),
+            // A quoted or escaped digit is an argument too.
+            ("echo \"2\">/tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo '2'>/tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo \\2>/tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo a2>/tmp/n; cat /tmp/n", "a2\n", ""),
+            // A digit touching the operator is the fd.
+            ("echo 3>/tmp/n; cat /tmp/n", "\n", ""),
+            ("echo x 2>/tmp/n; cat /tmp/n", "x\n", ""),
+            ("echo x 2> /tmp/n; cat /tmp/n", "x\n", ""),
+            ("echo hi 1>&2", "", "hi\n"),
+            ("echo a 9>&-; echo b", "a\nb\n", ""),
+            ("printf 'in\\n' > /tmp/n; cat 0</tmp/n", "in\n", ""),
+            ("2>/dev/null echo hi", "hi\n", ""),
+            ("cat 0<<EOF\nhd\nEOF", "hd\n", ""),
+            ("if true; then echo i; fi 1>/tmp/n; cat /tmp/n", "i\n", ""),
+            // Other uses of digits and `>` are untouched.
+            ("echo $((3>2))", "1\n", ""),
+            ("[ 3 -gt 2 ] && echo yes", "yes\n", ""),
+            ("test 3 \\> 2 && echo yes", "yes\n", ""),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, stdout, "{cmd}: stdout");
+            assert_eq!(out.stderr, stderr, "{cmd}: stderr");
+        }
+    }));
+}
+
+#[test]
+fn redir_dup_output_target_before_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for cmd in [
+            "echo hi 2>&1>/tmp/out; cat /tmp/out",
+            "echo hi >&2>>/tmp/out; cat /tmp/out",
+            "{ echo hi; } 2>&1>/tmp/out; cat /tmp/out",
+            "echo hi >/tmp/out 2>&1</tmp/out; cat /tmp/out",
+            "echo hi 2>&1>|/tmp/out; cat /tmp/out",
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let out = shell.run(cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: status");
+            assert_eq!(out.stdout, "hi\n", "{cmd}: stdout");
+            assert_eq!(out.stderr, "", "{cmd}: stderr");
+        }
+    }));
+}
+
+#[test]
+fn redir_dup_input_target_before_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("printf 'hi\\n' >/tmp/in; cat <&1</tmp/in").await;
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout, "hi\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
 // Redirect in variable expansion
 expect!(
     redir_var_filename,
@@ -2187,6 +2268,73 @@ expect!(
     "printf 'a\\nb\\nc\\nd\\n' | xargs -n 2 echo",
     "a b\nc d"
 );
+
+// GNU: 123 if any invocation failed, not just the last one.
+expect!(
+    xargs_status_failure_in_middle,
+    "echo a > a; echo b > b; printf 'a\\nnosuch\\nb\\n' | xargs -n 1 cat; echo st=$?",
+    "a\nb\nst=123"
+);
+expect!(
+    xargs_status_all_succeed,
+    "echo a > a; echo b > b; printf 'a\\nb\\n' | xargs -n 1 cat; echo st=$?",
+    "a\nb\nst=0"
+);
+expect!(
+    xargs_status_failure_last,
+    "echo a > a; printf 'a\\nnosuch\\n' | xargs -n 1 cat; echo st=$?",
+    "a\nst=123"
+);
+expect!(
+    xargs_status_failure_with_replace,
+    "echo a > a; printf 'nosuch\\na\\n' | xargs -I X cat X; echo st=$?",
+    "a\nst=123"
+);
+expect!(
+    xargs_status_any_nonzero_is_123,
+    "printf 'echo run $1; exit $1\\n' > e.sh; printf '200\\n0\\n' | xargs -n 1 sh e.sh; echo st=$?",
+    "run 200\nrun 0\nst=123"
+);
+expect_output!(
+    xargs_status_not_found,
+    "printf 'a\\nb\\n' | xargs -n 1 nosuchcmd",
+    "",
+    "strands-shell: nosuchcmd: command not found\n",
+    127
+);
+
+// GNU: a command exiting 255 stops xargs, which exits 124.
+shell_test!(
+    xargs_status_255_stops,
+    "printf 'echo run $1; exit $1\\n' > e.sh; printf '0\\n255\\n7\\n' | xargs -n 1 sh e.sh",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "run 0\nrun 255\n");
+        assert_eq!(out.stderr, "xargs: sh: exited with status 255; aborting\n");
+        assert_eq!(out.status, 124);
+    }
+);
+
+#[test]
+fn xargs_status_timeout() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut statuses = Vec::new();
+        for command in [
+            "echo 2 | xargs sleep",
+            "printf '2\\n2\\n' | xargs -n 1 sleep",
+            "printf '2\\n2\\n' | xargs -I X sleep X",
+        ] {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert!(out.stderr.contains("execution timeout exceeded"));
+            statuses.push(out.status);
+        }
+        assert_eq!(statuses, vec![1, 1, 1]);
+    }));
+}
 
 // ── Arithmetic: assignment operators ────────────────────────────────
 
@@ -3922,6 +4070,187 @@ expect!(
     ls_all,
     "mkdir -p /tmp/lsa; touch /tmp/lsa/.hidden; touch /tmp/lsa/visible; ls -a /tmp/lsa",
     ".hidden\nvisible"
+);
+
+expect!(
+    ls_h_without_l_lists_names,
+    "mkdir -p /tmp/lsh; touch /tmp/lsh/a /tmp/lsh/b; ls -h /tmp/lsh",
+    "a\nb"
+);
+
+expect!(
+    ls_lh_pipes_into_grep,
+    "mkdir -p /tmp/lsg; touch /tmp/lsg/foo /tmp/lsg/bar; ls -lh /tmp/lsg | grep -c foo",
+    "1"
+);
+
+/// Bind a host dir holding files with fixed sizes, modes and mtimes.
+/// `files` is (name, size, mtime seconds since epoch).
+#[cfg(unix)]
+fn ls_fixture(name: &str, files: &[(&str, u64, u64)]) -> TestDir {
+    let dir = TestDir::new(name);
+    for &(file, len, secs) in files {
+        let path = dir.join(file);
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(len).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    dir
+}
+
+#[cfg(unix)]
+fn run_ls_fixture(dir: &TestDir, cmd: &str) -> strands_shell::Output {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/fx")
+            .build()
+            .unwrap();
+        shell.run(cmd).await
+    }))
+}
+
+// 2020-01-01T00:00:00Z, far enough in the past that -l prints the year.
+#[cfg(unix)]
+const LS_T0: u64 = 1_577_836_800;
+
+#[cfg(unix)]
+#[test]
+fn ls_long_format_unchanged() {
+    let dir = ls_fixture("ls_long_fmt", &[("f", 1536, LS_T0)]);
+    let out = run_ls_fixture(&dir, "ls -l /fx");
+    assert_eq!(out.stdout, "-rw-r--r--     1536 Jan  1  2020 f\n");
+    assert_eq!(out.status, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_lh_prints_human_sizes() {
+    // Expected sizes from GNU coreutils `ls -lh`.
+    let files = [
+        ("a", 0, LS_T0),
+        ("b", 1023, LS_T0),
+        ("c", 1024, LS_T0),
+        ("d", 1025, LS_T0),
+        ("e", 10239, LS_T0),
+        ("f", 5_000_000, LS_T0),
+    ];
+    let dir = ls_fixture("ls_lh", &files);
+    let out = run_ls_fixture(&dir, "ls -lh /fx");
+    assert_eq!(
+        out.stdout,
+        "-rw-r--r--        0 Jan  1  2020 a\n\
+         -rw-r--r--     1023 Jan  1  2020 b\n\
+         -rw-r--r--     1.0K Jan  1  2020 c\n\
+         -rw-r--r--     1.1K Jan  1  2020 d\n\
+         -rw-r--r--      10K Jan  1  2020 e\n\
+         -rw-r--r--     4.8M Jan  1  2020 f\n"
+    );
+    assert_eq!(out.status, 0);
+    let single = run_ls_fixture(&dir, "ls --human-readable -l /fx/f");
+    assert_eq!(single.stdout, "-rw-r--r--     4.8M Jan  1  2020 /fx/f\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_sort_by_time_and_size() {
+    // Ties (a/b on mtime, b/c on size) fall back to name order, like GNU.
+    let files = [
+        ("a", 10, LS_T0 + 100),
+        ("b", 30, LS_T0 + 100),
+        ("c", 30, LS_T0 + 300),
+        ("d", 20, LS_T0),
+    ];
+    let dir = ls_fixture("ls_sort", &files);
+    let ls = |flags: &str| run_ls_fixture(&dir, &format!("ls {flags} /fx")).stdout;
+    assert_eq!(ls("-t"), "c\na\nb\nd\n");
+    assert_eq!(ls("-tr"), "d\nb\na\nc\n");
+    assert_eq!(ls("-S"), "b\nc\nd\na\n");
+    assert_eq!(ls("-Sr"), "a\nd\nc\nb\n");
+    assert_eq!(ls("-r"), "d\nc\nb\na\n");
+    assert_eq!(
+        ls("-lt"),
+        "-rw-r--r--       30 Jan  1  2020 c\n\
+         -rw-r--r--       10 Jan  1  2020 a\n\
+         -rw-r--r--       30 Jan  1  2020 b\n\
+         -rw-r--r--       20 Jan  1  2020 d\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_sorts_file_operands() {
+    let files = [
+        ("a.log", 10, LS_T0 + 100),
+        ("b.log", 30, LS_T0 + 100),
+        ("c.log", 30, LS_T0 + 300),
+        ("d.log", 20, LS_T0),
+    ];
+    let dir = ls_fixture("ls_sort_operands", &files);
+    for (flags, want) in [
+        ("-t", "/fx/c.log\n/fx/a.log\n/fx/b.log\n/fx/d.log\n"),
+        ("-tr", "/fx/d.log\n/fx/b.log\n/fx/a.log\n/fx/c.log\n"),
+        ("-S", "/fx/b.log\n/fx/c.log\n/fx/d.log\n/fx/a.log\n"),
+        ("-Sr", "/fx/a.log\n/fx/d.log\n/fx/c.log\n/fx/b.log\n"),
+        ("-r", "/fx/d.log\n/fx/c.log\n/fx/b.log\n/fx/a.log\n"),
+    ] {
+        let out = run_ls_fixture(
+            &dir,
+            &format!("ls {flags} /fx/a.log /fx/b.log /fx/c.log /fx/d.log"),
+        );
+        assert_eq!(out.stdout, want, "{flags}");
+        assert_eq!(out.stderr, "", "{flags}");
+        assert_eq!(out.status, 0, "{flags}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_sorts_mixed_operands_with_files_first() {
+    let dir = ls_fixture(
+        "ls_sort_mixed",
+        &[("old", 10, LS_T0), ("new", 20, LS_T0 + 100)],
+    );
+    for (name, secs) in [("adir", LS_T0), ("zdir", LS_T0 + 100)] {
+        std::fs::create_dir(dir.join(name)).unwrap();
+        std::fs::File::open(dir.join(name))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+    for (flags, want) in [
+        ("-t", "/fx/new\n/fx/old\n\n/fx/zdir:\n\n/fx/adir:\n"),
+        ("-tr", "/fx/old\n/fx/new\n\n/fx/adir:\n\n/fx/zdir:\n"),
+    ] {
+        let out = run_ls_fixture(
+            &dir,
+            &format!("ls {flags} /fx/adir /fx/old /fx/zdir /fx/new"),
+        );
+        assert_eq!(out.stdout, want, "{flags}");
+        assert_eq!(out.stderr, "", "{flags}");
+        assert_eq!(out.status, 0, "{flags}");
+    }
+}
+
+expect!(
+    ls_sorts_glob_operands,
+    "mkdir /tmp/lsglob; cd /tmp/lsglob; printf x > a.log; printf xxx > b.log; \
+     printf xx > c.log; ls -S *.log | head -1",
+    "b.log"
+);
+expect!(
+    ls_sort_includes_hidden_with_a,
+    "mkdir /tmp/lshidden; printf x > /tmp/lshidden/a; printf xx > /tmp/lshidden/.hidden; \
+     ls -aS /tmp/lshidden",
+    ".hidden\na"
+);
+expect!(
+    ls_sort_recurses,
+    "mkdir -p /tmp/lsrecursive/a /tmp/lsrecursive/b; printf x > /tmp/lsrecursive/a/small; \
+     printf xx > /tmp/lsrecursive/a/big; ls -RS /tmp/lsrecursive",
+    "/tmp/lsrecursive:\na\nb\n\n/tmp/lsrecursive/a:\nbig\nsmall\n\n/tmp/lsrecursive/b:"
 );
 
 // ── tail coverage ───────────────────────────────────────────────────
@@ -7064,7 +7393,7 @@ fn stdout_max_output_truncate_multibyte() {
 // ── exec.rs coverage: exit inside function ─────────────────────────
 
 expect_status!(func_exit_code, "f() { exit 42; }; f", 42);
-expect!(func_exit_stops, "f() { exit 0; }; f; echo after", "after");
+expect!(func_exit_stops, "f() { exit 0; }; f; echo after", "");
 
 // ── exec.rs coverage: continue N in nested loops ───────────────────
 
@@ -8100,6 +8429,78 @@ expect!(
 );
 expect!(dquote_backslash_special_dquote, r#"echo "a\"b""#, r#"a"b"#);
 
+// ── sh -c command_string ────────────────────────────────────────────
+
+expect!(sh_c_runs_string, "sh -c 'echo hi'", "hi");
+expect!(lash_c_runs_string, "lash -c 'echo hi'", "hi");
+expect!(
+    sh_c_positional_params,
+    "sh -c 'echo $0 $# $1 $2' name a b",
+    "name 2 a b"
+);
+expect!(sh_c_default_arg0, "sh -c 'echo $0 $#'", "sh 0");
+expect!(lash_c_default_arg0, "lash -c 'echo $0'", "lash");
+expect!(
+    sh_c_quoted_args,
+    "sh -c 'printf \"<%s>\" \"$@\"' n 'x y' z",
+    "<x y><z>"
+);
+expect!(sh_c_exit_status, "sh -c 'exit 3'; echo $?", "3");
+expect!(
+    sh_c_exit_stops,
+    "sh -c 'echo a; exit 4; echo b'; echo $?",
+    "a\n4"
+);
+expect!(sh_c_multiple_statements, "sh -c 'a=1; echo $a'", "1");
+expect!(sh_c_multiline, "sh -c 'echo a\necho b'", "a\nb");
+expect!(sh_c_var_not_leaked, "sh -c 'b=2'; echo \"[$b]\"", "[]");
+expect!(sh_c_cd_not_leaked, "sh -c 'cd /tmp'; pwd", "/home/lash");
+expect!(sh_c_empty_string, "sh -c ''; echo $?", "0");
+expect!(
+    sh_c_stdout_redirect,
+    "sh -c 'echo hi' > /tmp/shc; cat /tmp/shc",
+    "hi"
+);
+expect!(sh_c_in_pipeline, "sh -c 'echo hi' | tr a-z A-Z", "HI");
+expect_output!(
+    sh_c_missing_argument,
+    "sh -c",
+    "",
+    "sh: -c: option requires an argument\n",
+    2
+);
+expect_output!(
+    sh_c_parse_error_names_line,
+    "sh -c 'echo a\n)'",
+    "a\n",
+    "strands-shell: -c: line 2: unexpected ')'\n",
+    1
+);
+expect!(sh_c_double_dash, "sh -c -- 'echo hi'", "hi");
+expect!(sh_c_double_dash_params, "sh -c -- 'echo $0 $1' n a", "n a");
+expect!(sh_c_double_dash_as_name, "sh -c 'echo $0 $1' -- a", "-- a");
+expect_output!(
+    sh_c_double_dash_missing_argument,
+    "sh -c --",
+    "",
+    "sh: -c: option requires an argument\n",
+    2
+);
+
+#[test]
+fn script_args_and_isolation_unchanged() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .run("printf 'X=1\\necho $0 $# $1 $2\\n' > /tmp/args.sh")
+            .await;
+        let out = shell.run("sh /tmp/args.sh a 'b c'; echo \"[$X]\"").await;
+        assert_eq!(out.stdout, "/tmp/args.sh 2 a b c\n[]\n");
+        assert_eq!(out.status, 0);
+    }));
+}
+
 // ── Script execution via sh ─────────────────────────────────────────
 
 /// Runs `cmd` after writing a `cat` script and a `read` script.
@@ -8368,11 +8769,201 @@ expect!(bare_dollar_in_dquote, r#"echo "cost: $""#, "cost: $");
 
 // ── ControlFlow::Exit in function ───────────────────────────────────
 
-// In lash, exit inside a function acts like return
-expect!(
+// Exit inside a function exits the shell, not just the function.
+expect_output!(
     function_exit_in_func,
     "f() { exit 7; }; f; echo after",
-    "after"
+    "",
+    "",
+    7
+);
+expect_output!(
+    array_refusal_does_not_hide_a_later_function_exit,
+    "f() { arr=(1); }; f; g() { exit 7; }; g; echo after",
+    "",
+    "strands-shell: arrays are not supported\n",
+    7
+);
+expect_output!(
+    function_exit_no_arg_uses_last_status,
+    "f() { false; exit; }; f; echo after",
+    "",
+    "",
+    1
+);
+expect_output!(
+    function_exit_keeps_earlier_output,
+    "f() { echo in; exit 6; echo not; }; f; echo after",
+    "in\n",
+    "",
+    6
+);
+expect_output!(
+    function_exit_from_nested_function,
+    "g() { exit 9; }; f() { g; echo inner; }; f; echo after",
+    "",
+    "",
+    9
+);
+expect_output!(
+    function_exit_in_loop,
+    "f() { exit 8; }; for i in 1 2; do f; echo \"loop$i\"; done; echo after",
+    "",
+    "",
+    8
+);
+expect_output!(
+    function_exit_in_if_condition,
+    "f() { exit 2; }; if f; then echo t; fi; echo after",
+    "",
+    "",
+    2
+);
+expect_output!(
+    function_exit_in_and_list,
+    "f() { exit 3; }; f && echo and; echo after",
+    "",
+    "",
+    3
+);
+expect_output!(
+    function_exit_negated,
+    "f() { exit 6; }; ! f; echo after",
+    "",
+    "",
+    6
+);
+expect_output!(
+    function_exit_in_group,
+    "f() { exit 6; }; { f; echo grp; }; echo after",
+    "",
+    "",
+    6
+);
+expect_output!(
+    function_exit_through_eval,
+    "f() { exit 6; }; eval f; echo after",
+    "",
+    "",
+    6
+);
+expect_output!(
+    function_exit_runs_exit_trap_once,
+    "trap 'echo bye' EXIT; f() { exit 4; }; f; echo after",
+    "bye\n",
+    "",
+    4
+);
+expect!(
+    function_exit_in_subshell_stays_in_subshell,
+    "f() { exit 4; }; (f; echo after); echo \"outer $?\"",
+    "outer 4"
+);
+expect!(
+    function_exit_in_cmd_subst_stays_in_subst,
+    "f() { echo a; exit 3; }; X=$(f; echo after); echo \"[$X]\"; echo outer",
+    "[a]\nouter"
+);
+expect!(
+    function_exit_in_cmd_subst_and_list,
+    "f() { exit 3; }; X=$(f && echo and; echo after); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    function_exit_in_pipeline_stage,
+    "f() { exit 5; }; echo hi | f; echo \"pipe $?\"",
+    "pipe 5"
+);
+expect!(
+    function_exit_in_first_pipeline_stage,
+    "f() { exit 5; }; f | cat; echo \"pipe $?\"",
+    "pipe 0"
+);
+expect!(
+    function_exit_in_compound_pipeline_tail,
+    "f() { exit 7; }; { echo; } | f; echo \"pipe $?\"",
+    "pipe 7"
+);
+expect!(
+    function_exit_in_compound_pipeline_tail_in_cmd_subst,
+    "f() { exit 7; }; X=$({ echo; } | f; echo after); echo \"[$X]\"",
+    "[after]"
+);
+expect!(
+    function_exit_in_background_job,
+    "f() { exit 6; }; f & wait $!; echo \"bg $?\"",
+    "bg 6"
+);
+expect!(
+    function_exit_in_script_stops_only_script,
+    "printf 'f() { exit 5; }\\nf\\necho inscript\\n' > /tmp/fexit.sh; sh /tmp/fexit.sh; echo \"script $?\"",
+    "script 5"
+);
+expect!(
+    function_exit_in_background_job_in_cmd_subst,
+    "f() { exit 3; }; X=$(f & echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    background_array_refusal_does_not_hide_function_exit,
+    "g() { exit 4; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    background_array_refusal_does_not_hide_function_nounset,
+    "g() { set -u; echo $missing; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    background_array_refusal_does_not_hide_function_expansion_error,
+    "g() { echo ${missing?stop}; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_does_not_hide_function_exit,
+    "g() { exit 4; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_with_pipefail_does_not_hide_function_exit,
+    "set -o pipefail; g() { exit 4; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_does_not_hide_function_nounset,
+    "g() { set -u; echo $missing; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_does_not_hide_function_parameter_error,
+    "g() { echo ${missing?stop}; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    function_exit_in_background_job_keeps_shell,
+    "f() { exit 3; }; f & echo no; wait $!; echo \"bg $?\"",
+    "no\nbg 3"
+);
+expect!(
+    function_exit_under_command_does_not_leak,
+    "f() { exit 3; }; command f; echo after; echo more",
+    "after\nmore"
+);
+#[test]
+fn function_exit_under_command_does_not_leak_into_next_run() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell.run("f() { exit 3; }; command f").await;
+        let out = shell.run("echo hi; echo more").await;
+        assert_eq!(out.stdout, "hi\nmore\n");
+        assert_eq!(out.status, 0);
+    }));
+}
+expect!(
+    function_return_in_loop_still_returns,
+    "f() { return 2; }; for i in 1 2; do f; echo \"r$i $?\"; done",
+    "r1 2\nr2 2"
 );
 #[test]
 fn function_exit_status_code() {
@@ -9459,7 +10050,7 @@ expect!(
 expect!(
     ls_help,
     "ls --help | head -n 1",
-    "Usage: ls [-laR1] [FILE]..."
+    "Usage: ls [-laR1hrSt] [FILE]..."
 );
 
 // ── sed coverage ────────────────────────────────────────────────────

@@ -427,6 +427,8 @@ fn nested_commands_are_checked() {
             "x=$(rm /tmp/x)",
             "echo 'rm /tmp/x' > /tmp/s; . /tmp/s",
             "echo 'rm /tmp/x' > /tmp/s; sh /tmp/s",
+            "sh -c 'rm /tmp/x'",
+            "sh -c '\"$0\" /tmp/x' rm",
             "lua -e 'os.execute(\"rm /tmp/x\")'",
             "trap 'rm /tmp/x' EXIT",
         ] {
