@@ -154,7 +154,7 @@ pub struct Process {
     /// An unsupported array aborts its function without requesting a shell exit.
     pub(crate) refused_array: bool,
     /// Exit status of the last command substitution performed, for commands with no name.
-    pub last_subst_status: Option<i32>,
+    pub(crate) last_subst_status: Option<i32>,
     /// PID of last background job (for $!).
     pub last_bg_pid: Option<u32>,
     /// Background job handles.
