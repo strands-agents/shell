@@ -2320,11 +2320,28 @@ async fn execute_item(
                         }
                     }
                 }
+                // A redirected stream is captured while the body runs, even when the caller
+                // installed a writer on it.
+                let mut outer_fds = Process::empty();
+                let unredirected = [GroupSink::Stdout, GroupSink::Stderr];
+                for ((fd, sink), default) in
+                    [STDOUT, STDERR].into_iter().zip(sinks).zip(unredirected)
+                {
+                    if sink != default {
+                        proc.transfer_fd(fd, &mut outer_fds);
+                    }
+                }
                 let outer_stderr = std::mem::take(&mut proc.captured_stderr);
                 let inner_cl = vec![(*item.clone(), None)];
                 let (captured, result) =
                     Box::pin(run_capturing_status(os.clone(), proc, &inner_cl)).await;
                 let stderr_text = std::mem::replace(&mut proc.captured_stderr, outer_stderr);
+                for fd in [STDOUT, STDERR] {
+                    if outer_fds.has_fd(fd) {
+                        proc.close(fd);
+                        outer_fds.transfer_fd(fd, proc);
+                    }
+                }
                 if !stdin_expanded.is_empty() {
                     proc.close(STDIN);
                     saved_stdin.transfer_fd(STDIN, proc);

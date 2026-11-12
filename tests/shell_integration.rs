@@ -10163,6 +10163,50 @@ expect_writers!(
     "",
     |stderr: &str| assert_eq!(stderr, "")
 );
+expect_writers!(
+    group_redirect_takes_both_streams_away_from_writers,
+    "{ echo out; ls /nope; unalias missing; } >/dev/null 2>&1; echo done",
+    "done\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    group_redirect_takes_many_stderr_lines_away_from_writer,
+    "{ i=0; while [ $i -lt 300 ]; do echo line >&2; i=$((i+1)); done; } 2>/dev/null; echo done",
+    "done\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    group_stderr_to_file_leaves_stdout_on_writer,
+    "{ echo out; ls /nope; } 2>/tmp/group_err.txt; grep -c nope /tmp/group_err.txt",
+    "out\n1\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    unredirected_group_streams_to_writers,
+    "{ echo out; ls /nope; }",
+    "out\n",
+    |stderr: &str| assert!(stderr.contains("/nope"), "stderr: {stderr:?}")
+);
+
+#[test]
+fn group_stderr_follows_stdout_writer_before_stdout_moves_to_file() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let (output, stdout, stderr) = run_with_writers(
+            &mut shell,
+            "{ echo out; ls /nope; } 2>&1 >/tmp/group_out.txt; cat /tmp/group_out.txt",
+        )
+        .await;
+        assert!(
+            stdout.contains("/nope") && stdout.ends_with("out\n"),
+            "stdout: {stdout:?}"
+        );
+        assert_eq!(stderr, "", "stderr writer must be empty");
+        assert_eq!(output.stdout, "", "captured stdout must be empty");
+        assert_eq!(output.stderr, "", "captured stderr must be empty");
+    }));
+}
 
 #[test]
 fn writer_receives_bytes_that_are_not_utf8() {
