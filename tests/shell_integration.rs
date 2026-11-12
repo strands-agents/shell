@@ -3611,10 +3611,87 @@ fn ls_sort_by_time_and_size() {
     assert_eq!(ls("-Sr"), "a\nd\nc\nb\n");
     assert_eq!(ls("-r"), "d\nc\nb\na\n");
     assert_eq!(
-        ls("-lt").lines().last().unwrap(),
-        "-rw-r--r--       20 Jan  1  2020 d"
+        ls("-lt"),
+        "-rw-r--r--       30 Jan  1  2020 c\n\
+         -rw-r--r--       10 Jan  1  2020 a\n\
+         -rw-r--r--       30 Jan  1  2020 b\n\
+         -rw-r--r--       20 Jan  1  2020 d\n"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn ls_sorts_file_operands() {
+    let files = [
+        ("a.log", 10, LS_T0 + 100),
+        ("b.log", 30, LS_T0 + 100),
+        ("c.log", 30, LS_T0 + 300),
+        ("d.log", 20, LS_T0),
+    ];
+    let dir = ls_fixture("ls_sort_operands", &files);
+    for (flags, want) in [
+        ("-t", "/fx/c.log\n/fx/a.log\n/fx/b.log\n/fx/d.log\n"),
+        ("-tr", "/fx/d.log\n/fx/b.log\n/fx/a.log\n/fx/c.log\n"),
+        ("-S", "/fx/b.log\n/fx/c.log\n/fx/d.log\n/fx/a.log\n"),
+        ("-Sr", "/fx/a.log\n/fx/d.log\n/fx/c.log\n/fx/b.log\n"),
+        ("-r", "/fx/d.log\n/fx/c.log\n/fx/b.log\n/fx/a.log\n"),
+    ] {
+        let out = run_ls_fixture(
+            &dir,
+            &format!("ls {flags} /fx/a.log /fx/b.log /fx/c.log /fx/d.log"),
+        );
+        assert_eq!(out.stdout, want, "{flags}");
+        assert_eq!(out.stderr, "", "{flags}");
+        assert_eq!(out.status, 0, "{flags}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_sorts_mixed_operands_with_files_first() {
+    let dir = ls_fixture(
+        "ls_sort_mixed",
+        &[("old", 10, LS_T0), ("new", 20, LS_T0 + 100)],
+    );
+    for (name, secs) in [("adir", LS_T0), ("zdir", LS_T0 + 100)] {
+        std::fs::create_dir(dir.join(name)).unwrap();
+        std::fs::File::open(dir.join(name))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+    for (flags, want) in [
+        ("-t", "/fx/new\n/fx/old\n\n/fx/zdir:\n\n/fx/adir:\n"),
+        ("-tr", "/fx/old\n/fx/new\n\n/fx/adir:\n\n/fx/zdir:\n"),
+    ] {
+        let out = run_ls_fixture(
+            &dir,
+            &format!("ls {flags} /fx/adir /fx/old /fx/zdir /fx/new"),
+        );
+        assert_eq!(out.stdout, want, "{flags}");
+        assert_eq!(out.stderr, "", "{flags}");
+        assert_eq!(out.status, 0, "{flags}");
+    }
+}
+
+expect!(
+    ls_sorts_glob_operands,
+    "mkdir /tmp/lsglob; cd /tmp/lsglob; printf x > a.log; printf xxx > b.log; \
+     printf xx > c.log; ls -S *.log | head -1",
+    "b.log"
+);
+expect!(
+    ls_sort_includes_hidden_with_a,
+    "mkdir /tmp/lshidden; printf x > /tmp/lshidden/a; printf xx > /tmp/lshidden/.hidden; \
+     ls -aS /tmp/lshidden",
+    ".hidden\na"
+);
+expect!(
+    ls_sort_recurses,
+    "mkdir -p /tmp/lsrecursive/a /tmp/lsrecursive/b; printf x > /tmp/lsrecursive/a/small; \
+     printf xx > /tmp/lsrecursive/a/big; ls -RS /tmp/lsrecursive",
+    "/tmp/lsrecursive:\na\nb\n\n/tmp/lsrecursive/a:\nbig\nsmall\n\n/tmp/lsrecursive/b:"
+);
 
 // ── tail coverage ───────────────────────────────────────────────────
 

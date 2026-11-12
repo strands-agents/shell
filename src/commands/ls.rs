@@ -1,18 +1,19 @@
 use crate::os::FileStat;
 use crate::prelude::*;
+use std::cmp::Ordering;
 
 const HELP: &str = "Usage: ls [-laR1hrSt] [FILE]...
 List directory contents.
 
 Options:
-  -l    long listing format
-  -a    include entries starting with .
-  -R    list subdirectories recursively
-  -1    one entry per line (default when not a terminal)
+  -l                   long listing format
+  -a                   include entries starting with .
+  -R                   list subdirectories recursively
+  -1                   one entry per line (default when not a terminal)
   -h, --human-readable  with -l, print sizes like 1K 234M 2G
   -r, --reverse         reverse order while sorting
-  -S    sort by file size, largest first
-  -t    sort by modification time, newest first";
+  -S                   sort by file size, largest first
+  -t                   sort by modification time, newest first";
 
 #[derive(Clone, Copy, PartialEq)]
 enum SortBy {
@@ -28,6 +29,22 @@ struct Opts {
     human: bool,
     sort: SortBy,
     reverse: bool,
+}
+
+fn compare_entries(
+    a_name: &str,
+    a: &FileStat,
+    b_name: &str,
+    b: &FileStat,
+    opts: &Opts,
+) -> Ordering {
+    let order = match opts.sort {
+        SortBy::Name => Ordering::Equal,
+        SortBy::Time => b.modified.cmp(&a.modified),
+        SortBy::Size => b.len.cmp(&a.len),
+    }
+    .then_with(|| a_name.cmp(b_name));
+    if opts.reverse { order.reverse() } else { order }
 }
 
 /// Format a size like GNU `ls -lh`: powers of 1024, rounded up, with one
@@ -181,48 +198,39 @@ async fn list_one(
         recursive,
         human,
         sort,
-        reverse,
+        ..
     } = *opts;
-    let mut entries = io::list_dir(os, path).await?;
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    if sort != SortBy::Name {
-        let mut keyed = Vec::with_capacity(entries.len());
-        for entry in entries {
+    let mut entries = Vec::new();
+    for entry in io::list_dir(os, path).await? {
+        if !show_all && entry.name.starts_with('.') {
+            continue;
+        }
+        let st = if long || sort != SortBy::Name {
             let full = if path == "." {
                 entry.name.clone()
             } else {
                 format!("{}/{}", path, entry.name)
             };
-            let st = io::lstat(os, &full).await;
-            keyed.push((st.modified, st.len, entry));
-        }
-        // Stable sort keeps name order for ties.
-        keyed.sort_by(|a, b| match sort {
-            SortBy::Time => b.0.cmp(&a.0),
-            _ => b.1.cmp(&a.1),
-        });
-        entries = keyed.into_iter().map(|(_, _, e)| e).collect();
+            io::lstat(os, &full).await
+        } else {
+            FileStat::default()
+        };
+        entries.push((entry, st));
     }
-    if reverse {
-        entries.reverse();
-    }
+    entries.sort_by(|(a, a_st), (b, b_st)| compare_entries(&a.name, a_st, &b.name, b_st, opts));
 
     if multi {
         wprintln!(w, "{}:", name_prefix)?;
     }
 
     let mut subdirs = Vec::new();
-    for entry in &entries {
-        if !show_all && entry.name.starts_with('.') {
-            continue;
-        }
+    for (entry, st) in &entries {
         let full = if path == "." {
             entry.name.clone()
         } else {
             format!("{}/{}", path, entry.name)
         };
         if long {
-            let st = io::lstat(os, &full).await;
             let link = if st.is_symlink {
                 io::read_link(os, &full)
                     .await
@@ -236,7 +244,7 @@ async fn list_one(
                 "{} {:>8} {} {}{}",
                 format_mode(st.mode),
                 format_size(st.len, human),
-                format_time(&st, now),
+                format_time(st, now),
                 entry.name,
                 link
             )?;
@@ -303,13 +311,11 @@ async fn cmd_ls(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let now = os.now();
     let mut w = io::stdout()?;
     let mut code = 0;
-    for (i, path) in paths.iter().enumerate() {
-        if i > 0 {
-            wprintln!(w)?;
-        }
-        let lst = io::lstat(os, path).await;
+    let mut operands = Vec::with_capacity(paths.len());
+    for path in paths {
+        let mut lst = io::lstat(os, &path).await;
         if !lst.exists {
-            let st = io::stat(os, path).await;
+            let st = io::stat(os, &path).await;
             if !st.exists {
                 let mut e = io::stderr()?;
                 wprintln!(e, "ls: cannot access '{}': No such file or directory", path)?;
@@ -318,20 +324,39 @@ async fn cmd_ls(os: &dyn Kernel, args: &[String]) -> CommandResult {
             }
         }
         // For symlinks to dirs: ls shows contents, ls -l shows the link itself
-        let is_dir_target = if lst.is_symlink {
-            io::stat(os, path).await.is_dir
+        let list_dir = if lst.is_symlink && !long {
+            let target = io::stat(os, &path).await;
+            if target.is_dir {
+                lst = target;
+                true
+            } else {
+                false
+            }
         } else {
             lst.is_dir
         };
-        if is_dir_target && !(long && lst.is_symlink) {
-            if let Err(err) = list_one(os, &mut w, path, path, &opts, multi, &now).await {
+        operands.push((path, lst, list_dir));
+    }
+    // File operands precede directory listings, including with reverse sorting.
+    operands.sort_by(|(a, a_st, a_dir), (b, b_st, b_dir)| {
+        a_dir
+            .cmp(b_dir)
+            .then_with(|| compare_entries(a, a_st, b, b_st, &opts))
+    });
+    let mut printed = false;
+    for (path, lst, list_dir) in operands {
+        if list_dir {
+            if printed {
+                wprintln!(w)?;
+            }
+            if let Err(err) = list_one(os, &mut w, &path, &path, &opts, multi, &now).await {
                 let mut e = io::stderr()?;
                 wprintln!(e, "ls: {}: {}", path, err)?;
                 code = 2;
             }
         } else if long {
             let link = if lst.is_symlink {
-                io::read_link(os, path)
+                io::read_link(os, &path)
                     .await
                     .map(|t| format!(" -> {}", t))
                     .unwrap_or_default()
@@ -350,6 +375,7 @@ async fn cmd_ls(os: &dyn Kernel, args: &[String]) -> CommandResult {
         } else {
             wprintln!(w, "{}", path)?;
         }
+        printed = true;
     }
     Ok(code)
 }
