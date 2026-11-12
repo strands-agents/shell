@@ -9177,6 +9177,35 @@ shell_test!(
 
 expect_status!(date_invalid_arg, "date foo", 1);
 
+shell_test!(
+    date_epoch_seconds,
+    "date +%s",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 0);
+        let secs: u64 = out.stdout.trim().parse().expect("digits");
+        let host = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(host.abs_diff(secs) < 60, "stdout: {}", out.stdout);
+    }
+);
+
+shell_test!(
+    date_composite_specifiers_match_parts,
+    "date '+%F %T|%Y-%m-%d %H:%M:%S'",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 0);
+        let re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$").unwrap();
+        let (composite, parts) = out.stdout.trim().split_once('|').unwrap();
+        assert!(re.is_match(composite), "stdout: {}", out.stdout);
+        // Both halves are formatted from the same instant.
+        assert_eq!(composite, parts);
+    }
+);
+
+expect!(date_percent_escape, "date '+%%Y 100%%'", "%Y 100%");
+
 // ── sleep ───────────────────────────────────────────────────────────
 
 expect_status!(sleep_zero, "sleep 0", 0);
