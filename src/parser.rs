@@ -923,7 +923,7 @@ fn tokenize(input: &str, more_input: bool) -> Result<Vec<Token>, String> {
                         parts.push(WordPart::Literal(format!("({list})")));
                         continue;
                     }
-                    if " \t\n\r|;&<>()#".contains(ch) {
+                    if " \t\n\r|;&<>()".contains(ch) {
                         break;
                     }
                     match ch {
