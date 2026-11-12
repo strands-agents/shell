@@ -6321,6 +6321,18 @@ expect!(
     "1"
 );
 expect!(
+    assign_subst_pipefail_status,
+    "set -o pipefail; x=$(false | true); echo $?",
+    "1"
+);
+expect_output!(
+    assign_subst_pipefail_errexit_aborts,
+    "set -euo pipefail; x=$(false | true); echo unreachable",
+    "",
+    "",
+    1
+);
+expect!(
     assign_subst_nested_status,
     "x=$(y=$(false); echo $?); echo $x $?",
     "1 0"
