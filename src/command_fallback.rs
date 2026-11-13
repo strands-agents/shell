@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 
-use crate::os::{FdReader, FdWriter, Process, STDERR, STDIN, STDOUT};
+use crate::os::{FdReader, FdWriter, Kernel, Process, STDERR, STDIN, STDOUT};
 
 #[cfg(not(target_arch = "wasm32"))]
 type Instant = tokio::time::Instant;
@@ -40,6 +40,22 @@ type Instant = std::time::Instant;
 #[async_trait]
 pub trait CommandFallback: Send + Sync {
     async fn run(&self, ctx: &mut CommandContext) -> io::Result<Option<i32>>;
+
+    /// Return whether the handler serves the bare command `name`.
+    ///
+    /// Shell treats a served name like a registered command: `command -v`,
+    /// `command -V`, `type`, and `hash` find it, and Shell sends it to
+    /// [`CommandFallback::run`] without a `PATH` search. Builtins,
+    /// functions, and registered commands still win. Shell never asks about
+    /// a name that contains `/`. The default serves no name.
+    fn serves(&self, _name: &str) -> bool {
+        false
+    }
+}
+
+/// Whether the kernel's fallback serves the bare command `name`.
+pub(crate) fn serves(os: &dyn Kernel, name: &str) -> bool {
+    !name.contains('/') && os.command_fallback().is_some_and(|f| f.serves(name))
 }
 
 /// The command's redirected stdin.

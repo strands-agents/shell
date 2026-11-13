@@ -3029,6 +3029,7 @@ async fn execute_pipeline_checked(
                             if is_special(name)
                                 || crate::builtins::lookup(name).is_some()
                                 || crate::commands::lookup(name).is_some()
+                                || command_fallback::serves(&*os, name)
                             {
                                 if verbose {
                                     let label = if is_special(name) {
@@ -3278,6 +3279,7 @@ async fn run_pipeline(
         if builtins::lookup(cmd).is_some()
             || shell_proc.get_function(cmd).is_some()
             || commands::lookup(cmd).is_some()
+            || command_fallback::serves(os.as_ref(), cmd)
         {
             continue;
         }
