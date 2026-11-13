@@ -13608,3 +13608,51 @@ expect!(
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
 );
+
+// ── rev ─────────────────────────────────────────────────────────────
+
+expect_output!(
+    rev_reverses_each_line,
+    "printf 'abc\\nhello world\\n' | rev",
+    "cba\ndlrow olleh\n",
+    "",
+    0
+);
+expect_output!(
+    rev_keeps_an_unterminated_line_unterminated,
+    "printf 'abc' | rev",
+    "cba",
+    "",
+    0
+);
+expect_output!(
+    rev_reverses_by_character,
+    "printf 'h\\303\\251llo \\303\\261\\n' | rev",
+    "ñ olléh\n",
+    "",
+    0
+);
+#[test]
+fn rev_keeps_invalid_bytes() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("printf 'a\\377b\\n' | rev > /tmp/rb").await;
+        assert_eq!(out.status, 0, "stderr={:?}", out.stderr);
+        assert_eq!(shell.read_file("/tmp/rb").await.unwrap(), b"b\xffa\n");
+    }));
+}
+shell_test!(
+    rev_reports_each_missing_file_and_continues,
+    "printf 'ab\\n' > /tmp/r1; rev /tmp/r1 /tmp/nope /tmp/nope2 /tmp/r1",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "ba\nba\n");
+        assert!(out.stderr.contains("/tmp/nope:"), "stderr={:?}", out.stderr);
+        assert!(
+            out.stderr.contains("/tmp/nope2:"),
+            "stderr={:?}",
+            out.stderr
+        );
+        assert_eq!(out.status, 1);
+    }
+);

@@ -19,6 +19,7 @@ mod mktemp;
 mod mv;
 mod pwd;
 mod readlink;
+mod rev;
 mod rm;
 mod rmdir;
 mod sed;
@@ -93,6 +94,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "mv" => |os, args| Box::pin(mv::cmd_mv(os, args)),
             "pwd" => |os, args| Box::pin(pwd::cmd_pwd(os, args)),
             "readlink" => |os, args| Box::pin(readlink::cmd_readlink(os, args)),
+            "rev" => |os, args| Box::pin(rev::cmd_rev(os, args)),
             "rm" => |os, args| Box::pin(rm::cmd_rm(os, args)),
             "rmdir" => |os, args| Box::pin(rmdir::cmd_rmdir(os, args)),
             "sed" => |os, args| Box::pin(sed::cmd_sed(os, args)),
