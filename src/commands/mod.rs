@@ -9,6 +9,7 @@ mod dirname;
 mod echo;
 mod env;
 mod r#false;
+mod fold;
 mod grep;
 mod head;
 mod jq;
@@ -83,6 +84,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "echo" => |os, args| Box::pin(echo::cmd_echo(os, args)),
             "env" => |os, args| Box::pin(env::cmd_env(os, args)),
             "false" => |os, args| Box::pin(r#false::cmd_false(os, args)),
+            "fold" => |os, args| Box::pin(fold::cmd_fold(os, args)),
             "grep" => |os, args| Box::pin(grep::cmd_grep(os, args)),
             "head" => |os, args| Box::pin(head::cmd_head(os, args)),
             "jq" => |os, args| Box::pin(jq::cmd_jq(os, args)),
