@@ -1,7 +1,7 @@
 use crate::prelude::*;
 
 const HELP: &str = "Usage: hostname
-Print the shell's host name.";
+Print the shell's host name: $HOSTNAME, or localhost if it is unset or empty.";
 
 /// The host name when `$HOSTNAME` is unset or empty.
 const DEFAULT_HOSTNAME: &str = "localhost";

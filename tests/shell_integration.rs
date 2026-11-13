@@ -4140,7 +4140,12 @@ shell_test!(
     |_shell: &mut Shell, out: strands_shell::Output| {
         assert_eq!(out.stdout, "");
         assert_ne!(out.status, 0);
-        assert!(out.stderr.contains("hostname"), "{}", out.stderr);
+        assert!(
+            out.stderr
+                .contains("hostname: unexpected argument \"newname\""),
+            "{}",
+            out.stderr
+        );
     }
 );
 shell_test!(
@@ -4149,7 +4154,11 @@ shell_test!(
     |_shell: &mut Shell, out: strands_shell::Output| {
         assert_eq!(out.stdout, "");
         assert_ne!(out.status, 0);
-        assert!(out.stderr.contains("hostname"), "{}", out.stderr);
+        assert!(
+            out.stderr.contains("hostname: invalid option"),
+            "{}",
+            out.stderr
+        );
     }
 );
 
