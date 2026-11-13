@@ -6,6 +6,7 @@ Sort lines of text.
 Options:
   -r    reverse the result of comparisons
   -n    compare according to string numerical value
+  -h    compare human readable numbers (e.g., 2K 1G)
   -k FIELD  sort by field number (1-based), e.g. -k2,2n
   -t SEP    use SEP as field separator
   -s    stabilize sort by disabling last-resort comparison
@@ -62,6 +63,7 @@ struct KeySpec {
     start_field: usize,
     end_field: Option<usize>,
     numeric: bool,
+    human: bool,
     reverse: bool,
     fold_case: bool,
     ignore_blanks: bool,
@@ -72,6 +74,7 @@ fn parse_key_spec(s: &str) -> Result<KeySpec, Box<dyn std::error::Error + Send +
         start_field: 0,
         end_field: None,
         numeric: false,
+        human: false,
         reverse: false,
         fold_case: false,
         ignore_blanks: false,
@@ -90,6 +93,7 @@ fn parse_key_spec(s: &str) -> Result<KeySpec, Box<dyn std::error::Error + Send +
         for c in flags.chars() {
             match c {
                 'n' => ks.numeric = true,
+                'h' => ks.human = true,
                 'r' => ks.reverse = true,
                 'f' => ks.fold_case = true,
                 'b' => ks.ignore_blanks = true,
@@ -102,6 +106,7 @@ fn parse_key_spec(s: &str) -> Result<KeySpec, Box<dyn std::error::Error + Send +
     for c in start_flags.chars() {
         match c {
             'n' => ks.numeric = true,
+            'h' => ks.human = true,
             'r' => ks.reverse = true,
             'f' => ks.fold_case = true,
             'b' => ks.ignore_blanks = true,
@@ -123,11 +128,65 @@ fn extract_key(line: &str, field: usize, sep: Option<char>) -> &str {
     parts.get(field - 1).copied().unwrap_or("")
 }
 
+/// Scans the leading number of `s` (optional `-`, digits, optional `.` and
+/// digits). Returns its value, whether any digit is nonzero, and the byte
+/// length consumed.
+fn scan_number(s: &str) -> (f64, bool, usize) {
+    let bytes = s.as_bytes();
+    let mut i = usize::from(bytes.first() == Some(&b'-'));
+    let mut nonzero = false;
+    let mut seen_dot = false;
+    while let Some(&c) = bytes.get(i) {
+        if c.is_ascii_digit() {
+            nonzero |= c != b'0';
+        } else if c == b'.' && !seen_dot {
+            seen_dot = true;
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    let value = s[..i].parse().unwrap_or(0.0);
+    (value, nonzero, i)
+}
+
+/// Magnitude of the SI suffix following a nonzero number, negated for
+/// negative numbers; 0 when there is no suffix or the number is zero.
+fn unit_order(s: &str) -> i32 {
+    let (value, nonzero, end) = scan_number(s);
+    if !nonzero {
+        return 0;
+    }
+    let order = match s.as_bytes().get(end) {
+        Some(b'K' | b'k') => 1,
+        Some(b'M') => 2,
+        Some(b'G') => 3,
+        Some(b'T') => 4,
+        Some(b'P') => 5,
+        Some(b'E') => 6,
+        Some(b'Z') => 7,
+        Some(b'Y') => 8,
+        _ => 0,
+    };
+    if value < 0.0 { -order } else { order }
+}
+
+/// GNU `sort -h` ordering: by sign and suffix magnitude, then by value.
+fn human_numeric_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let (a, b) = (a.trim_start(), b.trim_start());
+    unit_order(a).cmp(&unit_order(b)).then_with(|| {
+        let (na, _, _) = scan_number(a);
+        let (nb, _, _) = scan_number(b);
+        na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+    })
+}
+
 #[command("sort")]
 async fn cmd_sort(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut parser = lexopt::Parser::from_args(args);
     let mut reverse = false;
     let mut numeric = false;
+    let mut human = false;
     let mut unique = false;
     let mut fold_case = false;
     let mut ignore_blanks = false;
@@ -139,6 +198,7 @@ async fn cmd_sort(os: &dyn Kernel, args: &[String]) -> CommandResult {
         match arg {
             Short('r') => reverse = true,
             Short('n') => numeric = true,
+            Short('h') | Long("human-numeric-sort") => human = true,
             Short('u') => unique = true,
             Short('f') => fold_case = true,
             Short('b') => ignore_blanks = true,
@@ -151,7 +211,7 @@ async fn cmd_sort(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 let v = parser.value()?.string()?;
                 sep = v.chars().next();
             }
-            Short('h') | Long("help") => {
+            Long("help") => {
                 let mut w = io::stdout()?;
                 wprintln!(w, "{}", HELP)?;
                 return Ok(0);
@@ -164,6 +224,7 @@ async fn cmd_sort(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let field = key_spec.as_ref().map_or(0, |k| k.start_field);
     // Key-level flags override global flags
     let eff_numeric = key_spec.as_ref().map_or(numeric, |k| k.numeric || numeric);
+    let eff_human = key_spec.as_ref().map_or(human, |k| k.human || human);
     let eff_reverse = key_spec.as_ref().map_or(reverse, |k| k.reverse || reverse);
     let eff_fold = key_spec
         .as_ref()
@@ -181,7 +242,9 @@ async fn cmd_sort(os: &dyn Kernel, args: &[String]) -> CommandResult {
             ka = ka.trim_start();
             kb = kb.trim_start();
         }
-        let ord = if eff_numeric {
+        let ord = if eff_human {
+            human_numeric_cmp(ka, kb)
+        } else if eff_numeric {
             let na: f64 = ka.trim().parse().unwrap_or(0.0);
             let nb: f64 = kb.trim().parse().unwrap_or(0.0);
             na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)

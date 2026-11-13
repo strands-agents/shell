@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use strands_shell::Shell;
 
 fn rt() -> (tokio::runtime::Runtime, tokio::task::LocalSet) {
@@ -98,7 +100,7 @@ expect!(
 expect!(pipe_wc, "echo hello | wc -c", "6");
 expect!(pipe_cut, "echo 'a:b:c' | cut -d: -f2", "b");
 
-// Use printf for multiline input since echo -e is not supported
+// Use printf for multiline input
 expect!(
     pipe_grep,
     "printf 'foo\\nbar\\nbaz\\n' | grep ba",
@@ -443,6 +445,195 @@ shell_test!(
     }
 );
 
+// ── set -o / pipefail ───────────────────────────────────────────────
+
+expect!(pipefail_off_by_default, "false | true; echo $?", "0");
+expect!(pipefail_on, "set -o pipefail; false | true; echo $?", "1");
+expect!(
+    pipefail_off_assignment_only_last_stage,
+    "false | FOO=1; echo $?",
+    "0"
+);
+expect!(
+    pipefail_subshell_option_does_not_leak,
+    "(set -o pipefail); false | true; echo $?",
+    "0"
+);
+expect!(
+    pipefail_subshell_exit_status,
+    "set -o pipefail; (exit 3) | cat; echo $?",
+    "3"
+);
+expect!(
+    pipefail_middle_stage,
+    "set -o pipefail; true | false | true; echo $?",
+    "1"
+);
+expect!(
+    pipefail_rightmost_failure,
+    "f() { return $1; }; set -o pipefail; f 3 | f 4 | true; echo $?",
+    "4"
+);
+expect!(
+    pipefail_all_succeed,
+    "set -o pipefail; echo a | cat | cat; echo $?",
+    "a\n0"
+);
+expect!(
+    pipefail_turned_off,
+    "set -o pipefail; set +o pipefail; false | true; echo $?",
+    "0"
+);
+expect!(
+    pipefail_negated,
+    "set -o pipefail; ! false | true; echo $?; ! true | true; echo $?",
+    "0\n1"
+);
+expect!(
+    pipefail_compound_left,
+    "set -o pipefail; { false; } | true; echo $?; { exit 3; } | cat; echo $?",
+    "1\n3"
+);
+expect!(
+    pipefail_compound_return_status,
+    "set -o pipefail; f() { { return 3; } | cat; }; f; echo $?",
+    "3"
+);
+expect!(
+    pipefail_compound_return_in_substitution,
+    "set -o pipefail; f() { echo $({ return 3; } | cat; echo $?); }; f",
+    "3"
+);
+expect!(
+    pipefail_compound_left_off,
+    "{ false; } | true; echo $?",
+    "0"
+);
+expect!(
+    pipefail_in_command_substitution,
+    "set -o pipefail; echo $(false | true; echo $?) $({ false; } | cat; echo $?)",
+    "1 1"
+);
+expect!(
+    pipefail_if_condition,
+    "set -o pipefail; if false | true; then echo yes; else echo no; fi",
+    "no"
+);
+expect!(
+    pipefail_in_function,
+    "f() { false | true; }; set -o pipefail; f; echo $?",
+    "1"
+);
+expect!(
+    set_euo_pipefail_continues,
+    "set -euo pipefail; echo next",
+    "next"
+);
+shell_test!(
+    set_euo_pipefail_aborts_on_failed_pipeline,
+    "set -euo pipefail; false | true; echo unreachable",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+    }
+);
+expect!(
+    set_eo_pipefail_tested_failure,
+    "set -eo pipefail; false | true || echo caught; echo end",
+    "caught\nend"
+);
+expect!(
+    set_o_long_names,
+    "set -o errexit -o nounset -o xtrace 2>/dev/null; echo $-; set +o errexit +o nounset +o xtrace; echo \"[$-]\"",
+    "eux\n[]"
+);
+expect!(
+    set_o_name_after_cluster,
+    "set -oe pipefail; echo $-; false | true || echo failed",
+    "e\nfailed"
+);
+expect!(
+    set_o_then_positional,
+    "set -o pipefail a b; echo $# $1 $2",
+    "2 a b"
+);
+expect!(
+    set_o_lists_options,
+    "set -o pipefail; set -o",
+    "errexit        \toff\nnounset        \toff\npipefail       \ton\nxtrace         \toff"
+);
+expect!(
+    set_plus_o_lists_commands,
+    "set -u; set +o",
+    "set +o errexit\nset -o nounset\nset +o pipefail\nset +o xtrace"
+);
+shell_test!(
+    set_o_invalid_name,
+    "set -o bogus; echo \"st=$?\"",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout.trim(), "st=2");
+        assert!(
+            out.stderr
+                .contains("strands-shell: set: bogus: invalid option name"),
+            "stderr: {:?}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    set_euo_invalid_name_stops,
+    "set -euo pipefial; echo unreachable",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: set: pipefial: invalid option name\n"
+        );
+        assert_eq!(out.status, 2);
+    }
+);
+expect!(
+    set_o_invalid_name_keeps_earlier_enable,
+    "set -o pipefail +o bogus 2>/dev/null; false | true; echo $?",
+    "1"
+);
+expect!(
+    set_o_invalid_name_keeps_earlier_disable,
+    "set -o pipefail; set +o pipefail -o bogus 2>/dev/null; false | true; echo $?",
+    "0"
+);
+shell_test!(
+    set_o_invalid_name_under_errexit,
+    "set -e; set -o bogus; echo unreachable",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert!(
+            out.stderr.contains("set: bogus: invalid option name"),
+            "stderr: {:?}",
+            out.stderr
+        );
+        assert_eq!(out.status, 2);
+    }
+);
+expect!(
+    set_flags_still_toggle,
+    "set -e; echo $-; set +e; set -u; echo $-; set +u; false; echo \"[$-]\"",
+    "e\nu\n[]"
+);
+expect!(
+    set_positional_still_works,
+    "set -- a b; echo $# $1 $2; set x y z; echo $#",
+    "2 a b\n3"
+);
+shell_test!(
+    set_no_args_still_lists_vars,
+    "FOO=bar; set",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert!(out.stdout.contains("FOO=bar\n"), "stdout: {:?}", out.stdout);
+        assert_eq!(out.status, 0);
+    }
+);
+
 // ── Semicolons and multiple commands ────────────────────────────────
 
 expect!(semicolons, "echo a; echo b; echo c", "a\nb\nc");
@@ -534,6 +725,37 @@ expect!(comment_only, "# this is a comment", "");
 expect!(trailing_semicolon, "echo hello;", "hello");
 expect!(whitespace_only, "   ", "");
 
+// `#` starts a comment only at the start of a word.
+#[test]
+fn hash_inside_word_is_literal() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (cmd, want) in [
+            ("echo a#b", "a#b\n"),
+            (r##"echo "issue"#123"##, "issue#123\n"),
+            ("x=a#b; echo $x", "a#b\n"),
+            ("x=1; echo $x#y", "1#y\n"),
+            ("echo $(echo a)#b", "a#b\n"),
+            ("case a#b in a#b) echo ok;; esac", "ok\n"),
+            ("for i in 1#2 3; do echo $i; done", "1#2\n3\n"),
+            ("echo $#x", "0x\n"),
+            ("echo #c", "\n"),
+            ("echo a;#c", "a\n"),
+            ("cat <<E#F\nbody\nE#F\necho after", "body\nafter\n"),
+            (
+                "# leading\nx=a#b # trailing\n  # indented\necho $x#c\n\
+                 echo one && # after and\necho two\nf() { echo in#f; } # after brace\nf",
+                "a#b#c\none\ntwo\nin#f\n",
+            ),
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, want, "{cmd:?}");
+            assert_eq!(out.status, 0, "{cmd:?}: status");
+        }
+    }));
+}
+
 // ── Shell builder env ───────────────────────────────────────────────
 
 #[test]
@@ -595,7 +817,10 @@ fn sourced_parse_error_stops_file_and_names_line() {
             .await;
         let out = shell.run(". /tmp/bad.sh; echo \"after $?\"").await;
         assert_eq!(out.stdout, "one\ntwo\nafter 1\n");
-        assert_eq!(out.stderr, "strands-shell: line 3: unexpected ')'\n");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: /tmp/bad.sh: line 3: unexpected ')'\n"
+        );
     }));
 }
 
@@ -925,6 +1150,85 @@ fn redir_fd_close() {
         let mut shell = Shell::builder().build().unwrap();
         let out = shell.run("echo hello 1>&-").await;
         assert_ne!(out.status, 0, "writing to closed fd should fail");
+    }));
+}
+
+// A digit is a redirect's fd only when written right before `<` or `>`;
+// `echo 3 > f` writes `3`. Expected outputs are bash's.
+#[test]
+fn redir_fd_only_when_digit_touches_operator() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, stdout, stderr) in [
+            // A separated digit is an argument.
+            ("echo 3 > /tmp/n; cat /tmp/n", "3\n", ""),
+            ("echo 1 > /tmp/n; cat /tmp/n", "1\n", ""),
+            ("echo a 2 > /tmp/n; cat /tmp/n", "a 2\n", ""),
+            ("printf '%s\\n' 42 > /tmp/n; cat /tmp/n", "42\n", ""),
+            ("echo 0 > /tmp/n; cat /tmp/n", "0\n", ""),
+            ("echo 4 >> /tmp/a; cat /tmp/a", "4\n", ""),
+            ("echo 5 < /dev/null", "5\n", ""),
+            ("echo 2 >| /tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo 7 <> /tmp/rw; cat /tmp/rw", "7\n", ""),
+            ("echo 2 >& 1", "2\n", ""),
+            ("echo 3 2 >&2", "", "3 2\n"),
+            // A quoted or escaped digit is an argument too.
+            ("echo \"2\">/tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo '2'>/tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo \\2>/tmp/n; cat /tmp/n", "2\n", ""),
+            ("echo a2>/tmp/n; cat /tmp/n", "a2\n", ""),
+            // A digit touching the operator is the fd.
+            ("echo 3>/tmp/n; cat /tmp/n", "\n", ""),
+            ("echo x 2>/tmp/n; cat /tmp/n", "x\n", ""),
+            ("echo x 2> /tmp/n; cat /tmp/n", "x\n", ""),
+            ("echo hi 1>&2", "", "hi\n"),
+            ("echo a 9>&-; echo b", "a\nb\n", ""),
+            ("printf 'in\\n' > /tmp/n; cat 0</tmp/n", "in\n", ""),
+            ("2>/dev/null echo hi", "hi\n", ""),
+            ("cat 0<<EOF\nhd\nEOF", "hd\n", ""),
+            ("if true; then echo i; fi 1>/tmp/n; cat /tmp/n", "i\n", ""),
+            // Other uses of digits and `>` are untouched.
+            ("echo $((3>2))", "1\n", ""),
+            ("[ 3 -gt 2 ] && echo yes", "yes\n", ""),
+            ("test 3 \\> 2 && echo yes", "yes\n", ""),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, stdout, "{cmd}: stdout");
+            assert_eq!(out.stderr, stderr, "{cmd}: stderr");
+        }
+    }));
+}
+
+#[test]
+fn redir_dup_output_target_before_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for cmd in [
+            "echo hi 2>&1>/tmp/out; cat /tmp/out",
+            "echo hi >&2>>/tmp/out; cat /tmp/out",
+            "{ echo hi; } 2>&1>/tmp/out; cat /tmp/out",
+            "echo hi >/tmp/out 2>&1</tmp/out; cat /tmp/out",
+            "echo hi 2>&1>|/tmp/out; cat /tmp/out",
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let out = shell.run(cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: status");
+            assert_eq!(out.stdout, "hi\n", "{cmd}: stdout");
+            assert_eq!(out.stderr, "", "{cmd}: stderr");
+        }
+    }));
+}
+
+#[test]
+fn redir_dup_input_target_before_redirect() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("printf 'hi\\n' >/tmp/in; cat <&1</tmp/in").await;
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout, "hi\n");
+        assert_eq!(out.stderr, "");
     }));
 }
 
@@ -1413,6 +1717,149 @@ expect_output!(
     0
 );
 
+// ── Function call redirections ──────────────────────────────────────
+
+expect_output!(
+    function_stdout_redirect,
+    "f() { echo x; }; f > /tmp/f; echo \"[$(cat /tmp/f)]\"",
+    "[x]\n",
+    "",
+    0
+);
+expect_output!(
+    function_append_redirect,
+    "f() { echo x; }; f > /tmp/f; f >> /tmp/f; cat /tmp/f",
+    "x\nx\n",
+    "",
+    0
+);
+expect_output!(
+    function_dev_null_redirect,
+    "f() { echo x; }; f > /dev/null; echo $?",
+    "0\n",
+    "",
+    0
+);
+expect_output!(
+    function_stderr_redirect,
+    "g() { echo y >&2; echo o; }; g 2> /tmp/e; echo \"[$(cat /tmp/e)]\"",
+    "o\n[y]\n",
+    "",
+    0
+);
+expect_output!(
+    function_stdin_redirect,
+    "printf 'hello\\n' > /tmp/in; h() { read l; echo \"got $l\"; }; h < /tmp/in",
+    "got hello\n",
+    "",
+    0
+);
+expect_output!(
+    function_heredoc_redirect,
+    "h() { read l; echo \"got $l\"; }; h <<EOF\nfrom heredoc\nEOF",
+    "got from heredoc\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_nested_call,
+    "f() { echo x; }; outer() { f; echo z; }; outer > /tmp/b; cat /tmp/b",
+    "x\nz\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_order,
+    "m() { echo a; echo b >&2; }; m 2>&1 > /tmp/h; echo \"[$(cat /tmp/h)]\"",
+    "b\n[a]\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_return_status,
+    "r() { echo r; return 3; }; r > /tmp/d; echo \"$? [$(cat /tmp/d)]\"",
+    "3 [r]\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_keeps_state,
+    "s() { cd /tmp; W=set; }; s > /dev/null; echo \"$PWD $W\"",
+    "/tmp set\n",
+    "",
+    0
+);
+expect_output!(
+    function_redirect_restores_locals_and_args,
+    "lo() { local L=in; echo \"$L $1\"; }; L=outer; set -- a; lo q > /tmp/l; echo \"$L $1 [$(cat /tmp/l)]\"",
+    "outer a [in q]\n",
+    "",
+    0
+);
+expect_output!(
+    function_self_dup_keeps_caller_stdin,
+    "printf '1\\n2\\n3\\n4\\n' > /tmp/q; f() { read m; }; while read l; do f <&0; echo \"$l$m\"; done < /tmp/q",
+    "12\n34\n",
+    "",
+    0
+);
+
+#[test]
+fn function_redirect_failure_skips_body() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("f() { echo ran; }; f > /nonexistent/dir/x; echo \"status=$?\"")
+            .await;
+        assert_eq!(out.stdout, "status=1\n");
+        assert!(out.stderr.contains("/nonexistent/dir"), "{}", out.stderr);
+    }));
+}
+
+#[test]
+fn function_redirect_set_e_exits() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("se() { set -e; echo before; false; echo no; }; se > /tmp/se; echo after")
+            .await;
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+        let out = shell.run("cat /tmp/se").await;
+        assert_eq!(out.stdout, "before\n");
+    }));
+}
+
+#[test]
+fn function_redirect_recursion_limit() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .max_depth(4)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = shell.run("f() { f > /dev/null; }; f").await;
+        assert_ne!(out.status, 0, "recursive function should be blocked");
+    }));
+}
+
+#[test]
+fn function_redirect_from_cli() {
+    let dir = TestDir::new("function_redirect_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("f() { echo out; echo err >&2; }; f > /tmp/o 2> /tmp/e; f > /dev/null 2>&1; cat /tmp/o /tmp/e")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "out\nerr\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert!(out.status.success());
+}
+
 // ── find builtin ────────────────────────────────────────────────────
 
 #[test]
@@ -1565,6 +2012,231 @@ fn find_print0() {
     }));
 }
 
+// ── find -size / -mtime / -mmin / -newer ─────────────────────────────
+
+/// Run `cmd` in a fresh shell after `setup`, returning its output.
+fn find_run(setup: &str, cmd: &str) -> strands_shell::Output {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run(setup).await;
+        assert_eq!(out.status, 0, "setup failed: {}", out.stderr);
+        shell.run(cmd).await
+    }))
+}
+
+const FIND_SIZES: &str = "mkdir -p /tmp/fs; cd /tmp/fs; \
+     for n in 0 1 511 512 513 1023 1024 1025 1048577; do head -c $n /dev/zero > s$n; done";
+
+#[test]
+fn find_size_rounds_up_to_units() {
+    // GNU rounds the size up to whole units before comparing, so -1M only
+    // matches empty files and 1k matches anything from 1 to 1024 bytes.
+    for (arg, want) in [
+        ("-1M", "s0"),
+        ("1M", "s1 s1023 s1024 s1025 s511 s512 s513"),
+        ("2M", "s1048577"),
+        ("+1k", "s1025 s1048577"),
+        ("1k", "s1 s1023 s1024 s511 s512 s513"),
+        ("-2k", "s0 s1 s1023 s1024 s511 s512 s513"),
+        ("2", "s1023 s1024 s513"),
+        ("-2", "s0 s1 s511 s512"),
+        ("1", "s1 s511 s512"),
+        ("1b", "s1 s511 s512"),
+        ("512c", "s512"),
+        ("-512c", "s0 s1 s511"),
+        ("+1024c", "s1025 s1048577"),
+        ("1w", "s1"),
+        ("0", "s0"),
+        ("-1G", "s0"),
+    ] {
+        let cmd = format!("find . -type f -size {arg} | sed 's|^./||' | sort | tr '\\n' ' '");
+        let out = find_run(FIND_SIZES, &cmd);
+        assert_eq!(out.stdout.trim_end(), want, "-size {arg}");
+        assert_eq!(out.status, 0, "-size {arg}: {}", out.stderr);
+    }
+}
+
+#[test]
+fn find_size_rejects_bad_arguments() {
+    for (arg, err) in [
+        ("1T", "find: invalid -size type `T'"),
+        ("1x", "find: invalid -size type `x'"),
+        ("+-1", "find: Invalid argument `+-1' to -size"),
+        ("k", "find: Invalid argument `k' to -size"),
+        ("1.5k", "find: Invalid argument `1.5k' to -size"),
+        ("''", "find: invalid null argument to -size"),
+    ] {
+        let out = find_run("touch /tmp/fsz", &format!("find /tmp/fsz -size {arg}"));
+        assert_eq!(out.status, 1, "-size {arg}");
+        assert_eq!(out.stdout, "", "-size {arg}");
+        assert_eq!(out.stderr.trim(), err, "-size {arg}");
+    }
+}
+
+#[test]
+fn find_mtime_mmin_fresh_file() {
+    // A file made just now is in the current 24h period and minute.
+    for (pred, matches) in [
+        ("-mtime 0", true),
+        ("-mtime -1", true),
+        ("-mtime +0", false),
+        ("-mtime 1", false),
+        ("-mmin -1", true),
+        ("-mmin 1", true),
+        ("-mmin 0", false),
+        ("-mmin +0", true),
+        ("-mmin +1", false),
+    ] {
+        let out = find_run("touch /tmp/fresh", &format!("find /tmp/fresh {pred}"));
+        let want = if matches { "/tmp/fresh" } else { "" };
+        assert_eq!(out.stdout.trim(), want, "{pred}");
+        assert_eq!(out.status, 0, "{pred}: {}", out.stderr);
+    }
+}
+
+#[test]
+fn find_mtime_rejects_bad_arguments() {
+    for (pred, arg) in [("-mtime", "x"), ("-mtime", "-"), ("-mmin", "1d")] {
+        let out = find_run("touch /tmp/fmt", &format!("find /tmp/fmt {pred} {arg}"));
+        assert_eq!(out.status, 1, "{pred} {arg}");
+        assert_eq!(
+            out.stderr.trim(),
+            format!("find: invalid argument `{arg}' to `{pred}'"),
+        );
+    }
+}
+
+/// Run `cmd` against a direct bind at /t holding files aged by `ages`
+/// (name, seconds before now), so their mtimes are fixed.
+fn find_aged_run(tag: &str, ages: &[(&str, u64)], cmd: &str) -> strands_shell::Output {
+    let dir = TestDir::new(&format!("lsh_find_aged_{tag}"));
+    let now = std::time::SystemTime::now();
+    for (name, secs) in ages {
+        let file = std::fs::File::create(dir.join(name)).unwrap();
+        file.set_modified(now - std::time::Duration::from_secs(*secs))
+            .unwrap();
+    }
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/t")
+            .build()
+            .unwrap();
+        shell.run(cmd).await
+    }))
+}
+
+const FIND_AGES: &[(&str, u64)] = &[
+    ("m0", 10),
+    ("m1", 90),
+    ("m3", 150),
+    ("h1", 3_700),
+    ("d0", 43_200),
+    ("d1", 129_600),
+    ("d2", 200_000),
+    ("d5", 450_000),
+];
+
+#[test]
+fn find_mtime_mmin_with_set_mtimes() {
+    for (pred, want) in [
+        // -mtime N: N whole 24h periods ago, fraction dropped.
+        ("-mtime 0", "d0 h1 m0 m1 m3"),
+        ("-mtime 1", "d1"),
+        ("-mtime 2", "d2"),
+        ("-mtime +1", "d2 d5"),
+        ("-mtime -2", "d0 d1 h1 m0 m1 m3"),
+        ("-mtime +4", "d5"),
+        ("-mtime 1.5", "d1 d2"),
+        // -mmin N: within the Nth minute back, rounded up.
+        ("-mmin 1", "m0"),
+        ("-mmin 2", "m1"),
+        ("-mmin 3", "m3"),
+        ("-mmin -2", "m0 m1"),
+        ("-mmin +2", "d0 d1 d2 d5 h1 m3"),
+        ("-mmin -60", "m0 m1 m3"),
+        ("-mmin +60", "d0 d1 d2 d5 h1"),
+    ] {
+        let cmd = format!("find /t -type f {pred} | sed 's|^/t/||' | sort | tr '\\n' ' '");
+        let out = find_aged_run("mtime", FIND_AGES, &cmd);
+        assert_eq!(out.stdout.trim_end(), want, "{pred}");
+        assert_eq!(out.status, 0, "{pred}: {}", out.stderr);
+    }
+}
+
+#[test]
+fn find_mtime_boundaries_match_gnu() {
+    // GNU's -mtime -N reaches one second past N days; -mtime N and +N, and
+    // -mmin, do not. Ages leave room for the time the test takes to run.
+    let dir = TestDir::new("lsh_find_aged_bounds");
+    let now = std::time::SystemTime::now();
+    for (name, millis) in [
+        ("s0.2", 200),
+        ("s0.5", 500),
+        ("s1.5", 1_500),
+        ("d-0.5", 86_399_500),
+        ("d+0.2", 86_400_200),
+        ("d+1.5", 86_401_500),
+    ] {
+        let file = std::fs::File::create(dir.join(name)).unwrap();
+        file.set_modified(now - std::time::Duration::from_millis(millis))
+            .unwrap();
+    }
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/t")
+            .build()
+            .unwrap();
+        for (pred, want) in [
+            ("-mtime -0", "s0.2 s0.5"),
+            ("-mtime -1", "d+0.2 d-0.5 s0.2 s0.5 s1.5"),
+            ("-mtime 0", "d-0.5 s0.2 s0.5 s1.5"),
+            ("-mtime +0", "d+0.2 d+1.5"),
+            ("-mmin -0", ""),
+            ("-mmin -1", "s0.2 s0.5 s1.5"),
+        ] {
+            let cmd = format!("find /t -type f {pred} | sed 's|^/t/||' | sort | tr '\\n' ' '");
+            let out = shell.run(&cmd).await;
+            assert_eq!(out.stdout.trim_end(), want, "{pred}");
+            assert_eq!(out.status, 0, "{pred}: {}", out.stderr);
+        }
+    }));
+}
+
+#[test]
+fn find_newer_compares_mtimes_strictly() {
+    let out = find_aged_run(
+        "newer",
+        &[
+            ("old", 500),
+            ("ref", 100),
+            ("same", 100),
+            ("new", 50),
+            ("newest", 1),
+        ],
+        "find /t -type f -newer /t/ref | sort; find /t -type f ! -newer /t/ref | sort",
+    );
+    assert_eq!(
+        out.stdout, "/t/new\n/t/newest\n/t/old\n/t/ref\n/t/same\n",
+        "stderr: {}",
+        out.stderr
+    );
+    assert_eq!(out.status, 0);
+}
+
+#[test]
+fn find_newer_missing_reference_fails() {
+    let out = find_run("touch /tmp/fnw", "find /tmp/fnw -newer /tmp/nosuch");
+    assert_eq!(out.status, 1);
+    assert_eq!(out.stdout, "");
+    assert_eq!(
+        out.stderr.trim(),
+        "find: '/tmp/nosuch': No such file or directory"
+    );
+}
+
 // ── xargs builtin ───────────────────────────────────────────────────
 
 expect!(xargs_basic, "printf 'a b c' | xargs echo", "a b c");
@@ -1596,6 +2268,73 @@ expect!(
     "printf 'a\\nb\\nc\\nd\\n' | xargs -n 2 echo",
     "a b\nc d"
 );
+
+// GNU: 123 if any invocation failed, not just the last one.
+expect!(
+    xargs_status_failure_in_middle,
+    "echo a > a; echo b > b; printf 'a\\nnosuch\\nb\\n' | xargs -n 1 cat; echo st=$?",
+    "a\nb\nst=123"
+);
+expect!(
+    xargs_status_all_succeed,
+    "echo a > a; echo b > b; printf 'a\\nb\\n' | xargs -n 1 cat; echo st=$?",
+    "a\nb\nst=0"
+);
+expect!(
+    xargs_status_failure_last,
+    "echo a > a; printf 'a\\nnosuch\\n' | xargs -n 1 cat; echo st=$?",
+    "a\nst=123"
+);
+expect!(
+    xargs_status_failure_with_replace,
+    "echo a > a; printf 'nosuch\\na\\n' | xargs -I X cat X; echo st=$?",
+    "a\nst=123"
+);
+expect!(
+    xargs_status_any_nonzero_is_123,
+    "printf 'echo run $1; exit $1\\n' > e.sh; printf '200\\n0\\n' | xargs -n 1 sh e.sh; echo st=$?",
+    "run 200\nrun 0\nst=123"
+);
+expect_output!(
+    xargs_status_not_found,
+    "printf 'a\\nb\\n' | xargs -n 1 nosuchcmd",
+    "",
+    "strands-shell: nosuchcmd: command not found\n",
+    127
+);
+
+// GNU: a command exiting 255 stops xargs, which exits 124.
+shell_test!(
+    xargs_status_255_stops,
+    "printf 'echo run $1; exit $1\\n' > e.sh; printf '0\\n255\\n7\\n' | xargs -n 1 sh e.sh",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "run 0\nrun 255\n");
+        assert_eq!(out.stderr, "xargs: sh: exited with status 255; aborting\n");
+        assert_eq!(out.status, 124);
+    }
+);
+
+#[test]
+fn xargs_status_timeout() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut statuses = Vec::new();
+        for command in [
+            "echo 2 | xargs sleep",
+            "printf '2\\n2\\n' | xargs -n 1 sleep",
+            "printf '2\\n2\\n' | xargs -I X sleep X",
+        ] {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert!(out.stderr.contains("execution timeout exceeded"));
+            statuses.push(out.status);
+        }
+        assert_eq!(statuses, vec![1, 1, 1]);
+    }));
+}
 
 // ── Arithmetic: assignment operators ────────────────────────────────
 
@@ -1774,6 +2513,161 @@ expect!(subshell_exit_code, "(exit 42); echo $?", "42");
 // ── source / dot command ────────────────────────────────────────────
 
 #[test]
+fn line_continuations_join_source_lines() {
+    let script = r#"pri\
+ntf '<%s>\n' hel\
+lo \
+  world
+true || \
+  printf unexpected
+printf 'a\n' | \
+  tr a b
+"#;
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for command in [script, ". /tmp/continued.sh", "sh /tmp/continued.sh"] {
+            let mut shell = Shell::builder().build().unwrap();
+            let setup = shell
+                .run(&format!(
+                    "printf '%s' '{}' > /tmp/continued.sh",
+                    script.replace('\'', "'\\''")
+                ))
+                .await;
+            assert_eq!(setup.status, 0, "{}", setup.stderr);
+            let out = shell.run(command).await;
+            assert_eq!(out.status, 0, "{command}: {}", out.stderr);
+            assert_eq!(out.stderr, "", "{command}");
+            assert_eq!(out.stdout, "<hello>\n<world>\nb\n", "{command}");
+        }
+    }));
+}
+
+/// Writes `script` to `path` in `shell`.
+async fn write_script(shell: &mut Shell, path: &str, script: &str) {
+    let setup = shell
+        .run(&format!(
+            "printf '%s' '{}' > {path}",
+            script.replace('\'', "'\\''")
+        ))
+        .await;
+    assert_eq!(setup.status, 0, "{}", setup.stderr);
+}
+
+#[test]
+fn and_or_at_line_end_joins_source_lines() {
+    let script = "false &&\necho AND_SKIPPED\ntrue ||\necho OR_SKIPPED\n\
+                  true &&\n  echo AND_RAN\nfalse ||\n\n  echo OR_RAN\n";
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for command in [
+            script,
+            ". /tmp/and_or.sh",
+            "source /tmp/and_or.sh",
+            "sh /tmp/and_or.sh",
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            write_script(&mut shell, "/tmp/and_or.sh", script).await;
+            let out = shell.run(command).await;
+            assert_eq!(out.stderr, "", "{command}");
+            assert_eq!(out.stdout, "AND_RAN\nOR_RAN\n", "{command}");
+            assert_eq!(out.status, 0, "{command}");
+        }
+    }));
+}
+
+#[test]
+fn and_or_at_line_end_keeps_the_guard_status() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, status) in [
+            ("false &&\necho skipped\n", "1"),
+            ("true ||\necho skipped\n", "0"),
+        ] {
+            for run in [".", "source", "sh"] {
+                let mut shell = Shell::builder().build().unwrap();
+                write_script(&mut shell, "/tmp/guard.sh", script).await;
+                let out = shell.run(&format!("{run} /tmp/guard.sh; echo $?")).await;
+                assert_eq!(out.stdout, format!("{status}\n"), "{run} {script:?}");
+                assert_eq!(out.stderr, "", "{run} {script:?}");
+            }
+        }
+    }));
+}
+
+#[test]
+fn sourced_parse_error_names_the_file_and_line() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, stdout, stderr) in [
+            (
+                "echo ONE\necho )\necho THREE\n",
+                "ONE\nafter 1\n",
+                "strands-shell: /tmp/bad.sh: line 2: unexpected ')'\n",
+            ),
+            (
+                "echo FIRST\necho \"open\necho SECOND\n",
+                "FIRST\nafter 1\n",
+                "strands-shell: /tmp/bad.sh: line 2: unterminated double quote\n",
+            ),
+        ] {
+            for run in [".", "source", "sh"] {
+                let mut shell = Shell::builder().build().unwrap();
+                write_script(&mut shell, "/tmp/bad.sh", script).await;
+                let out = shell
+                    .run(&format!("{run} /tmp/bad.sh; echo after $?"))
+                    .await;
+                assert_eq!(out.stdout, stdout, "{run} {script:?}");
+                assert_eq!(out.stderr, stderr, "{run} {script:?}");
+            }
+        }
+    }));
+}
+
+#[test]
+fn sourced_parse_error_stops_the_file_and_the_caller_continues() {
+    let script = "echo BEFORE\nbefore() { echo BEFORE_FN; }\nbad() { echo *(N); }\n\
+                  after() { echo AFTER_FN; }\necho AFTER\necho \"never closed\n";
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        write_script(&mut shell, "/tmp/stop.sh", script).await;
+        let out = shell
+            .run(". /tmp/stop.sh; echo rc=$?; before; after; echo DONE")
+            .await;
+        assert_eq!(out.stdout, "BEFORE\nrc=1\nBEFORE_FN\nDONE\n");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: /tmp/stop.sh: line 3: Opened parentheses without closing\n\
+             strands-shell: after: command not found\n"
+        );
+    }));
+}
+
+#[test]
+fn line_continuations_preserve_quoting_and_input_boundaries() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            ("printf '<%s>' 'a\\\nb' \"c\\\nd\"", "<a\\\nb><cd>"),
+            ("printf '<%s>' \\\\\nprintf next", "<\\>next"),
+            ("printf first # comment \\\nprintf next", "firstnext"),
+            (
+                "cat \\\n  <<'EOF'\na\\\nb\nEOF\nprintf after",
+                "a\\\nb\nafter",
+            ),
+            ("printf '<%s>' word\\\n", "<word>"),
+            ("alias a=''\nalias b=''\na b printf after", "after"),
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 0, "{script}: {}", out.stderr);
+            assert_eq!(out.stderr, "", "{script}");
+            assert_eq!(out.stdout, expected, "{script}");
+        }
+    }));
+}
+
+#[test]
 fn source_dot_script() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
@@ -1949,6 +2843,208 @@ expect_streams!(
     "x=$(cd /nope); echo \"[$x]\"",
     "[]\n",
     CD_NOPE
+);
+
+// ── xargs forwards the child's stderr ───────────────────────────────
+
+const CAT_NOPE: &str = "strands-shell: cat: no such file or directory: /nope\n";
+
+expect_streams!(
+    xargs_child_stderr_forwarded,
+    "printf '/nope\\n' | xargs cat",
+    "",
+    CAT_NOPE
+);
+expect_streams!(
+    xargs_command_not_found_reported,
+    "printf 'a\\n' | xargs nosuchcmd; echo \"status=$?\"",
+    "status=127\n",
+    "strands-shell: nosuchcmd: command not found\n"
+);
+expect_streams!(
+    xargs_child_stderr_to_dev_null,
+    "printf '/nope\\n' | xargs cat 2>/dev/null; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    xargs_child_stderr_to_file,
+    "printf '/nope\\n' | xargs cat 2>/tmp/xerr; cat /tmp/xerr",
+    CAT_NOPE,
+    ""
+);
+expect_streams!(
+    xargs_child_stderr_merged_into_pipe,
+    "printf '/nope\\n' | xargs cat 2>&1 | grep -c nope",
+    "1\n",
+    ""
+);
+expect_streams!(
+    xargs_child_stderr_keeps_order_per_invocation,
+    "echo x > /tmp/xf; x=$(printf '/tmp/xf /nope /tmp/xf\\n' | xargs -n 1 cat 2>&1); echo \"$x\"",
+    format!("x\n{CAT_NOPE}x\n"),
+    ""
+);
+expect_streams!(
+    xargs_replace_child_stderr_forwarded,
+    "printf '/nope\\n' | xargs -I X cat X",
+    "",
+    CAT_NOPE
+);
+expect_streams!(
+    xargs_child_stdout_unaffected,
+    "echo hi > /tmp/xg; printf '/tmp/xg\\n' | xargs cat",
+    "hi\n",
+    ""
+);
+
+// ── Stderr of a compound piped into a command ───────────────────────
+
+expect_streams!(
+    compound_pipe_for_stderr,
+    "for i in 1; do echo out; echo err >&2; done | cat",
+    "out\n",
+    "err\n"
+);
+expect_streams!(
+    compound_pipe_if_stderr,
+    "if true; then echo e >&2; fi | cat",
+    "",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_while_no_output,
+    "while false; do :; done | cat",
+    "",
+    ""
+);
+expect_streams!(
+    compound_pipe_tail_stderr_redirect,
+    "{ echo o; echo e >&2; } | cat 2>/dev/null",
+    "o\n",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_tail_stdout_redirect,
+    "{ echo o; echo e >&2; } | cat >/dev/null",
+    "",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_negated_stderr,
+    "! { echo e >&2; false; } | cat; echo \"rc=$?\"",
+    "rc=1\n",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_pipefail_stderr,
+    "{ echo off >&2; exit 3; } | cat; echo $?; \
+     set -o pipefail; { echo on >&2; exit 3; } | cat; echo $?; \
+     f() { return 4; }; { echo tail >&2; exit 3; } | f; echo $?",
+    "0\n3\n4\n",
+    "off\non\ntail\n"
+);
+expect_streams!(
+    compound_pipe_pipefail_return_and_negation_stderr,
+    "set -o pipefail; f() { { echo ret >&2; return 5; } | cat; }; f; echo $?; \
+     ! { echo neg >&2; false; } | cat; echo $?",
+    "5\n0\n",
+    "ret\nneg\n"
+);
+expect_streams!(
+    compound_pipe_tail_function_exit_preserves_stderr,
+    "set -o pipefail; f() { exit 7; }; \
+     { echo producer >&2; exit 3; } | f; echo \"pipe $?\"; echo after",
+    "pipe 7\nafter\n",
+    "producer\n"
+);
+expect_streams!(
+    compound_pipe_in_substitution_stderr,
+    "x=$({ echo o; echo e >&2; } | cat); echo \"x=$x\"",
+    "x=o\n",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_stderr_many_lines,
+    "i=0; while [ $i -lt 2000 ]; do i=$((i+1)); echo $i >&2; done | cat; \
+     i=0; while [ $i -lt 2000 ]; do i=$((i+1)); echo $i >&2; done | cat",
+    "",
+    format!(
+        "{0}{0}",
+        (1..=2000).map(|i| format!("{i}\n")).collect::<String>()
+    )
+);
+expect_streams!(
+    compound_pipe_stderr_inside_pipeline_stage,
+    "f() { i=0; while [ $i -lt 2000 ]; do i=$((i+1)); echo $i >&2; done | cat; }; f | cat; f | cat",
+    "",
+    format!(
+        "{0}{0}",
+        (1..=2000).map(|i| format!("{i}\n")).collect::<String>()
+    )
+);
+
+#[test]
+fn compound_pipe_stderr_timeout_reported_once() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        let out = shell
+            .run("{ while true; do echo x >&2; done; } | head -1")
+            .await;
+        assert_eq!(
+            out.stderr.matches("execution timeout exceeded").count(),
+            1,
+            "stderr: {:?}",
+            out.stderr.get(out.stderr.len().saturating_sub(200)..)
+        );
+        assert!(out.stderr.starts_with("x\n"));
+    }));
+}
+
+#[test]
+fn compound_pipe_stderr_from_cli() {
+    let dir = TestDir::new("compound_pipe_stderr_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("{ echo o; echo e >&2; } | cat; f() { if true; then echo e2 >&2; fi | cat; }; f | cat")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "o\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "e\ne2\n");
+    assert!(out.status.success());
+}
+
+// ── Subshell stderr in captured paths ───────────────────────────────
+
+expect_streams!(subshell_stderr_plain, "( echo e >&2 )", "", "e\n");
+expect_streams!(
+    subshell_stderr_in_substitution,
+    "x=$( (echo e >&2) ); echo \"[$x]\"",
+    "[]\n",
+    "e\n"
+);
+expect_streams!(
+    subshell_command_stderr_in_substitution,
+    "x=$( (cd /nope) ); echo \"[$x]\"",
+    "[]\n",
+    CD_NOPE
+);
+expect_streams!(
+    subshell_stderr_with_stdout_to_file,
+    "( echo o; echo e >&2 ) >/tmp/out; cat /tmp/out",
+    "o\n",
+    "e\n"
+);
+expect_streams!(
+    nested_subshell_stderr_in_substitution,
+    "x=$( ( (echo e >&2); echo o ) ); echo \"$x\"",
+    "o\n",
+    "e\n"
 );
 
 // ── Heredoc expansion ───────────────────────────────────────────────
@@ -2899,7 +3995,47 @@ expect!(
     "printf '%b' 'hello\\nworld'",
     "hello\nworld"
 );
-expect!(printf_octal_escape, "printf '\\0101'", "A");
+// Like bash, a format-string octal escape is `\` plus 1-3 digits, so
+// `\0101` is `\010` then `1`; `%b` also accepts `\0` plus 3 digits.
+expect!(printf_octal_escape, "printf '\\101\\n'", "A");
+expect!(printf_octal_escape_leading_zero, "printf '\\0101'", "\x081");
+expect!(printf_octal_escape_max_digits, "printf '\\1012'", "A2");
+expect!(printf_hex_escape, "printf 'a\\x41b\\n'", "aAb");
+expect!(
+    printf_hex_escape_max_digits,
+    "printf '\\x414\\x4|'",
+    "A4\x04|"
+);
+expect!(
+    printf_hex_escape_no_digits,
+    "printf '\\xg' 2>/dev/null",
+    "\\xg"
+);
+expect!(printf_hex_escape_nul, "printf '\\x00z' | wc -c", "2");
+expect!(
+    printf_hex_escape_raw_byte,
+    "printf '\\xff\\200' | wc -c",
+    "2"
+);
+expect!(printf_unicode_escape, "printf '\\u00e9\\U0001F600'", "é😀");
+expect!(
+    printf_format_backslash_c_is_literal,
+    r"printf 'x\cy'",
+    r"x\cy"
+);
+expect!(
+    printf_b_octal_escape,
+    r"printf '%b|' '\0101' '\101' '\01012'",
+    "A|A|A2|"
+);
+expect!(printf_b_hex_escape, r"printf '%b' 'a\x41b'", "aAb");
+expect_output!(
+    printf_b_backslash_c_stops_output,
+    r"printf '%s %b %s\n' 1 '\c' 3 4 5 6",
+    "1 ",
+    "",
+    0
+);
 
 // ── chmod coverage ──────────────────────────────────────────────────
 
@@ -3085,6 +4221,187 @@ expect!(
     ".hidden\nvisible"
 );
 
+expect!(
+    ls_h_without_l_lists_names,
+    "mkdir -p /tmp/lsh; touch /tmp/lsh/a /tmp/lsh/b; ls -h /tmp/lsh",
+    "a\nb"
+);
+
+expect!(
+    ls_lh_pipes_into_grep,
+    "mkdir -p /tmp/lsg; touch /tmp/lsg/foo /tmp/lsg/bar; ls -lh /tmp/lsg | grep -c foo",
+    "1"
+);
+
+/// Bind a host dir holding files with fixed sizes, modes and mtimes.
+/// `files` is (name, size, mtime seconds since epoch).
+#[cfg(unix)]
+fn ls_fixture(name: &str, files: &[(&str, u64, u64)]) -> TestDir {
+    let dir = TestDir::new(name);
+    for &(file, len, secs) in files {
+        let path = dir.join(file);
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(len).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    dir
+}
+
+#[cfg(unix)]
+fn run_ls_fixture(dir: &TestDir, cmd: &str) -> strands_shell::Output {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/fx")
+            .build()
+            .unwrap();
+        shell.run(cmd).await
+    }))
+}
+
+// 2020-01-01T00:00:00Z, far enough in the past that -l prints the year.
+#[cfg(unix)]
+const LS_T0: u64 = 1_577_836_800;
+
+#[cfg(unix)]
+#[test]
+fn ls_long_format_unchanged() {
+    let dir = ls_fixture("ls_long_fmt", &[("f", 1536, LS_T0)]);
+    let out = run_ls_fixture(&dir, "ls -l /fx");
+    assert_eq!(out.stdout, "-rw-r--r--     1536 Jan  1  2020 f\n");
+    assert_eq!(out.status, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_lh_prints_human_sizes() {
+    // Expected sizes from GNU coreutils `ls -lh`.
+    let files = [
+        ("a", 0, LS_T0),
+        ("b", 1023, LS_T0),
+        ("c", 1024, LS_T0),
+        ("d", 1025, LS_T0),
+        ("e", 10239, LS_T0),
+        ("f", 5_000_000, LS_T0),
+    ];
+    let dir = ls_fixture("ls_lh", &files);
+    let out = run_ls_fixture(&dir, "ls -lh /fx");
+    assert_eq!(
+        out.stdout,
+        "-rw-r--r--        0 Jan  1  2020 a\n\
+         -rw-r--r--     1023 Jan  1  2020 b\n\
+         -rw-r--r--     1.0K Jan  1  2020 c\n\
+         -rw-r--r--     1.1K Jan  1  2020 d\n\
+         -rw-r--r--      10K Jan  1  2020 e\n\
+         -rw-r--r--     4.8M Jan  1  2020 f\n"
+    );
+    assert_eq!(out.status, 0);
+    let single = run_ls_fixture(&dir, "ls --human-readable -l /fx/f");
+    assert_eq!(single.stdout, "-rw-r--r--     4.8M Jan  1  2020 /fx/f\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_sort_by_time_and_size() {
+    // Ties (a/b on mtime, b/c on size) fall back to name order, like GNU.
+    let files = [
+        ("a", 10, LS_T0 + 100),
+        ("b", 30, LS_T0 + 100),
+        ("c", 30, LS_T0 + 300),
+        ("d", 20, LS_T0),
+    ];
+    let dir = ls_fixture("ls_sort", &files);
+    let ls = |flags: &str| run_ls_fixture(&dir, &format!("ls {flags} /fx")).stdout;
+    assert_eq!(ls("-t"), "c\na\nb\nd\n");
+    assert_eq!(ls("-tr"), "d\nb\na\nc\n");
+    assert_eq!(ls("-S"), "b\nc\nd\na\n");
+    assert_eq!(ls("-Sr"), "a\nd\nc\nb\n");
+    assert_eq!(ls("-r"), "d\nc\nb\na\n");
+    assert_eq!(
+        ls("-lt"),
+        "-rw-r--r--       30 Jan  1  2020 c\n\
+         -rw-r--r--       10 Jan  1  2020 a\n\
+         -rw-r--r--       30 Jan  1  2020 b\n\
+         -rw-r--r--       20 Jan  1  2020 d\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_sorts_file_operands() {
+    let files = [
+        ("a.log", 10, LS_T0 + 100),
+        ("b.log", 30, LS_T0 + 100),
+        ("c.log", 30, LS_T0 + 300),
+        ("d.log", 20, LS_T0),
+    ];
+    let dir = ls_fixture("ls_sort_operands", &files);
+    for (flags, want) in [
+        ("-t", "/fx/c.log\n/fx/a.log\n/fx/b.log\n/fx/d.log\n"),
+        ("-tr", "/fx/d.log\n/fx/b.log\n/fx/a.log\n/fx/c.log\n"),
+        ("-S", "/fx/b.log\n/fx/c.log\n/fx/d.log\n/fx/a.log\n"),
+        ("-Sr", "/fx/a.log\n/fx/d.log\n/fx/c.log\n/fx/b.log\n"),
+        ("-r", "/fx/d.log\n/fx/c.log\n/fx/b.log\n/fx/a.log\n"),
+    ] {
+        let out = run_ls_fixture(
+            &dir,
+            &format!("ls {flags} /fx/a.log /fx/b.log /fx/c.log /fx/d.log"),
+        );
+        assert_eq!(out.stdout, want, "{flags}");
+        assert_eq!(out.stderr, "", "{flags}");
+        assert_eq!(out.status, 0, "{flags}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_sorts_mixed_operands_with_files_first() {
+    let dir = ls_fixture(
+        "ls_sort_mixed",
+        &[("old", 10, LS_T0), ("new", 20, LS_T0 + 100)],
+    );
+    for (name, secs) in [("adir", LS_T0), ("zdir", LS_T0 + 100)] {
+        std::fs::create_dir(dir.join(name)).unwrap();
+        std::fs::File::open(dir.join(name))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+    for (flags, want) in [
+        ("-t", "/fx/new\n/fx/old\n\n/fx/zdir:\n\n/fx/adir:\n"),
+        ("-tr", "/fx/old\n/fx/new\n\n/fx/adir:\n\n/fx/zdir:\n"),
+    ] {
+        let out = run_ls_fixture(
+            &dir,
+            &format!("ls {flags} /fx/adir /fx/old /fx/zdir /fx/new"),
+        );
+        assert_eq!(out.stdout, want, "{flags}");
+        assert_eq!(out.stderr, "", "{flags}");
+        assert_eq!(out.status, 0, "{flags}");
+    }
+}
+
+expect!(
+    ls_sorts_glob_operands,
+    "mkdir /tmp/lsglob; cd /tmp/lsglob; printf x > a.log; printf xxx > b.log; \
+     printf xx > c.log; ls -S *.log | head -1",
+    "b.log"
+);
+expect!(
+    ls_sort_includes_hidden_with_a,
+    "mkdir /tmp/lshidden; printf x > /tmp/lshidden/a; printf xx > /tmp/lshidden/.hidden; \
+     ls -aS /tmp/lshidden",
+    ".hidden\na"
+);
+expect!(
+    ls_sort_recurses,
+    "mkdir -p /tmp/lsrecursive/a /tmp/lsrecursive/b; printf x > /tmp/lsrecursive/a/small; \
+     printf xx > /tmp/lsrecursive/a/big; ls -RS /tmp/lsrecursive",
+    "/tmp/lsrecursive:\na\nb\n\n/tmp/lsrecursive/a:\nbig\nsmall\n\n/tmp/lsrecursive/b:"
+);
+
 // ── tail coverage ───────────────────────────────────────────────────
 
 expect!(
@@ -3209,6 +4526,87 @@ expect!(
     head_bytes_redirect,
     "printf 'abcdef' > /tmp/hr; head -c 4 /tmp/hr > /tmp/hr.part && mv /tmp/hr.part /tmp/hr; cat /tmp/hr",
     "abcd"
+);
+expect!(
+    head_lines_all_but_last_from_file,
+    "printf 'a\\nb\\nc\\nd\\n' > /tmp/hn; head -n -2 /tmp/hn",
+    "a\nb"
+);
+expect!(
+    head_lines_all_but_last_attached,
+    "printf 'a\\nb\\nc\\nd\\n' | head -n-3",
+    "a"
+);
+expect!(
+    head_lines_all_but_last_long,
+    "printf 'a\\nb\\nc\\nd\\n' | head --lines=-1",
+    "a\nb\nc"
+);
+shell_test!(
+    head_lines_all_but_last_zero_prints_everything,
+    "printf 'a\\nb\\nc' | head -n -0",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "a\nb\nc");
+        assert_eq!(out.status, 0);
+    }
+);
+expect!(
+    head_lines_all_but_last_more_than_input,
+    "printf 'a\\nb\\n' | head -n -5",
+    ""
+);
+shell_test!(
+    head_lines_all_but_last_counts_unterminated_line,
+    "printf 'a\\nb\\nc' | head -n -1",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "a\nb\n");
+        assert_eq!(out.status, 0);
+    }
+);
+expect!(
+    head_lines_all_but_last_then_bytes_last_wins,
+    "printf 'a\\nb\\nc\\n' | head -n -1 -c 1",
+    "a"
+);
+shell_test!(
+    head_bytes_all_but_last,
+    "printf 'abcdef' > /tmp/hc; head -c -2 /tmp/hc; head -c-4 /tmp/hc; head --bytes=-5 /tmp/hc",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "abcdaba");
+        assert_eq!(out.status, 0);
+    }
+);
+expect!(
+    head_bytes_all_but_last_zero,
+    "printf 'abc' | head -c -0",
+    "abc"
+);
+expect!(
+    head_bytes_all_but_last_more_than_input,
+    "printf 'abc' | head -c -10",
+    ""
+);
+expect!(
+    head_bytes_all_but_last_then_lines_last_wins,
+    "printf 'a\\nb\\nc\\n' | head -c -1 -n 2",
+    "a\nb"
+);
+shell_test!(
+    head_all_but_last_error_quotes_whole_value,
+    "head -n -x; head -c -",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert!(
+            out.stderr.contains("cannot parse argument \"-x\""),
+            "stderr: {:?}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("cannot parse argument \"-\""),
+            "stderr: {:?}",
+            out.stderr
+        );
+        assert_eq!(out.status, 1);
+    }
 );
 
 // ── ls single file long format ──────────────────────────────────────
@@ -3449,6 +4847,145 @@ expect!(
     readlink_basic,
     "ln -s /tmp/target /tmp/rl_link; readlink /tmp/rl_link",
     "/tmp/target"
+);
+
+/// Builds `/tmp/rc` with a file, a symlink chain, a directory symlink, a
+/// dangling symlink and a symlink loop, then `cd`s into it.
+const READLINK_TREE: &str = "mkdir -p /tmp/rc/d/sub && cd /tmp/rc && echo x > d/f && \
+    ln -s d/f l1 && ln -s l1 l2 && ln -s d ld && ln -s missing dang && \
+    ln -s loopb loopa && ln -s loopa loopb; ";
+
+macro_rules! readlink_case {
+    ($name:ident, $args:expr, $stdout:expr, $status:expr) => {
+        expect_output!(
+            $name,
+            &format!("{READLINK_TREE}readlink {}", $args),
+            $stdout,
+            "",
+            $status
+        );
+    };
+}
+
+readlink_case!(
+    readlink_f_regular_file,
+    "-f /tmp/rc/d/f",
+    "/tmp/rc/d/f\n",
+    0
+);
+readlink_case!(readlink_f_relative, "-f d/f", "/tmp/rc/d/f\n", 0);
+readlink_case!(readlink_f_symlink_chain, "-f l2", "/tmp/rc/d/f\n", 0);
+readlink_case!(
+    readlink_f_dir_symlink_child,
+    "-f ld/sub",
+    "/tmp/rc/d/sub\n",
+    0
+);
+readlink_case!(readlink_f_dotdot, "-f ./ld/../d/./f", "/tmp/rc/d/f\n", 0);
+readlink_case!(
+    readlink_f_dotdot_after_link,
+    "-f ld/../l1",
+    "/tmp/rc/d/f\n",
+    0
+);
+readlink_case!(readlink_f_missing_last, "-f nofile", "/tmp/rc/nofile\n", 0);
+readlink_case!(readlink_f_dangling_link, "-f dang", "/tmp/rc/missing\n", 0);
+readlink_case!(readlink_f_missing_middle, "-f no/x", "", 1);
+readlink_case!(readlink_f_file_as_dir, "-f d/f/x", "", 1);
+readlink_case!(readlink_f_file_dotdot, "-f d/f/..", "", 1);
+readlink_case!(readlink_f_file_trailing_slash, "-f d/f/", "", 1);
+readlink_case!(readlink_f_loop, "-f loopa", "", 1);
+readlink_case!(readlink_f_root, "-f /", "/\n", 0);
+readlink_case!(readlink_f_empty, "-f ''", "", 1);
+readlink_case!(
+    readlink_canonicalize_long,
+    "--canonicalize l2",
+    "/tmp/rc/d/f\n",
+    0
+);
+readlink_case!(readlink_e_existing, "-e l2", "/tmp/rc/d/f\n", 0);
+readlink_case!(readlink_e_missing_last, "-e nofile", "", 1);
+readlink_case!(readlink_e_dangling_link, "-e dang", "", 1);
+readlink_case!(readlink_e_loop, "--canonicalize-existing loopa", "", 1);
+readlink_case!(
+    readlink_m_missing_middle,
+    "-m no/x/../y",
+    "/tmp/rc/no/y\n",
+    0
+);
+readlink_case!(readlink_m_file_as_dir, "-m d/f/x", "/tmp/rc/d/f/x\n", 0);
+readlink_case!(
+    readlink_m_loop,
+    "--canonicalize-missing loopa",
+    "/tmp/rc/loopa\n",
+    0
+);
+readlink_case!(readlink_last_mode_wins, "-ef nofile", "/tmp/rc/nofile\n", 0);
+readlink_case!(readlink_fn_no_newline, "-fn l2", "/tmp/rc/d/f", 0);
+readlink_case!(readlink_n_plain, "--no-newline l2", "l1", 0);
+readlink_case!(readlink_plain_relative_target, "l2", "l1\n", 0);
+
+/// Builds `/tmp/rc` with a chain `c0 -> c1 -> ... -> c45` ending at a file,
+/// a link to `.`, links whose targets end with a slash, a link that grows the
+/// path (`g`), a loop (`m0 <-> m1`) and a link through 600 `dd/..` pairs.
+const READLINK_LINKS: &str = "mkdir -p /tmp/rc/dd && cd /tmp/rc && echo x > f && echo x > c45 && \
+    i=0; while [ $i -lt 45 ]; do ln -s c$((i+1)) c$i; i=$((i+1)); done; \
+    ln -s . l && ln -s f/ fslash && ln -s dd/ ddslash && ln -s g/x g; \
+    ll=l; i=0; while [ $i -lt 45 ]; do ll=$ll/l; i=$((i+1)); done; \
+    ln -s m1 m0 && ln -s m0 m1; mx=m0; i=0; while [ $i -lt 1000 ]; do mx=$mx/x; i=$((i+1)); done; \
+    t=g/x; i=0; while [ $i -lt 600 ]; do t=dd/../$t; i=$((i+1)); done; ln -s $t dotdot; ";
+
+macro_rules! readlink_links_case {
+    ($name:ident, $args:expr, $stdout:expr, $status:expr) => {
+        expect_output!(
+            $name,
+            &format!("{READLINK_LINKS}readlink {}", $args),
+            $stdout,
+            "",
+            $status
+        );
+    };
+}
+
+readlink_links_case!(readlink_m_long_chain, "-m c0", "/tmp/rc/c45\n", 0);
+readlink_links_case!(readlink_f_long_chain, "-f c0", "/tmp/rc/c45\n", 0);
+readlink_links_case!(readlink_e_long_chain, "-e c0", "/tmp/rc/c45\n", 0);
+readlink_links_case!(readlink_f_repeated_link, "-f $ll/f", "/tmp/rc/f\n", 0);
+readlink_links_case!(readlink_e_repeated_link, "-e $ll/f", "/tmp/rc/f\n", 0);
+readlink_links_case!(readlink_f_target_slash_file, "-f fslash", "", 1);
+readlink_links_case!(readlink_e_target_slash_file, "-e fslash", "", 1);
+readlink_links_case!(readlink_m_target_slash_file, "-m fslash", "/tmp/rc/f\n", 0);
+readlink_links_case!(readlink_e_target_slash_dir, "-e ddslash", "/tmp/rc/dd\n", 0);
+readlink_links_case!(
+    readlink_f_missing_trailing_slash,
+    "-f nofile/",
+    "/tmp/rc/nofile\n",
+    0
+);
+readlink_links_case!(readlink_f_missing_trailing_dot, "-f nofile/.", "", 1);
+readlink_links_case!(readlink_f_file_trailing_dot, "-f f/.", "", 1);
+readlink_links_case!(readlink_f_growing_link, "-f g", "", 1);
+readlink_links_case!(readlink_m_growing_link, "-m g", "", 1);
+readlink_links_case!(readlink_f_long_dotdot_link, "-f dotdot", "", 1);
+readlink_links_case!(readlink_m_long_dotdot_link, "-m dotdot", "", 1);
+readlink_links_case!(
+    readlink_m_loop_then_dotdot,
+    "-m m0/x/../y",
+    "/tmp/rc/m0/y\n",
+    0
+);
+readlink_links_case!(readlink_f_loop_long_path, "-f $mx", "", 1);
+expect!(
+    readlink_m_loop_long_path,
+    &format!("{READLINK_LINKS}r=$(readlink -m $mx); echo \"${{#r}} ${{r%%/x/*}}\""),
+    "2010 /tmp/rc/m0"
+);
+
+expect!(
+    readlink_f_script_dir,
+    "mkdir -p /tmp/proj/bin && ln -s /tmp/proj/bin /tmp/b && echo : > /tmp/proj/bin/run && \
+     cd /tmp && dirname \"$(readlink -f b/run)\"",
+    "/tmp/proj/bin"
 );
 
 // ── type builtin extended ───────────────────────────────────────────
@@ -3739,6 +5276,77 @@ expect!(
     "echo '{\"x\":1}' > /tmp/jq1.json; jq '.x' /tmp/jq1.json",
     "1"
 );
+expect!(
+    jq_arg_string,
+    "x=bob; echo '{\"name\":\"bob\"}' | jq --arg n \"$x\" '.name == $n'",
+    "true"
+);
+expect!(
+    jq_arg_after_filter,
+    "echo '{\"name\":\"bob\"}' | jq '.name == $n' --arg n bob",
+    "true"
+);
+expect!(
+    jq_arg_is_string,
+    "jq -n --arg v 1 '$v | type'",
+    "\"string\""
+);
+expect!(
+    jq_arg_dash_value,
+    "jq -n -r --arg v -x --arg w --y '$v + $w'",
+    "-x--y"
+);
+expect!(
+    jq_argjson_object,
+    "jq -n --argjson v '{\"a\":1}' '$v.a'",
+    "1"
+);
+expect!(
+    jq_arg_multiple,
+    "jq -n -c --arg a x --argjson b '[1,2]' '[$a, $b]'",
+    "[\"x\",[1,2]]"
+);
+expect!(jq_arg_first_wins, "jq -n --arg a 1 --arg a 2 '$a'", "\"1\"");
+expect!(
+    jq_arg_duplicate_json_not_parsed,
+    "jq -n --arg a first --argjson a invalid '$a'",
+    "\"first\""
+);
+expect!(
+    jq_argjson_duplicate_not_parsed,
+    "jq -n --argjson a 1 --argjson a invalid '$a'",
+    "1"
+);
+expect!(
+    jq_arg_in_def,
+    "jq -n -r --arg a x 'def f: $a + \"y\"; f'",
+    "xy"
+);
+expect!(
+    jq_args_named,
+    "jq -n -c --arg a x --argjson b 2 '$ARGS'",
+    "{\"named\":{\"a\":\"x\",\"b\":2},\"positional\":[]}"
+);
+shell_test!(
+    jq_argjson_invalid,
+    "jq -n --argjson v '{bad' '$v'",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.stderr, "jq: invalid JSON text passed to --argjson\n");
+        assert_eq!(out.status, 2);
+    }
+);
+shell_test!(
+    jq_arg_missing_value,
+    "jq -n --arg v",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(
+            out.stderr,
+            "jq: --arg takes two parameters (e.g. --arg varname value)\n"
+        );
+        assert_eq!(out.status, 2);
+    }
+);
 
 // ── sed uncovered paths ───────────────────────────────────────────
 expect!(sed_quit, "printf 'a\\nb\\nc\\n' | sed '2q'", "a\nb");
@@ -3924,13 +5532,201 @@ fn timeout_interrupts_sleep_with_failure() {
             .build()
             .unwrap();
         let out = shell.run("sleep 5").await;
-        assert_ne!(out.status, 0, "sleep past the deadline must fail");
+        assert_eq!(out.status, 1, "sleep past the deadline must fail");
         assert_eq!(
             out.stderr.trim(),
-            "strands-shell: execution timeout exceeded",
+            "strands-shell: sleep: execution timeout exceeded",
             "stderr={:?}",
             out.stderr
         );
+    }));
+}
+
+#[test]
+fn captured_timeout_stops_following_commands_before_host_writes() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "x=$(sleep 5 || echo ran > /out/marker)",
+            "x=$(if sleep 5; then :; else echo ran > /out/marker; fi)",
+            "{ sleep 5 || echo ran > /out/marker; } | cat",
+            "{ if sleep 5; then :; else echo ran > /out/marker; fi; } | cat",
+            "x=$(sleep 5; echo ran > /out/marker)",
+            "{ sleep 5; echo ran > /out/marker; } | cat",
+        ] {
+            let dir = TestDir::new("captured_timeout_host_write");
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let before = shell.run("echo before > /out/before").await;
+            assert_eq!(before.status, 0, "{script}: {}", before.stderr);
+            assert_eq!(std::fs::read(dir.join("before")).unwrap(), b"before\n");
+
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            assert!(!dir.join("marker").exists(), "{script}");
+        }
+    }));
+}
+
+#[test]
+fn a_substitution_cut_short_by_the_deadline_does_not_run_the_command_it_feeds() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "rm -rf \"/out/$(sleep 5; echo sub)\"",
+            "rm -rf \"/out/$(sleep 5 && echo sub)\"",
+            "rm -rf \"/out/$(sleep 5)\"",
+            "d=$(sleep 5; echo sub); rm -rf \"/out/$d\"",
+            "echo ran > \"/out/marker$(sleep 5)\"",
+        ] {
+            let dir = TestDir::new("substitution_timeout_host_write");
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+            std::fs::create_dir_all(dir.join("keep")).unwrap();
+            std::fs::write(dir.join("keep/important"), b"keep").unwrap();
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let within = shell.run("rm -rf \"/out/$(echo sub)\"").await;
+            assert_eq!(within.status, 0, "{script}: {}", within.stderr);
+            assert!(!dir.join("sub").exists(), "{script}");
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            assert!(dir.join("keep/important").exists(), "{script}");
+            assert!(dir.join("sub").exists(), "{script}");
+            assert!(!dir.join("marker").exists(), "{script}");
+        }
+    }));
+}
+
+#[test]
+fn timed_out_redirect_preserves_host_files() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "{ echo new; } > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "(echo new) > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "x=$(exit > \"/out/$(printf keep; sleep 5; printf suffix)\")",
+            "eval : > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "x=$(eval : > \"/out/$(printf keep; sleep 5; printf suffix)\")",
+            "source /out/code > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "x=$(source /out/code > \"/out/$(printf keep; sleep 5; printf suffix)\")",
+        ] {
+            let dir = TestDir::new("timed_out_compound_redirect");
+            for name in ["keep", "keepsuffix"] {
+                std::fs::write(dir.join(name), name).unwrap();
+            }
+            std::fs::write(dir.join("code"), ":\n").unwrap();
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            for name in ["keep", "keepsuffix"] {
+                assert_eq!(
+                    std::fs::read(dir.join(name)).unwrap(),
+                    name.as_bytes(),
+                    "{script}: {name}"
+                );
+            }
+        }
+    }));
+}
+
+#[test]
+fn timed_out_captured_compound_redirect_does_not_create_host_files() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "x=$({ :; } <> \"/out/$(printf new; sleep 5; printf suffix)\")",
+            "x=$( (: ) <> \"/out/$(printf new; sleep 5; printf suffix)\")",
+        ] {
+            let dir = TestDir::new("timed_out_captured_compound_redirect");
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            assert!(!dir.join("new").exists(), "{script}");
+            assert!(!dir.join("newsuffix").exists(), "{script}");
+        }
+    }));
+}
+
+#[test]
+fn a_here_doc_cut_short_by_the_deadline_writes_no_partial_body() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "cat > /out/important <<EOF\nkey=$(sleep 5; echo val)\nEOF",
+            "cat > /out/important <<EOF\nkey=$(sleep 5 && echo val)\nEOF",
+            "{ cat; } > /out/important <<EOF\nkey=$(sleep 5; echo val)\nEOF",
+        ] {
+            let dir = TestDir::new("heredoc_timeout_host_write");
+            std::fs::write(dir.join("important"), b"orig").unwrap();
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let within = shell
+                .run("cat > /out/within <<EOF\nkey=$(echo val)\nEOF")
+                .await;
+            assert_eq!(within.status, 0, "{script}: {}", within.stderr);
+            assert_eq!(std::fs::read(dir.join("within")).unwrap(), b"key=val\n");
+
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            let content = std::fs::read(dir.join("important")).unwrap();
+            assert!(!content.starts_with(b"key="), "{script}: {content:?}");
+        }
+    }));
+}
+
+#[test]
+fn a_here_doc_reads_its_target_after_the_target_is_truncated() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("echo old > /tmp/f; cat > /tmp/f <<EOF\n[$(cat /tmp/f)]\nEOF\ncat /tmp/f")
+            .await;
+        assert_eq!(out.stdout, "[]\n", "{}", out.stderr);
     }));
 }
 
@@ -3945,6 +5741,114 @@ fn sleep_within_timeout_succeeds() {
         let out = shell.run("sleep 0.05").await;
         assert_eq!(out.status, 0, "stderr={:?}", out.stderr);
         assert!(out.stderr.is_empty(), "stderr={:?}", out.stderr);
+    }));
+}
+
+// A command substitution that uses up the deadline stops its command:
+// the command does not run and its redirect does not open the file.
+#[test]
+fn timeout_in_substitution_stops_the_command_and_its_redirect() {
+    for command in [
+        "echo $(sleep 5) > /tmp/after",
+        "echo hi > \"/tmp/$(sleep 5)after\"",
+        "X=$(sleep 5) echo hi > /tmp/after",
+        "echo \"$(sleep 5)\" | cat > /tmp/after",
+        "echo hi > /tmp/before; echo $(sleep 5) >> /tmp/before",
+        "a=$(echo $(sleep 5) > /tmp/after)",
+        "echo \"$(sleep 5; echo hi > /tmp/after)\"",
+        "echo $(sleep 5) late",
+    ] {
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert_eq!(out.status, 1, "{command}: stderr={:?}", out.stderr);
+            assert_eq!(out.stdout, "", "{command}: the command ran");
+            assert!(
+                !out.stderr.is_empty()
+                    && out
+                        .stderr
+                        .lines()
+                        .all(|line| line.ends_with("execution timeout exceeded")),
+                "{command}: stderr={:?}",
+                out.stderr
+            );
+            let after = shell.run("test ! -e /tmp/after").await;
+            assert_eq!(after.status, 0, "{command}: the redirect opened the file");
+            let before = shell.run("cat /tmp/before 2>/dev/null").await;
+            assert!(
+                before.stdout.is_empty() || before.stdout == "hi\n",
+                "{command}: the redirect appended to the file: {:?}",
+                before.stdout
+            );
+        }));
+    }
+}
+
+// A command substitution that uses up the deadline reports the timeout once,
+// and the commands after it do not run.
+#[test]
+fn timeout_in_substitution_reports_once_and_stops_the_list() {
+    for command in [
+        "echo $(sleep 5); touch /tmp/after",
+        "false $(sleep 5); touch /tmp/after",
+        "echo $(sleep 5) || touch /tmp/after",
+        "if echo $(sleep 5); then :; else touch /tmp/after; fi",
+        "until echo $(sleep 5); do touch /tmp/after; done",
+        "echo $(sleep 5)\ntouch /tmp/after",
+        "! echo $(sleep 5); touch /tmp/after",
+        "{ :; } | echo $(sleep 5); touch /tmp/after",
+        "x=$(echo $(sleep 5); touch /tmp/after); touch /tmp/after",
+    ] {
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert_eq!(out.status, 1, "{command}: stderr={:?}", out.stderr);
+            assert_eq!(out.stdout, "", "{command}: the command ran");
+            let lines: Vec<&str> = out.stderr.lines().collect();
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| line.ends_with("execution timeout exceeded")),
+                "{command}: stderr={:?}",
+                out.stderr
+            );
+            assert_eq!(
+                lines
+                    .iter()
+                    .filter(|line| **line == "strands-shell: execution timeout exceeded")
+                    .count(),
+                1,
+                "{command}: stderr={:?}",
+                out.stderr
+            );
+            let after = shell.run("test ! -e /tmp/after").await;
+            assert_eq!(after.status, 0, "{command}: a later command ran");
+        }));
+    }
+}
+
+// A command substitution that ends in time still lets its command run.
+#[test]
+fn substitution_within_timeout_runs_the_command() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = shell
+            .run("echo $(sleep 0.05; echo in) > /tmp/after; cat /tmp/after")
+            .await;
+        assert_eq!(out.status, 0, "stderr={:?}", out.stderr);
+        assert_eq!(out.stdout, "in\n");
     }));
 }
 
@@ -4064,6 +5968,66 @@ expect!(
     "a\nb"
 );
 
+// ── find -exec forwards the child's stderr ──────────────────────────
+
+const FIND_CAT_NOPE: &str = "strands-shell: cat: no such file or directory: /nope\n";
+
+expect_streams!(
+    find_exec_child_stderr_forwarded,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\;",
+    "",
+    FIND_CAT_NOPE
+);
+expect_streams!(
+    find_exec_plus_child_stderr_forwarded,
+    "echo x > /tmp/fes; find /tmp/fes -exec nosuchcmd {} +",
+    "",
+    "strands-shell: nosuchcmd: command not found\n"
+);
+expect_streams!(
+    find_exec_command_not_found_reported,
+    "echo x > /tmp/fes; find /tmp/fes -exec nosuchcmd \\;",
+    "",
+    "strands-shell: nosuchcmd: command not found\n"
+);
+expect_streams!(
+    find_exec_child_stderr_to_dev_null,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\; 2>/dev/null; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    find_exec_plus_child_stderr_to_dev_null,
+    "echo x > /tmp/fes; find /tmp/fes -exec nosuchcmd {} + 2>/dev/null; echo done",
+    "done\n",
+    ""
+);
+expect_streams!(
+    find_exec_child_stderr_to_file,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\; 2>/tmp/fes_err; cat /tmp/fes_err",
+    FIND_CAT_NOPE,
+    ""
+);
+expect_streams!(
+    find_exec_child_stderr_keeps_order_across_execs,
+    "mkdir /tmp/feo; echo x > /tmp/feo/a; echo y > /tmp/feo/b; \
+     o=$(find /tmp/feo -type f -exec cat {} \\; -exec cat /nope \\; 2>&1); echo \"$o\"",
+    format!("x\n{FIND_CAT_NOPE}y\n{FIND_CAT_NOPE}"),
+    ""
+);
+expect_streams!(
+    find_exec_child_stderr_merged_into_pipe,
+    "echo x > /tmp/fes; find /tmp/fes -exec cat /nope \\; 2>&1 | grep -c nope",
+    "1\n",
+    ""
+);
+expect_streams!(
+    find_exec_child_stdout_unaffected,
+    "echo hi > /tmp/fes; find /tmp/fes -exec cat {} \\;",
+    "hi\n",
+    ""
+);
+
 // ── printf additional format specifiers ───────────────────────────
 shell_test!(
     printf_width_precision,
@@ -4083,6 +6047,136 @@ expect!(printf_d_format, "printf '%d' 42", "42");
 expect!(printf_o_format, "printf '%o' 8", "10");
 expect!(printf_x_format, "printf '%x' 255", "ff");
 expect!(printf_X_format, "printf '%X' 255", "FF");
+
+// Expected outputs are those of bash's builtin printf.
+#[test]
+fn printf_number_formatting_matches_bash() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let cases: &[(&str, &str)] = &[
+            // Flags, width and precision on integers
+            ("printf '%03d' 7", "007"),
+            ("printf '%5d|' 7", "    7|"),
+            ("printf '%-5d|' 7", "7    |"),
+            ("printf '%-05d|' 7", "7    |"),
+            ("printf '%+d' 7", "+7"),
+            ("printf '% d' 7", " 7"),
+            ("printf '%+ d' 7", "+7"),
+            ("printf '% 05d|' 3", " 0003|"),
+            ("printf '%+05d|' 3", "+0003|"),
+            ("printf '%+5d|' -3", "   -3|"),
+            ("printf '%3d|' 12345", "12345|"),
+            ("printf '%.3d' 7", "007"),
+            ("printf '%.3d' -7", "-007"),
+            ("printf '%05.3d' 7", "  007"),
+            ("printf '%5.3d|' -3", " -003|"),
+            ("printf '%.0d|' 0", "|"),
+            ("printf '%5.0d|' 0", "     |"),
+            ("printf '%i %d' 42 +5", "42 5"),
+            // Unsigned conversions
+            ("printf '%u' 5", "5"),
+            ("printf '%+u % x' 5 5", "5 5"),
+            ("printf '%#o %#o %#.3o' 8 0 8", "010 0 010"),
+            ("printf '%#.0o|%.0o|' 0 0", "0||"),
+            ("printf '%#x %#X %#x' 255 255 0", "0xff 0XFF 0"),
+            ("printf '%#.0x|' 0", "|"),
+            ("printf '%08.3x|%#5x|' 255 0", "     0ff|    0|"),
+            ("printf '%#010x' 255", "0x000000ff"),
+            ("printf '%u' -1", "18446744073709551615"),
+            ("printf '%x' -1", "ffffffffffffffff"),
+            ("printf '%o' -1", "1777777777777777777777"),
+            ("printf '%X' -255", "FFFFFFFFFFFFFF01"),
+            ("printf '%d' 9223372036854775807", "9223372036854775807"),
+            ("printf '%d' -9223372036854775808", "-9223372036854775808"),
+            // Floats
+            ("printf '%5.2f' 3.14159", " 3.14"),
+            ("printf '%f' 1e3", "1000.000000"),
+            ("printf '%f' .5", "0.500000"),
+            ("printf '%f' -.5e1", "-5.000000"),
+            ("printf '%f' 1.", "1.000000"),
+            ("printf '%010.3f' -3.14159", "-00003.142"),
+            ("printf '%5.1f' -0", " -0.0"),
+            ("printf '%#.0f' 3", "3."),
+            ("printf '%.0f %.0f' 2.5 3.5", "2 4"),
+            ("printf '%.2f' 2.675", "2.67"),
+            ("printf '%.1f %.1f' 0.05 0.25", "0.1 0.2"),
+            ("printf '%.3f' 1e-7", "0.000"),
+            ("printf '%5.2f%%' 99.5", "99.50%"),
+            ("printf '%f|%e|' ", "0.000000|0.000000e+00|"),
+            ("printf '%e' 1234.5", "1.234500e+03"),
+            ("printf '%E' 0.000123", "1.230000E-04"),
+            ("printf '%e %.0e' 0 0", "0.000000e+00 0e+00"),
+            ("printf '%.0e %#.0e' 12345 12345", "1e+04 1.e+04"),
+            ("printf '%+.2e' 3", "+3.00e+00"),
+            ("printf '%.2e' 9.999", "1.00e+01"),
+            ("printf '%-10.2e|' 31415.9", "3.14e+04  |"),
+            ("printf '%e %e' 1e-300 1e300", "1.000000e-300 1.000000e+300"),
+            (
+                "printf '%g %g %g' 1234.5 0.0001 1e10",
+                "1234.5 0.0001 1e+10",
+            ),
+            ("printf '%g %g' 100000 1000000", "100000 1e+06"),
+            (
+                "printf '%g %g' 0.00009999 0.00001234",
+                "9.999e-05 1.234e-05",
+            ),
+            ("printf '%g %g' 0 123456789", "0 1.23457e+08"),
+            ("printf '%G %G' 1e-10 1e100", "1E-10 1E+100"),
+            ("printf '%.3g %.3g' 3.14159 9999", "3.14 1e+04"),
+            ("printf '%.0g %.15g' 0.5 0.1", "0.5 0.1"),
+            ("printf '%#g %#g %#.3g' 1 0 1", "1.00000 0.00000 1.00"),
+            ("printf '%10.4g|' 3.14159265", "     3.142|"),
+            ("printf '%f %f %f' inf -inf nan", "inf -inf nan"),
+            ("printf '%f %f' infinity INF", "inf inf"),
+            ("printf '%F %E %f' inf nan -nan", "INF NAN -nan"),
+            ("printf '%05f|' inf", "  inf|"),
+            // Unchanged conversions and format reuse
+            ("printf '%d %o %x %X' 42 8 255 255", "42 10 ff FF"),
+            ("printf '%s %s' hello world", "hello world"),
+            ("printf '%5s|%-5s|%.1s|' a b abc", "    a|b    |a|"),
+            ("printf '%05s|' ab", "   ab|"),
+            ("printf '%s %d|' a", "a 0|"),
+            ("printf '%b' 'a\\tb\\n'", "a\tb\n"),
+            ("printf '%c%c' x yz", "xy"),
+            ("printf '%%d' 5", "%d"),
+            ("printf '%d %d\\n' 1 2 3", "1 2\n3 0\n"),
+            ("printf '%s-%s\\n' a b c", "a-b\nc-\n"),
+        ];
+        for (cmd, want) in cases {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, *want, "{cmd}: stdout");
+            assert_eq!(out.stderr, "", "{cmd}: stderr");
+            assert_eq!(out.status, 0, "{cmd}: status");
+        }
+    }));
+}
+
+// A huge width or precision is clamped instead of exhausting memory.
+#[test]
+fn printf_number_huge_field_is_capped() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, len) in [
+            ("printf '%99999999999d|' 1", 65536),
+            ("printf '%-99999999999999999999999x|' 1", 65536),
+            ("printf '%.99999999999d|' 1", 65536),
+            ("printf '%.99999999999f|' 1", 65538),
+            ("printf '%099999999999.99999999999e|' 1", 65542),
+            ("printf '%.70000g|' 1", 2),
+            ("printf '%.65535g|' 0.001", 63),
+            ("printf '%.65534g|' 0.001", 63),
+            ("printf '%#.65535g|' 0.001", 65537),
+            ("printf '%.99999999G|' 0.0002", 68),
+            ("printf '%#.99999999G|' 0.0002", 65538),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: status");
+            assert_eq!(out.stdout.len(), len, "{cmd}: length");
+        }
+    }));
+}
 
 // ── heredoc with tab strip ────────────────────────────────────────
 expect!(
@@ -4954,6 +7048,150 @@ expect!(
     "1\n2\nend"
 );
 
+// ── exec: status of assignment-only commands ───────────────────────
+expect!(assign_subst_false_status, "x=$(false); echo $?", "1");
+expect!(assign_subst_exit_status, "x=$(exit 3); echo $?", "3");
+expect!(assign_backtick_false_status, "x=`false`; echo $?", "1");
+expect!(
+    assign_quoted_subst_false_status,
+    "x=\"$(false)\"; echo $?",
+    "1"
+);
+expect!(
+    assign_subst_last_assignment_wins,
+    "x=$(true) y=$(exit 4); echo $?",
+    "4"
+);
+expect!(
+    assign_subst_with_redirect_status,
+    "x=$(false) >/dev/null; echo $?",
+    "1"
+);
+expect!(lone_subst_status, "$(false); echo $?", "1");
+expect!(assign_subst_parse_error_status, "x=$(fi); echo $?", "1");
+expect!(
+    assign_arith_subst_status,
+    "x=$(( $(exit 3) + 1 )); echo $?",
+    "3"
+);
+expect!(
+    assign_subst_then_empty_subst_word_status,
+    "x=$(false) $(true); echo $?",
+    "1"
+);
+expect!(
+    assign_subst_or_fires,
+    "out=$(false) || echo failed",
+    "failed"
+);
+expect!(
+    assign_subst_and_skips,
+    "x=$(false) && echo no || echo yes",
+    "yes"
+);
+expect!(
+    assign_subst_if_not_fires,
+    "if ! out=$(false); then echo neg; fi",
+    "neg"
+);
+expect!(
+    assign_subst_errexit_aborts,
+    "(set -e; x=$(false); echo unreachable); echo $?",
+    "1"
+);
+expect!(
+    assign_subst_pipefail_status,
+    "set -o pipefail; x=$(false | true); echo $?",
+    "1"
+);
+expect_output!(
+    assign_subst_pipefail_errexit_aborts,
+    "set -euo pipefail; x=$(false | true); echo unreachable",
+    "",
+    "",
+    1
+);
+expect!(
+    assign_subst_nested_status,
+    "x=$(y=$(false); echo $?); echo $x $?",
+    "1 0"
+);
+expect!(
+    assign_subst_subshell_status,
+    "x=$( (exit 7) ); echo $?",
+    "7"
+);
+expect!(
+    assign_subst_function_return_status,
+    "x=$(f() { return 3; }; f); echo $?",
+    "3"
+);
+expect!(
+    assign_subst_in_function,
+    "f() { x=$(exit 5); echo $?; }; f",
+    "5"
+);
+expect!(
+    assign_subst_in_loop,
+    "for i in 1 2; do x=$(exit $i); echo $?; done",
+    "1
+2"
+);
+expect!(assign_subst_true_status, "false; x=$(true); echo $?", "0");
+expect!(assign_empty_status, "x=; echo $?", "0");
+expect!(assign_empty_after_false_status, "false; x=; echo $?", "0");
+expect!(
+    assign_plain_var_after_false_status,
+    "false; x=$y; echo $?",
+    "0"
+);
+expect!(
+    local_subst_false_status,
+    "f() { local x=$(false); echo $?; }; f",
+    "0"
+);
+expect!(export_subst_false_status, "export x=$(false); echo $?", "0");
+expect!(
+    assign_subst_next_assignment_resets,
+    "x=$(false); y=$(true); echo $?",
+    "0"
+);
+expect!(
+    assign_subst_last_substitution_true,
+    "x=$(false)$(true); echo $?",
+    "0"
+);
+expect!(
+    assign_subst_last_substitution_false,
+    "x=$(true)$(false); echo $?",
+    "1"
+);
+expect!(
+    assign_subst_prefix_true_command,
+    "x=$(false) true; echo $?",
+    "0"
+);
+expect!(
+    assign_subst_prefix_false_command,
+    "x=$(true) false; echo $?",
+    "1"
+);
+expect!(
+    subst_in_case_word_status,
+    "case $(exit 3) in *) esac; echo $?",
+    "0"
+);
+expect!(
+    subst_in_for_list_status,
+    "for i in $(exit 3); do :; done; echo $?",
+    "0"
+);
+expect!(
+    subst_in_command_arg_status,
+    "echo $(exit 3) >/dev/null; echo $?",
+    "0"
+);
+
 // ── exec: shebang / script execution ──────────────────────────────
 expect!(
     script_shebang_source,
@@ -5506,6 +7744,51 @@ expect!(
 expect!(sed_replace_newline, "echo 'a b' | sed 's/ /\\n/'", "a\nb");
 expect!(sed_replace_tab, "printf 'a b' | sed 's/ /\\t/'", "a\tb");
 
+// ── sed basic and extended regex syntax ────────────────────────────
+
+expect!(
+    sed_bre_literal_parens,
+    "echo 'call(x)' | sed 's/call(x)/run(x)/'",
+    "run(x)"
+);
+expect!(
+    sed_bre_literal_metachars,
+    "echo 'a+b?c|d{1}' | sed 's/a+b?c|d{1}/ok/'",
+    "ok"
+);
+expect!(
+    sed_bre_gnu_operators,
+    r#"echo 'aab' | sed 's/a\+\(b\|c\)\?/X/'"#,
+    "X"
+);
+expect!(sed_bre_interval, r#"echo 'aaa' | sed 's/a\{2\}/X/'"#, "Xa");
+expect!(
+    sed_bre_leading_star_inner_dollar,
+    "echo '*$(CC)' | sed 's/^*$(CC)/ok/'",
+    "ok"
+);
+expect!(sed_bre_final_dollar, "echo 'b b' | sed 's/b$/X/'", "b X");
+expect!(
+    sed_bre_dollar_before_group_end,
+    r#"echo 'b b' | sed 's/\(b$\)/[\1]/'"#,
+    "b [b]"
+);
+expect!(
+    sed_bre_address,
+    "printf 'f(x)\\ng(y)\\n' | sed -n '/f(x)/p'",
+    "f(x)"
+);
+expect!(
+    sed_ere_flag,
+    r#"echo 'ab' | sed -E 's/(a|z)+(b)/\2\1/'"#,
+    "ba"
+);
+expect!(
+    sed_ere_escaped_parens,
+    r#"echo 'f(x)' | sed -rn '/f\(x\)/s/f\(x\)/g/p'"#,
+    "g"
+);
+
 // ── set +e disables errexit ────────────────────────────────────────
 
 expect!(
@@ -5696,10 +7979,78 @@ fn stdout_max_output_truncate_multibyte() {
     }));
 }
 
+// ── captured output with invalid UTF-8 keeps its valid parts ───────
+
+fn invalid_utf8_run(tag: &str, max_output: usize, cmd: &str) -> strands_shell::Output {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new(&format!("lsh_invalid_utf8_{tag}"));
+        std::fs::write(dir.join("bin"), b"ok\xffbad\n").unwrap();
+        let mut shell = Shell::builder()
+            .max_output(max_output)
+            .bind_direct(dir.to_str().unwrap(), "/g")
+            .build()
+            .unwrap();
+        shell.run(cmd).await
+    }))
+}
+
+#[test]
+fn subst_invalid_utf8_is_replaced_not_dropped() {
+    let out = invalid_utf8_run(
+        "subst",
+        0,
+        "x=$(cat /g/bin); printf '[%s]\\n' \"$x\"; echo tail",
+    );
+    assert_eq!(out.stdout, "[ok\u{FFFD}bad]\ntail\n");
+    assert_eq!(out.status, 0);
+    let out = invalid_utf8_run("pipe", 0, "x=$(cat /g/bin | cat); printf '[%s]\\n' \"$x\"");
+    assert_eq!(out.stdout, "[ok\u{FFFD}bad]\n");
+}
+
+#[test]
+fn run_output_invalid_utf8_is_replaced_not_dropped() {
+    let out = invalid_utf8_run("run", 0, "cat /g/bin; echo tail");
+    assert_eq!(out.stdout, "ok\u{FFFD}bad\ntail\n");
+    let out = invalid_utf8_run("runpipe", 0, "cat /g/bin | cat; echo tail");
+    assert_eq!(out.stdout, "ok\u{FFFD}bad\ntail\n");
+    let out = invalid_utf8_run("runerr", 0, "cat /g/bin >&2; echo tail");
+    assert_eq!(out.stdout, "tail\n");
+    assert_eq!(out.stderr, "ok\u{FFFD}bad\n");
+}
+
+#[test]
+fn invalid_utf8_bytes_stay_raw_in_pipes_and_files() {
+    let out = invalid_utf8_run(
+        "raw",
+        0,
+        "cat /g/bin | wc -c; cat /g/bin > /g/out; wc -c < /g/out",
+    );
+    let counts: Vec<&str> = out.stdout.split_whitespace().collect();
+    assert_eq!(counts, ["7", "7"]);
+}
+
+#[test]
+fn invalid_utf8_capture_still_enforces_max_output() {
+    // Over-limit output is still dropped as before. That drop is silent,
+    // which is pre-existing behaviour and not something this test pins.
+    let out = invalid_utf8_run("limit", 4, "x=$(cat /g/bin); echo \"[$x]\"");
+    assert_eq!(out.stdout, "[]\n");
+    let out = invalid_utf8_run("limitrun", 4, "cat /g/bin");
+    assert_eq!(out.stdout, "");
+
+    // The raw bytes fit, but replacement characters expand stdout past the
+    // limit, so the post-conversion check truncates and reports the overflow.
+    let out = invalid_utf8_run("expandedlimit", 7, "cat /g/bin");
+    assert_eq!(out.stdout, "ok\u{FFFD}ba");
+    assert_eq!(out.status, 1);
+    assert!(out.stderr.contains("output size limit exceeded"));
+}
+
 // ── exec.rs coverage: exit inside function ─────────────────────────
 
 expect_status!(func_exit_code, "f() { exit 42; }; f", 42);
-expect!(func_exit_stops, "f() { exit 0; }; f; echo after", "after");
+expect!(func_exit_stops, "f() { exit 0; }; f; echo after", "");
 
 // ── exec.rs coverage: continue N in nested loops ───────────────────
 
@@ -5914,6 +8265,21 @@ fn builder_bind_direct_host() {
 }
 
 #[test]
+fn mkdir_p_creates_missing_ancestors_inside_a_direct_bind() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_direct_mkdir_p");
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/direct")
+            .build()
+            .unwrap();
+        let out = shell.run("mkdir -p /mnt/direct/a/b/c").await;
+        assert_eq!((out.status, out.stderr.as_str()), (0, ""));
+        assert!(dir.join("a/b/c").is_dir());
+    }));
+}
+
+#[test]
 fn builder_bind_direct_readonly_host() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
@@ -5927,6 +8293,38 @@ fn builder_bind_direct_readonly_host() {
         assert_eq!(out.stdout.trim(), "ro_direct");
         let out2 = shell.run("echo x > /mnt/dro/newfile").await;
         assert_ne!(out2.status, 0);
+    }));
+}
+
+// Uses std::os::unix::fs::symlink to plant a host symlink
+#[cfg(unix)]
+#[test]
+fn ln_force_keeps_direct_bind_files_when_linking_fails() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_ln_force_direct");
+        std::fs::write(dir.join("old"), "old").unwrap();
+        std::fs::write(dir.join("plain"), "plain").unwrap();
+        std::os::unix::fs::symlink("old", dir.join("link")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/w")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("cd /mnt/w; ln -sf missing link; ln -sf missing plain")
+            .await;
+        assert_ne!(out.status, 0);
+        assert!(!out.stderr.contains("invalid option"), "{}", out.stderr);
+        let out = shell.run("cd /mnt/w; ln -sf plain old").await;
+        assert_ne!(out.status, 0);
+        assert!(!out.stderr.contains("invalid option"), "{}", out.stderr);
+        assert!(!out.stderr.contains("same file"), "{}", out.stderr);
+        assert_eq!(std::fs::read_to_string(dir.join("old")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(dir.join("plain")).unwrap(), "plain");
+        assert_eq!(
+            std::fs::read_link(dir.join("link")).unwrap().to_str(),
+            Some("old")
+        );
     }));
 }
 
@@ -6018,6 +8416,21 @@ fn bind_direct_write_error_fails_the_command() {
             "stderr: {}",
             out.stderr
         );
+        assert_eq!(shell.run("set -o pipefail").await.status, 0);
+        for (cmd, expected) in [
+            ("echo hi > /mnt/w/ro | true; echo $?", "1\n"),
+            (
+                "f() { return 3; }; f | echo hi > /mnt/w/ro | true; echo $?",
+                "1\n",
+            ),
+            ("f | echo hi > /mnt/w/ro; echo $?", "1\n"),
+            ("echo hi > /mnt/w/ro | f; echo $?", "3\n"),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, expected, "{cmd}: stderr: {}", out.stderr);
+            assert!(out.stderr.contains("/mnt/w/ro: Permission denied"));
+        }
+        assert_eq!(shell.run("set +o pipefail").await.status, 0);
         let out = shell
             .run("{ echo x; } > /mnt/w/ro & true || echo stolen; wait")
             .await;
@@ -6083,6 +8496,52 @@ fn bind_direct_readlink_prints_stored_link_text() {
             let out = shell.run(&format!("readlink {path}")).await;
             assert_eq!(out.stdout, "", "{path}");
             assert_eq!(out.status, 1, "{path}");
+        }
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_readlink_canonicalizes_symlinks() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_readlink_canonicalize");
+        std::fs::create_dir(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/f"), "x").unwrap();
+        for (target, name) in [
+            ("d", "ld"),
+            ("ld/f", "file"),
+            ("missing", "dangling"),
+            ("loop2", "loop1"),
+            ("loop1", "loop2"),
+        ] {
+            std::os::unix::fs::symlink(target, dir.join(name)).unwrap();
+        }
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        for (args, stdout, status) in [
+            ("-f /b/ld", "/b/d\n", 0),
+            ("-e /b/ld", "/b/d\n", 0),
+            ("-m /b/ld", "/b/d\n", 0),
+            ("-f /b/file", "/b/d/f\n", 0),
+            ("-e /b/file", "/b/d/f\n", 0),
+            ("-m /b/file", "/b/d/f\n", 0),
+            ("-fn /b/file", "/b/d/f", 0),
+            ("-n /b/file", "ld/f", 0),
+            ("-f /b/ld/../file", "/b/d/f\n", 0),
+            ("-f /b/dangling", "/b/missing\n", 0),
+            ("-e /b/dangling", "", 1),
+            ("-m /b/dangling", "/b/missing\n", 0),
+            ("-f /b/loop1", "", 1),
+            ("-e /b/loop1", "", 1),
+            ("-m /b/loop1", "/b/loop1\n", 0),
+        ] {
+            let out = shell.run(&format!("readlink {args}")).await;
+            assert_eq!(out.stdout, stdout, "{args}");
+            assert_eq!(out.stderr, "", "{args}");
+            assert_eq!(out.status, status, "{args}");
         }
     }));
 }
@@ -6659,7 +9118,343 @@ expect!(
 );
 expect!(dquote_backslash_special_dquote, r#"echo "a\"b""#, r#"a"b"#);
 
+// ── sh -c command_string ────────────────────────────────────────────
+
+expect!(sh_c_runs_string, "sh -c 'echo hi'", "hi");
+expect!(lash_c_runs_string, "lash -c 'echo hi'", "hi");
+expect!(
+    sh_c_positional_params,
+    "sh -c 'echo $0 $# $1 $2' name a b",
+    "name 2 a b"
+);
+expect!(sh_c_default_arg0, "sh -c 'echo $0 $#'", "sh 0");
+expect!(lash_c_default_arg0, "lash -c 'echo $0'", "lash");
+expect!(
+    sh_c_quoted_args,
+    "sh -c 'printf \"<%s>\" \"$@\"' n 'x y' z",
+    "<x y><z>"
+);
+expect!(sh_c_exit_status, "sh -c 'exit 3'; echo $?", "3");
+expect!(
+    sh_c_exit_stops,
+    "sh -c 'echo a; exit 4; echo b'; echo $?",
+    "a\n4"
+);
+expect!(sh_c_multiple_statements, "sh -c 'a=1; echo $a'", "1");
+expect!(sh_c_multiline, "sh -c 'echo a\necho b'", "a\nb");
+expect!(sh_c_var_not_leaked, "sh -c 'b=2'; echo \"[$b]\"", "[]");
+expect!(sh_c_cd_not_leaked, "sh -c 'cd /tmp'; pwd", "/home/lash");
+expect!(sh_c_empty_string, "sh -c ''; echo $?", "0");
+expect!(
+    sh_c_stdout_redirect,
+    "sh -c 'echo hi' > /tmp/shc; cat /tmp/shc",
+    "hi"
+);
+expect!(sh_c_in_pipeline, "sh -c 'echo hi' | tr a-z A-Z", "HI");
+expect_output!(
+    sh_c_missing_argument,
+    "sh -c",
+    "",
+    "sh: -c: option requires an argument\n",
+    2
+);
+expect_output!(
+    sh_c_parse_error_names_line,
+    "sh -c 'echo a\n)'",
+    "a\n",
+    "strands-shell: -c: line 2: unexpected ')'\n",
+    1
+);
+expect!(sh_c_double_dash, "sh -c -- 'echo hi'", "hi");
+expect!(sh_c_double_dash_params, "sh -c -- 'echo $0 $1' n a", "n a");
+expect!(sh_c_double_dash_as_name, "sh -c 'echo $0 $1' -- a", "-- a");
+expect_output!(
+    sh_c_double_dash_missing_argument,
+    "sh -c --",
+    "",
+    "sh: -c: option requires an argument\n",
+    2
+);
+
+#[test]
+fn script_args_and_isolation_unchanged() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .run("printf 'X=1\\necho $0 $# $1 $2\\n' > /tmp/args.sh")
+            .await;
+        let out = shell.run("sh /tmp/args.sh a 'b c'; echo \"[$X]\"").await;
+        assert_eq!(out.stdout, "/tmp/args.sh 2 a b c\n[]\n");
+        assert_eq!(out.status, 0);
+    }));
+}
+
+// ── Stdin of command substitutions and subshells ────────────────────
+
+/// Asserts that each `(cmd, stdout)` prints `stdout`, with no stderr and status 0.
+async fn assert_prints(cases: &[(&str, &str)]) {
+    for (cmd, stdout) in cases {
+        let out = Shell::builder().build().unwrap().run(cmd).await;
+        assert_eq!(out.stdout, *stdout, "stdout of {cmd}");
+        assert_eq!(out.stderr, "", "stderr of {cmd}");
+        assert_eq!(out.status, 0, "status of {cmd}");
+    }
+}
+
+#[test]
+fn a_command_substitution_reads_the_callers_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            (r#"printf hi | { x=$(cat); echo "[$x]"; }"#, "[hi]\n"),
+            (
+                r#"printf hi > /tmp/in; { x=$(cat); echo "[$x]"; } < /tmp/in"#,
+                "[hi]\n",
+            ),
+            (
+                r#"echo q | { x=$(cat); echo "[$x]"; } | tr a-z A-Z"#,
+                "[Q]\n",
+            ),
+            (
+                r#"printf hi | { { x=$(cat); echo "[$x]"; } | tr a-z A-Z; }"#,
+                "[HI]\n",
+            ),
+            (
+                r#"printf hi | { y=$({ x=$(cat); echo "[$x]"; } | tr a-z A-Z); echo "$y"; }"#,
+                "[HI]\n",
+            ),
+        ])
+        .await;
+    }));
+}
+
+#[test]
+fn a_subshell_reads_the_callers_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            ("printf hi | ( cat )", "hi"),
+            (r#"printf hi | ( x=$(cat); echo "[$x]" )"#, "[hi]\n"),
+            (r#"printf hi | { y=$( (cat) ); echo "[$y]"; }"#, "[hi]\n"),
+        ])
+        .await;
+    }));
+}
+
+#[test]
+fn nested_substitutions_and_subshells_read_the_callers_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            (
+                r#"printf hi | { y=$(x=$(cat); echo "<$x>"); echo "[$y]"; }"#,
+                "[<hi>]\n",
+            ),
+            (r#"printf hi | ( ( x=$(cat); echo "[$x]" ) )"#, "[hi]\n"),
+            (
+                r#"printf hi | { y=$( (x=$(cat); echo "<$x>") ); echo "[$y]"; }"#,
+                "[<hi>]\n",
+            ),
+        ])
+        .await;
+    }));
+}
+
+#[test]
+fn a_script_fed_through_sh_reads_its_input_with_a_substitution() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            (
+                r#"printf 'input=$(cat)\necho "[$input]"\n' > /tmp/s.sh; printf hi | sh /tmp/s.sh"#,
+                "[hi]\n",
+            ),
+            (
+                r#"printf 'f() { x=$(cat); echo "[$x]"; }\nf\n' > /tmp/f.sh; printf hi | sh /tmp/f.sh"#,
+                "[hi]\n",
+            ),
+        ])
+        .await;
+    }));
+}
+
+#[test]
+fn the_shells_own_stdin_reaches_a_substitution() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let (tx, rx) = strands_shell::os::pipe(4);
+        shell.proc.set_channel_reader(0, rx);
+        tx.send(bytes::Bytes::from_static(b"{\"event\":1}"))
+            .await
+            .unwrap();
+        drop(tx);
+        let out = shell.run(r#"input=$(cat); echo "[$input]""#).await;
+        assert_eq!(out.stdout, "[{\"event\":1}]\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn stdin_is_read_once_and_what_is_left_reaches_the_next_reader() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            (
+                r#"printf 'a\nb\n' | { x=$(cat); y=$(cat); echo "[$x][$y]"; }"#,
+                "[a\nb][]\n",
+            ),
+            (
+                r#"printf 'a\nb\n' | { read l; x=$(cat); echo "[$l][$x]"; }"#,
+                "[a][b]\n",
+            ),
+            (
+                r#"printf 'a\nb\n' | { x=$(cat); cat; echo "[$x]"; }"#,
+                "[a\nb]\n",
+            ),
+            (r#"printf hi | { x=$(true); cat; echo "[$x]"; }"#, "hi[]\n"),
+            (
+                r#"printf hi | { x=$(date >/dev/null); cat; echo "[$x]"; }"#,
+                "hi[]\n",
+            ),
+            (
+                r#"printf hi | { x=$(echo y | tr y z); cat; echo "[$x]"; }"#,
+                "hi[z]\n",
+            ),
+            (
+                r#"printf hi | { x=$(cat </dev/null); cat; echo "[$x]"; }"#,
+                "hi[]\n",
+            ),
+            ("printf hi | { (cat </dev/null); cat; echo; }", "hi\n"),
+            ("printf hi | { printf x </dev/null; cat; echo; }", "xhi\n"),
+            (
+                r#"printf hi | { x=$({ printf x; } | cat); cat; echo "[$x]"; }"#,
+                "hi[x]\n",
+            ),
+            (
+                r#"printf hi | { y=$({ printf x; } | cat; cat); echo "[$y]"; }"#,
+                "[xhi]\n",
+            ),
+            ("printf hi | { { printf x; } | cat; cat; echo; }", "xhi\n"),
+            (
+                "printf true > /tmp/t.sh; printf hi | { sh /tmp/t.sh | cat; cat; echo; }",
+                "hi\n",
+            ),
+            ("f() { true; }; printf hi | { f | cat; cat; echo; }", "hi\n"),
+            (
+                r#"printf 'a\nb\n' | { $x | cat; echo --; cat; }"#,
+                "--\na\nb\n",
+            ),
+        ])
+        .await;
+    }));
+}
+
+#[test]
+fn a_substitution_in_a_later_stage_leaves_the_callers_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = Shell::builder()
+            .build()
+            .unwrap()
+            .run(r#"printf 'x\ny\n' | { echo foo | echo "[$(cat)]"; cat; }"#)
+            .await;
+        assert!(
+            out.stdout.ends_with("]\nx\ny\n"),
+            "stdout: {:?}",
+            out.stdout
+        );
+        assert!(!out.stdout.contains("[x"), "stdout: {:?}", out.stdout);
+    }));
+}
+
+#[test]
+fn a_while_read_loop_runs_once_per_line_when_its_body_runs_a_command() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            (
+                r#"printf 'a\nb\nc\n' > /tmp/list; while read f; do ls / >/dev/null; echo "l:$f"; done < /tmp/list"#,
+                "l:a\nl:b\nl:c\n",
+            ),
+            (
+                r#"printf 'a\nb\nc\n' | while read f; do echo "$f" | cat; done"#,
+                "a\nb\nc\n",
+            ),
+            (
+                r#"printf 'true\n' > /tmp/t.sh; printf 'a\nb\nc\n' > /tmp/list; while read f; do sh /tmp/t.sh "$f"; echo "s:$f"; done < /tmp/list"#,
+                "s:a\ns:b\ns:c\n",
+            ),
+        ])
+        .await;
+    }));
+}
+
 // ── Script execution via sh ─────────────────────────────────────────
+
+/// Runs `cmd` after writing a `cat` script and a `read` script.
+async fn run_with_stdin_scripts(cmd: &str) -> strands_shell::Output {
+    let mut shell = Shell::builder().build().unwrap();
+    shell
+        .run(
+            "printf 'cat\\n' > /tmp/cat.sh; printf 'read l; echo got $l\\n' > /tmp/read.sh; \
+             printf '#!/bin/sh\\ncat\\n' > /tmp/catx.sh; chmod +x /tmp/catx.sh",
+        )
+        .await;
+    shell.run(cmd).await
+}
+
+#[test]
+fn script_reads_piped_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin_scripts("echo x | sh /tmp/cat.sh").await;
+        assert_eq!(out.stdout, "x\n");
+        let out = run_with_stdin_scripts("echo x | sh /tmp/read.sh").await;
+        assert_eq!(out.stdout, "got x\n");
+        assert_eq!(out.stderr, "");
+        let out = run_with_stdin_scripts("echo x | /tmp/catx.sh | tr a-z A-Z").await;
+        assert_eq!(out.stdout, "X\n");
+    }));
+}
+
+#[test]
+fn script_reads_redirected_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out =
+            run_with_stdin_scripts("printf 'a\\nb\\n' > /tmp/in; sh /tmp/cat.sh < /tmp/in").await;
+        assert_eq!(out.stdout, "a\nb\n");
+        let out = run_with_stdin_scripts("sh /tmp/read.sh <<EOF\nhd\nEOF").await;
+        assert_eq!(out.stdout, "got hd\n");
+        let out = run_with_stdin_scripts("sh /tmp/read.sh < /dev/null; echo $?").await;
+        assert_eq!(out.stdout, "got\n0\n");
+    }));
+}
+
+#[test]
+fn script_stdin_edge_cases() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        // Reads only the first line of a multi-line pipe.
+        let out = run_with_stdin_scripts("printf 'a\\nb\\nc\\n' | sh /tmp/read.sh").await;
+        assert_eq!(out.stdout, "got a\n");
+        // A script that ignores its piped stdin still succeeds.
+        let out = run_with_stdin_scripts(
+            "printf 'true\\n' > /tmp/noop.sh; printf 'a\\n' | sh /tmp/noop.sh; echo $?",
+        )
+        .await;
+        assert_eq!(out.stdout, "0\n");
+        // No stdin at all: unchanged.
+        let out = run_with_stdin_scripts("sh /tmp/cat.sh; echo rc=$?").await;
+        assert_eq!(out.stdout, "rc=0\n");
+        // The pipe does not outlive the pipeline.
+        let out =
+            run_with_stdin_scripts("echo x | sh /tmp/read.sh; read z; echo \"rc=$? z=$z\"").await;
+        assert_eq!(out.stdout, "got x\nrc=1 z=\n");
+    }));
+}
 
 #[test]
 fn script_multiline_sh() {
@@ -6864,11 +9659,201 @@ expect!(bare_dollar_in_dquote, r#"echo "cost: $""#, "cost: $");
 
 // ── ControlFlow::Exit in function ───────────────────────────────────
 
-// In lash, exit inside a function acts like return
-expect!(
+// Exit inside a function exits the shell, not just the function.
+expect_output!(
     function_exit_in_func,
     "f() { exit 7; }; f; echo after",
-    "after"
+    "",
+    "",
+    7
+);
+expect_output!(
+    array_refusal_does_not_hide_a_later_function_exit,
+    "f() { arr=(1); }; f; g() { exit 7; }; g; echo after",
+    "",
+    "strands-shell: arrays are not supported\n",
+    7
+);
+expect_output!(
+    function_exit_no_arg_uses_last_status,
+    "f() { false; exit; }; f; echo after",
+    "",
+    "",
+    1
+);
+expect_output!(
+    function_exit_keeps_earlier_output,
+    "f() { echo in; exit 6; echo not; }; f; echo after",
+    "in\n",
+    "",
+    6
+);
+expect_output!(
+    function_exit_from_nested_function,
+    "g() { exit 9; }; f() { g; echo inner; }; f; echo after",
+    "",
+    "",
+    9
+);
+expect_output!(
+    function_exit_in_loop,
+    "f() { exit 8; }; for i in 1 2; do f; echo \"loop$i\"; done; echo after",
+    "",
+    "",
+    8
+);
+expect_output!(
+    function_exit_in_if_condition,
+    "f() { exit 2; }; if f; then echo t; fi; echo after",
+    "",
+    "",
+    2
+);
+expect_output!(
+    function_exit_in_and_list,
+    "f() { exit 3; }; f && echo and; echo after",
+    "",
+    "",
+    3
+);
+expect_output!(
+    function_exit_negated,
+    "f() { exit 6; }; ! f; echo after",
+    "",
+    "",
+    6
+);
+expect_output!(
+    function_exit_in_group,
+    "f() { exit 6; }; { f; echo grp; }; echo after",
+    "",
+    "",
+    6
+);
+expect_output!(
+    function_exit_through_eval,
+    "f() { exit 6; }; eval f; echo after",
+    "",
+    "",
+    6
+);
+expect_output!(
+    function_exit_runs_exit_trap_once,
+    "trap 'echo bye' EXIT; f() { exit 4; }; f; echo after",
+    "bye\n",
+    "",
+    4
+);
+expect!(
+    function_exit_in_subshell_stays_in_subshell,
+    "f() { exit 4; }; (f; echo after); echo \"outer $?\"",
+    "outer 4"
+);
+expect!(
+    function_exit_in_cmd_subst_stays_in_subst,
+    "f() { echo a; exit 3; }; X=$(f; echo after); echo \"[$X]\"; echo outer",
+    "[a]\nouter"
+);
+expect!(
+    function_exit_in_cmd_subst_and_list,
+    "f() { exit 3; }; X=$(f && echo and; echo after); echo \"[$X]\"",
+    "[]"
+);
+expect!(
+    function_exit_in_pipeline_stage,
+    "f() { exit 5; }; echo hi | f; echo \"pipe $?\"",
+    "pipe 5"
+);
+expect!(
+    function_exit_in_first_pipeline_stage,
+    "f() { exit 5; }; f | cat; echo \"pipe $?\"",
+    "pipe 0"
+);
+expect!(
+    function_exit_in_compound_pipeline_tail,
+    "f() { exit 7; }; { echo; } | f; echo \"pipe $?\"",
+    "pipe 7"
+);
+expect!(
+    function_exit_in_compound_pipeline_tail_in_cmd_subst,
+    "f() { exit 7; }; X=$({ echo; } | f; echo after); echo \"[$X]\"",
+    "[after]"
+);
+expect!(
+    function_exit_in_background_job,
+    "f() { exit 6; }; f & wait $!; echo \"bg $?\"",
+    "bg 6"
+);
+expect!(
+    function_exit_in_script_stops_only_script,
+    "printf 'f() { exit 5; }\\nf\\necho inscript\\n' > /tmp/fexit.sh; sh /tmp/fexit.sh; echo \"script $?\"",
+    "script 5"
+);
+expect!(
+    function_exit_in_background_job_in_cmd_subst,
+    "f() { exit 3; }; X=$(f & echo no); echo \"[$X]\"",
+    "[no]"
+);
+expect!(
+    background_array_refusal_does_not_hide_function_exit,
+    "g() { exit 4; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    background_array_refusal_does_not_hide_function_nounset,
+    "g() { set -u; echo $missing; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    background_array_refusal_does_not_hide_function_expansion_error,
+    "g() { echo ${missing?stop}; }; x=$(a=(1) & g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_does_not_hide_function_exit,
+    "g() { exit 4; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_with_pipefail_does_not_hide_function_exit,
+    "set -o pipefail; g() { exit 4; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_does_not_hide_function_nounset,
+    "g() { set -u; echo $missing; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    compound_array_refusal_does_not_hide_function_parameter_error,
+    "g() { echo ${missing?stop}; }; x=$({ a=(1); } | cat; g; echo in); echo \"x=$x\"",
+    "x="
+);
+expect!(
+    function_exit_in_background_job_keeps_shell,
+    "f() { exit 3; }; f & echo no; wait $!; echo \"bg $?\"",
+    "no\nbg 3"
+);
+expect!(
+    function_exit_under_command_does_not_leak,
+    "f() { exit 3; }; command f; echo after; echo more",
+    "after\nmore"
+);
+#[test]
+fn function_exit_under_command_does_not_leak_into_next_run() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell.run("f() { exit 3; }; command f").await;
+        let out = shell.run("echo hi; echo more").await;
+        assert_eq!(out.stdout, "hi\nmore\n");
+        assert_eq!(out.status, 0);
+    }));
+}
+expect!(
+    function_return_in_loop_still_returns,
+    "f() { return 2; }; for i in 1 2; do f; echo \"r$i $?\"; done",
+    "r1 2\nr2 2"
 );
 #[test]
 fn function_exit_status_code() {
@@ -7333,6 +10318,100 @@ expect_status!(
     symlink_loop_error,
     "ln -s /tmp/a /tmp/b && ln -s /tmp/b /tmp/a && cat /tmp/a",
     1
+);
+expect_output!(
+    ln_force_replaces_only_the_link,
+    "cd /tmp && echo old > old && echo new > new && ln -s old l && ln -sf new l && readlink l && cat old",
+    "new\nold\n",
+    "",
+    0
+);
+#[test]
+fn ln_force_replacements_preserve_inode_budget() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().max_inodes(128).build().unwrap();
+        let out = shell
+            .run("echo keep >/tmp/source; echo old >/tmp/link")
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        for i in 0..200 {
+            let out = shell.run("ln -sf /tmp/source /tmp/link").await;
+            assert_eq!(out.status, 0, "replacement {i}: {}", out.stderr);
+            assert!(out.stderr.is_empty(), "replacement {i}: {}", out.stderr);
+        }
+        let out = shell.run("touch /tmp/after_replacements").await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        let out = shell.run("cat /tmp/source; readlink /tmp/link").await;
+        assert_eq!(out.stdout, "keep\n/tmp/source\n");
+        assert!(out.stderr.is_empty(), "{}", out.stderr);
+    }));
+}
+
+expect!(
+    ln_force_replaces_a_file,
+    "cd /tmp && echo a > a && echo b > b && ln -sf a b && readlink b && cat b",
+    "a\na"
+);
+expect!(
+    ln_force_long_option,
+    "cd /tmp && echo a > a && echo b > b && ln -s --force a b && readlink b",
+    "a"
+);
+expect!(
+    ln_force_missing_destination,
+    "cd /tmp && ln -sf a fresh && readlink fresh",
+    "a"
+);
+expect_output!(
+    ln_without_force_keeps_destination,
+    "cd /tmp && echo b > b && ln -s a b; echo $?; cat b",
+    "1\nb\n",
+    "strands-shell: ln: b: already exists\n",
+    0
+);
+expect!(
+    ln_into_directory,
+    "cd /tmp && mkdir d && ln -s ../a d && readlink d/a && ln -sf ../b d/ && readlink d/b",
+    "../a\n../b"
+);
+expect!(
+    ln_force_through_symlink_to_directory,
+    "cd /tmp && mkdir d && ln -s d ld && ln -sf a ld && readlink ld && readlink d/a",
+    "d\na"
+);
+expect!(
+    ln_force_replaces_link_inside_directory,
+    "cd /tmp && mkdir d && ln -s a d/a && ln -sf b d/a && ln -sf b d && readlink d/b",
+    "b"
+);
+expect_output!(
+    ln_force_same_file,
+    "cd /tmp && echo a > a && ln -sf ./a a; echo $?; ln -f a a; echo $?; cat a",
+    "1\n1\na\n",
+    "strands-shell: ln: './a' and 'a' are the same file\nstrands-shell: ln: 'a' and 'a' are the same file\n",
+    0
+);
+expect_output!(
+    ln_force_trailing_slash_keeps_file,
+    "cd /tmp && printf 'B\\n' > b && ln -s b bl && ln -sf a b/; echo $?; ln -sf a bl/; echo $?; cat b; readlink bl",
+    "1\n1\nB\nb\n",
+    "strands-shell: ln: failed to access 'b/': Not a directory\nstrands-shell: ln: failed to access 'bl/': Not a directory\n",
+    0
+);
+expect_output!(
+    ln_trailing_slash_missing_destination,
+    "cd /tmp && ln -sf a nx/; echo $?; test -e nx || echo absent",
+    "1\nabsent\n",
+    "strands-shell: ln: failed to create symbolic link 'nx/': No such file or directory\n",
+    0
+);
+expect_output!(
+    ln_force_refuses_directory,
+    "cd /tmp && mkdir -p h/a && ln -sf a h; echo $?",
+    "1\n",
+    "strands-shell: ln: h/a: cannot overwrite directory\n",
+    0
 );
 
 // ── VFS canonicalize ────────────────────────────────────────────────
@@ -7955,7 +11034,7 @@ expect!(
 expect!(
     ls_help,
     "ls --help | head -n 1",
-    "Usage: ls [-laR1] [FILE]..."
+    "Usage: ls [-laR1hrSt] [FILE]..."
 );
 
 // ── sed coverage ────────────────────────────────────────────────────
@@ -8280,6 +11359,42 @@ expect!(
     sort_key_spec_reverse,
     "printf 'a 1\\nb 2\\nc 3\\n' | sort -k2,2r",
     "c 3\nb 2\na 1"
+);
+// sort -h compares human-readable numbers (GNU --human-numeric-sort)
+expect!(
+    sort_human_numeric,
+    "printf '1K\\n2M\\n512\\n1.5K\\n3G\\n-1K\\n0\\n10\\n' | sort -h",
+    "-1K\n0\n10\n512\n1K\n1.5K\n2M\n3G"
+);
+expect!(
+    sort_human_numeric_reverse,
+    "printf '2K\\n1M\\n' | sort -rh",
+    "1M\n2K"
+);
+expect!(
+    sort_human_numeric_long,
+    "printf '2K\\n1M\\n3\\n' | sort --human-numeric-sort",
+    "3\n2K\n1M"
+);
+expect!(
+    sort_human_numeric_suffix_before_value,
+    "printf '0.5K\\n4M\\n.5M\\n1Y\\n9Z\\n-0.5K\\n-2\\n0K\\n1k2\\n' | sort -h",
+    "-0.5K\n-2\n0K\n0.5K\n1k2\n.5M\n4M\n9Z\n1Y"
+);
+expect!(
+    sort_human_numeric_key,
+    "printf 'a 2K\\nb 1M\\nc 512\\nd 1k\\ne -3G\\n' | sort -k2h",
+    "e -3G\nc 512\nd 1k\na 2K\nb 1M"
+);
+expect!(
+    sort_human_numeric_key_reverse_sep,
+    "printf 'a:2K\\nb:1M\\nc:512\\n' | sort -t: -k2,2hr",
+    "b:1M\na:2K\nc:512"
+);
+expect!(
+    sort_human_numeric_unique,
+    "printf '1M\\n2K\\n1M\\n' | sort -hu",
+    "2K\n1M"
 );
 expect!(
     sort_key_spec_numeric,
@@ -8676,6 +11791,170 @@ expect!(
     "hello"
 );
 
+// ── grep -P ─────────────────────────────────────────────────────────
+
+#[test]
+fn grep_perl_matches_like_gnu() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, want) in [
+            (r"echo 'a1 b22' | grep -oP '\d+'", "1\n22\n"),
+            (r"printf 'a b\na\tb\nab\n' | grep -cP 'a\sb'", "2\n"),
+            (r"printf 'a\tb\nab\n' | grep --perl-regexp 'a\tb'", "a\tb\n"),
+            (
+                r"printf 'word\nswordfish\na word.\n' | grep -P '\bword\b'",
+                "word\na word.\n",
+            ),
+            (r"echo '<a><b>' | grep -oP '<.*?>'", "<a>\n<b>\n"),
+            (r"echo aaa | grep -oP 'a{1,2}?'", "a\na\na\n"),
+            (r"echo HELLO | grep -P '(?i)hello'", "HELLO\n"),
+            (r"echo ABC | grep -iP 'abc'", "ABC\n"),
+            (r"echo ab | grep -oP '(?<x>a)b'", "ab\n"),
+            (
+                r"printf 'cat catalog cat\ncatalog\n' | grep -owP cat",
+                "cat\ncat\n",
+            ),
+            (
+                r"printf '123\n123a\nab\nb\n' | grep -xP '\d+|b'",
+                "123\nb\n",
+            ),
+            (r"printf 'a+\naa\n' | grep -P 'a\+'", "a+\n"),
+            (r"echo '(?=x' | grep -oP '[(?=]+x'", "(?=x\n"),
+            (r"echo AA | grep -oP '\x{41}+'", "AA\n"),
+            // PCRE's `\<` and `\>` are literal angle brackets, not word boundaries.
+            (r"printf '<div>\ndiv x\n' | grep -P '\<div\>'", "<div>\n"),
+            (r"printf '<\na\n' | grep -P '[\<]'", "<\n"),
+            // `&&`, `~~` and `[` in a class are literals, not set operators.
+            (r"printf '&\na\n' | grep -P '[&&]'", "&\n"),
+            (r"printf 'a\nb\n&\nc\n' | grep -P '[a&&b]'", "a\nb\n&\n"),
+            (r"printf '~\na\n' | grep -P '[~~]'", "~\n"),
+            (r"printf '[\na\n' | grep -P '[[x]'", "[\n"),
+            (r"printf 'x1\n' | grep -P '[[:digit:]]'", "x1\n"),
+            (r"printf ']\nb\n' | grep -P '[]a]'", "]\n"),
+            // A `{` that starts no counted quantifier is literal.
+            (
+                r"printf 'a{start}\nhello\n' | grep -P '\b{start}'",
+                "a{start}\n",
+            ),
+            (r"printf 'fn() {\nfn()\n' | grep -P 'fn\(\) {'", "fn() {\n"),
+            (r"printf 'foo{bar\nfoo\n' | grep -P 'foo{'", "foo{bar\n"),
+            (r"printf '{\na\n' | grep -P '{'", "{\n"),
+            (r"printf 'aa\na\n' | grep -P '^a{2}$'", "aa\n"),
+            (r"printf 'A\nb\n' | grep -P '(?i:a)'", "A\n"),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, want, "{cmd}: stdout");
+            assert_eq!(out.stderr, "", "{cmd}: stderr");
+            assert_eq!(out.status, 0, "{cmd}: status");
+        }
+    }));
+}
+
+#[test]
+fn grep_perl_vertical_whitespace() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let input = "printf 'a\u{000b}b\\na\u{000c}b\\na\u{000d}b\\na\u{0085}b\\na\u{2028}b\\na\u{2029}b\\naxb\\n'";
+        for (pattern, count) in [
+            (r"a\vb", "6\n"),
+            (r"a[\v]b", "6\n"),
+            (r"a[^\v]b", "1\n"),
+            (r"a[\vx]b", "7\n"),
+        ] {
+            let out = shell
+                .run(&format!("{input} | grep -cP '{pattern}'"))
+                .await;
+            assert_eq!(out.stdout, count, "{pattern}");
+            assert_eq!(out.stderr, "", "{pattern}");
+            assert_eq!(out.status, 0, "{pattern}");
+        }
+    }));
+}
+
+#[test]
+fn grep_perl_rejects_unsupported_constructs() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, err) in [
+            (
+                r"echo foo1 | grep -P 'foo(?=1)'",
+                "-P does not support lookahead",
+            ),
+            (
+                r"echo foo | grep -P 'foo(?!1)'",
+                "-P does not support lookahead",
+            ),
+            (
+                r"echo x1 | grep -oP '(?<=x)\d'",
+                "-P does not support lookbehind",
+            ),
+            (
+                r"echo ab | grep -P '(?<!x)b'",
+                "-P does not support lookbehind",
+            ),
+            (
+                r"echo abab | grep -P '(ab)\1'",
+                "-P does not support backreference",
+            ),
+            (
+                r"echo aa | grep -P '(?<n>a)\k<n>'",
+                "-P does not support backreference",
+            ),
+            (
+                r"echo aa | grep -P 'a++a'",
+                "-P does not support possessive quantifier",
+            ),
+            (
+                r"echo aaa | grep -P 'a{1,2}+a'",
+                "-P does not support possessive quantifier",
+            ),
+            (
+                r"echo aa | grep -P '(?>a+)a'",
+                "-P does not support atomic group",
+            ),
+            (
+                r"echo foo=1 | grep -oP 'foo=\K\d'",
+                r"-P does not support match reset \K",
+            ),
+            (
+                r"echo b | grep -P '[a--b]'",
+                "-P does not support '--' in a character class",
+            ),
+            (
+                r"echo 'a<' | grep -P '(?x)[ <]'",
+                "-P does not support (?x)",
+            ),
+            (r"echo a | grep -P '(?ix)a'", "-P does not support (?x)"),
+            (r"echo a | grep -P '(?x:a)'", "-P does not support (?x)"),
+            ("echo a | grep -E -P a", "conflicting matchers specified"),
+            ("echo a | grep -P -F a", "conflicting matchers specified"),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.stdout, "", "{cmd}: stdout");
+            let guidance = if err.starts_with("-P does not support") {
+                " (Rust regex engine); for extraction, match surrounding text with -o and trim it with sed or cut"
+            } else {
+                ""
+            };
+            assert_eq!(
+                out.stderr,
+                format!("grep: {err}{guidance}\n"),
+                "{cmd}: stderr"
+            );
+            assert_eq!(out.status, 2, "{cmd}: status");
+        }
+    }));
+}
+
+expect_status!(
+    grep_perl_invalid_pattern,
+    "echo a | grep -P 'a(' 2>/dev/null",
+    2
+);
+
 // ── ls additional coverage ──────────────────────────────────────────
 
 expect!(
@@ -8712,6 +11991,39 @@ expect!(echo_esc_octal, "echo '\\0101'", "A");
 expect!(echo_esc_c_stops, "echo 'ab\\cde'", "ab");
 expect!(echo_trailing_bslash, "echo 'test\\'", "test\\");
 expect!(echo_esc_unknown, "echo '\\z'", "\\z");
+
+// ── echo (builtin) options ──────────────────────────────────────────
+
+expect_output!(echo_opt_e, "echo -e 'a\\tb'", "a\tb\n", "", 0);
+expect_output!(echo_opt_cap_e, "echo -E 'a\\tb'", "a\\tb\n", "", 0);
+expect_output!(echo_opt_ne, "echo -ne 'a\\tb'", "a\tb", "", 0);
+expect_output!(echo_opt_en, "echo -en x", "x", "", 0);
+expect_output!(echo_opt_repeated_n, "echo -nn x", "x", "", 0);
+expect_output!(echo_opt_repeated_e, "echo -ee 'a\\tb'", "a\tb\n", "", 0);
+expect_output!(echo_opt_n_cap_e, "echo -nE 'a\\tb'", "a\\tb", "", 0);
+expect_output!(echo_opt_separate, "echo -n -e 'a\\tb'", "a\tb", "", 0);
+expect_output!(
+    echo_opt_last_cap_e_wins,
+    "echo -eE 'a\\tb'",
+    "a\\tb\n",
+    "",
+    0
+);
+expect_output!(echo_opt_last_e_wins, "echo -E -e 'a\\tb'", "a\tb\n", "", 0);
+expect_output!(echo_opt_e_c, "echo -e 'ab\\cde'", "ab", "", 0);
+expect_output!(echo_opt_cap_e_c, "echo -E 'ab\\cde'", "ab\\cde\n", "", 0);
+expect_output!(echo_opt_unknown_letter, "echo -x a", "-x a\n", "", 0);
+expect_output!(echo_opt_mixed_unknown, "echo -nx a", "-nx a\n", "", 0);
+expect_output!(
+    echo_opt_stops_at_non_option,
+    "echo -e -x -n a",
+    "-x -n a\n",
+    "",
+    0
+);
+expect_output!(echo_opt_double_dash, "echo -- a", "-- a\n", "", 0);
+expect_output!(echo_opt_lone_dash, "echo -", "-\n", "", 0);
+expect_output!(echo_opt_empty_arg, "echo -e '' a", " a\n", "", 0);
 
 // ── true / false ────────────────────────────────────────────────────
 
@@ -8775,6 +12087,35 @@ shell_test!(
 );
 
 expect_status!(date_invalid_arg, "date foo", 1);
+
+shell_test!(
+    date_epoch_seconds,
+    "date +%s",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 0);
+        let secs: u64 = out.stdout.trim().parse().expect("digits");
+        let host = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(host.abs_diff(secs) < 60, "stdout: {}", out.stdout);
+    }
+);
+
+shell_test!(
+    date_composite_specifiers_match_parts,
+    "date '+%F %T|%Y-%m-%d %H:%M:%S'",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 0);
+        let re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$").unwrap();
+        let (composite, parts) = out.stdout.trim().split_once('|').unwrap();
+        assert!(re.is_match(composite), "stdout: {}", out.stdout);
+        // Both halves are formatted from the same instant.
+        assert_eq!(composite, parts);
+    }
+);
+
+expect!(date_percent_escape, "date '+%%Y 100%%'", "%Y 100%");
 
 // ── sleep ───────────────────────────────────────────────────────────
 
@@ -8867,6 +12208,43 @@ expect!(
     "hello world"
 );
 expect!(xargs_quoting, "echo \"it's\" | xargs echo", "it's");
+expect!(xargs_n_attached, "printf 'a b\\n' | xargs -n1 echo", "a\nb");
+expect!(
+    xargs_replace_attached,
+    "printf 'f\\n' | xargs -I{} echo x{}y",
+    "xfy"
+);
+expect!(xargs_d_attached, "echo 'a,b,c' | xargs -d, echo", "a b c");
+expect!(
+    xargs_null_then_n_attached,
+    "printf 'a\\0b' | xargs -0 -n1 echo",
+    "a\nb"
+);
+expect!(
+    xargs_child_flags_grep,
+    "printf 'x1\\ny\\nx2\\n' > /tmp/xgf; echo /tmp/xgf | xargs grep -n x",
+    "1:x1\n3:x2"
+);
+expect!(
+    xargs_child_flags_head,
+    "printf 'x1\\ny\\nx2\\n' > /tmp/xhf; echo /tmp/xhf | xargs head -n 1",
+    "x1"
+);
+expect!(
+    xargs_double_dash,
+    "printf 'x1\\ny\\n' > /tmp/xdf; echo /tmp/xdf | xargs -- head -n 1",
+    "x1"
+);
+expect!(
+    xargs_n_then_double_dash,
+    "printf 'a b c\\n' | xargs -n2 -- echo",
+    "a b\nc"
+);
+expect!(
+    xargs_replace_separated_with_child_flags,
+    "printf 'x1\\ny\\n' > /tmp/xrf; echo /tmp/xrf | xargs -I {} head -n 1 {}",
+    "x1"
+);
 
 // ── ls ──────────────────────────────────────────────────────────────
 
@@ -9921,6 +13299,50 @@ expect_writers!(
     "",
     |stderr: &str| assert_eq!(stderr, "")
 );
+expect_writers!(
+    group_redirect_takes_both_streams_away_from_writers,
+    "{ echo out; ls /nope; unalias missing; } >/dev/null 2>&1; echo done",
+    "done\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    group_redirect_takes_many_stderr_lines_away_from_writer,
+    "{ i=0; while [ $i -lt 300 ]; do echo line >&2; i=$((i+1)); done; } 2>/dev/null; echo done",
+    "done\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    group_stderr_to_file_leaves_stdout_on_writer,
+    "{ echo out; ls /nope; } 2>/tmp/group_err.txt; grep -c nope /tmp/group_err.txt",
+    "out\n1\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    unredirected_group_streams_to_writers,
+    "{ echo out; ls /nope; }",
+    "out\n",
+    |stderr: &str| assert!(stderr.contains("/nope"), "stderr: {stderr:?}")
+);
+
+#[test]
+fn group_stderr_follows_stdout_writer_before_stdout_moves_to_file() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let (output, stdout, stderr) = run_with_writers(
+            &mut shell,
+            "{ echo out; ls /nope; } 2>&1 >/tmp/group_out.txt; cat /tmp/group_out.txt",
+        )
+        .await;
+        assert!(
+            stdout.contains("/nope") && stdout.ends_with("out\n"),
+            "stdout: {stdout:?}"
+        );
+        assert_eq!(stderr, "", "stderr writer must be empty");
+        assert_eq!(output.stdout, "", "captured stdout must be empty");
+        assert_eq!(output.stderr, "", "captured stderr must be empty");
+    }));
+}
 
 #[test]
 fn writer_receives_bytes_that_are_not_utf8() {
@@ -9966,3 +13388,223 @@ fn output_is_captured_when_no_writer_is_installed() {
         );
     }));
 }
+
+#[test]
+fn dropping_the_shell_stops_a_background_loop() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let mut reader = Shell::with_kernel(shell.kernel().clone());
+        let out = shell
+            .run("while :; do printf x >> /tmp/tick; sleep 0.01; done &")
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while reader.run("test -s /tmp/tick").await.status != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the loop never ran");
+        drop(shell);
+        let before = reader.run("wc -c < /tmp/tick").await.stdout;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let after = reader.run("wc -c < /tmp/tick").await.stdout;
+        assert_eq!(
+            before, after,
+            "the loop kept writing after the shell dropped"
+        );
+    }));
+}
+
+/// Wait until `path` has content, then return its size after `pause`.
+async fn growth_of(reader: &mut Shell, path: &str) -> (String, String) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while reader.run(&format!("test -s {path}")).await.status != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the loop never ran");
+    let before = reader.run(&format!("wc -c < {path}")).await.stdout;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let after = reader.run(&format!("wc -c < {path}")).await.stdout;
+    (before, after)
+}
+
+const PIPED_LOOPS: [&str; 4] = [
+    "while :; do printf x >> /tmp/tick; sleep 0.01; done | cat &",
+    "f() { while :; do printf x >> /tmp/tick; sleep 0.01; done; }; f | cat &",
+    "(while :; do printf x >> /tmp/tick; sleep 0.01; done | cat) &",
+    "(while :; do printf x >> /tmp/tick; sleep 0.01; done) | cat &",
+];
+
+#[test]
+fn dropping_the_shell_stops_a_background_pipeline() {
+    for script in PIPED_LOOPS {
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let mut shell = Shell::builder().build().unwrap();
+            let mut reader = Shell::with_kernel(shell.kernel().clone());
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 0, "{script}: {}", out.stderr);
+            let (before, after) = growth_of(&mut reader, "/tmp/tick").await;
+            assert_ne!(before, after, "an open shell stopped {script}");
+            drop(shell);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let (before, after) = growth_of(&mut reader, "/tmp/tick").await;
+            assert_eq!(
+                before, after,
+                "{script} kept writing after the shell dropped"
+            );
+        }));
+    }
+}
+
+#[test]
+fn cancelling_wait_stops_a_background_pipeline() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let mut reader = Shell::with_kernel(shell.kernel().clone());
+        let out = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            shell.run("while :; do printf x >> /tmp/tick; sleep 0.01; done | cat & wait"),
+        )
+        .await;
+        assert!(out.is_err(), "wait returned before cancellation");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (before, after) = growth_of(&mut reader, "/tmp/tick").await;
+        assert_eq!(
+            before, after,
+            "the pipeline kept writing after wait was cancelled"
+        );
+        assert_eq!(shell.run("echo ready").await.stdout, "ready\n");
+    }));
+}
+
+// ── Status of a redirected group ────────────────────────────────────
+
+expect!(
+    a_redirected_group_keeps_its_status,
+    "{ false; } > /tmp/rgs1; echo $?; { true; } > /tmp/rgs2; echo $?",
+    "1\n0"
+);
+expect!(
+    a_redirected_group_keeps_its_last_command_status,
+    "{ echo out; (exit 7); } > /tmp/rgs3; echo $?; cat /tmp/rgs3",
+    "7\nout"
+);
+expect!(
+    a_condition_on_a_redirected_group_takes_the_failure_branch,
+    "if { false; } > /tmp/rgs4; then echo then; else echo else; fi",
+    "else"
+);
+expect_status!(
+    a_redirected_group_is_the_calls_status,
+    "{ false; } 2> /tmp/rgs5",
+    1
+);
+
+// ── `!` before a compound command ───────────────────────────────────
+
+expect!(
+    negation_inverts_a_group,
+    "! { false; }; echo $?; ! { true; }; echo $?",
+    "0\n1"
+);
+expect!(
+    negation_inverts_a_subshell,
+    "! (false); echo $?; ! (true); echo $?",
+    "0\n1"
+);
+expect!(
+    negation_inverts_each_compound_command,
+    "! if true; then true; fi; echo $?; ! while false; do :; done; echo $?; \
+     ! for i in 1; do false; done; echo $?; ! case a in a) false;; esac; echo $?",
+    "1\n1\n0\n0"
+);
+expect!(
+    negation_inverts_a_redirected_compound,
+    "! { false; } > /tmp/neg1; echo $?; ! { true; } 2> /tmp/neg2; echo $?; \
+     if ! (false) > /dev/null 2>&1; then echo then; else echo else; fi",
+    "0\n1\nthen"
+);
+expect!(
+    negation_inverts_a_compound_inside_a_substitution,
+    "out=$(! { false; } && echo ran; ! ( true ); echo $?); echo \"$out\"",
+    "ran\n1"
+);
+expect!(
+    a_negated_group_runs_in_the_current_shell,
+    "! { x=1; }; echo $x",
+    "1"
+);
+expect_status!(a_negated_group_is_the_calls_status, "! { true; }", 1);
+
+// ── `set -e` and `!` ────────────────────────────────────────────────
+
+expect!(
+    errexit_ignores_a_negated_command,
+    "set -e; ! true; ! (true); ! { true; }; ! { true; } > /tmp/neg3; echo after",
+    "after"
+);
+expect!(
+    errexit_ignores_a_failure_inside_a_negated_command,
+    "set -e; ! { false; echo in; }; ! ( false; echo sub ); f() { false; echo fn; }; ! f; echo after",
+    "in\nsub\nfn\nafter"
+);
+expect!(
+    errexit_stays_ignored_inside_a_negated_group_that_sets_it,
+    "set -e; ! { set -e; false; echo inner; }; echo after",
+    "inner\nafter"
+);
+shell_test!(
+    errexit_applies_again_after_a_negated_command,
+    "set -e; ! { true; }; false; echo after",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+    }
+);
+shell_test!(
+    errexit_set_inside_a_negated_group_applies_after_it,
+    "set +e; ! { set -e; true; }; false; echo after",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+    }
+);
+expect!(
+    errexit_cleared_inside_a_negated_group_stays_cleared,
+    "set -e; ! { set +e; true; }; false; echo after",
+    "after"
+);
+
+#[test]
+fn a_call_cancelled_inside_a_negated_group_leaves_errexit_for_the_next_call() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            shell.run("set -e; ! { sleep 1; }; echo before"),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the first call must be cancelled");
+        let out = shell.run("set -e; false; echo after").await;
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+    }));
+}
+
+expect!(
+    a_double_negation_cancels_out,
+    "! ! { false; }; echo $?; ! ! ( exit 3 ); echo $?; ! ! false; echo $?; ! ! ! false; echo $?",
+    "1\n3\n1\n0"
+);
+expect!(
+    errexit_ignores_a_negated_pipeline_into_a_compound,
+    "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
+    "in\nafter"
+);

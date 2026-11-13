@@ -63,6 +63,10 @@ async fn start_server() -> String {
         .route("/status/{code}", get(status_handler))
         .route("/redirect", get(|| async { Redirect::temporary("/hello") }))
         .route(
+            "/redirect-slow",
+            get(|| async { Redirect::temporary("/slow") }),
+        )
+        .route(
             "/redirect-rel",
             get(|| async { Redirect::temporary("hello") }),
         )
@@ -103,6 +107,10 @@ async fn start_server() -> String {
         .route(
             "/redirect-ftp",
             get(|| async { Redirect::temporary("ftp://example.com/file") }),
+        )
+        .route(
+            "/method",
+            any(|method: Method| async move { ([("x-method", method.to_string())], "body") }),
         );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -289,6 +297,219 @@ fn curl_head_method() {
         let out = shell.run(&format!("curl -X HEAD {base}/hello")).await;
         assert_eq!(out.stdout, "");
         assert_eq!(out.status, 0);
+    }));
+}
+
+#[test]
+fn curl_head_flag_prints_headers_only() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        for flag in ["-I", "--head", "-sI", "-Ii"] {
+            let out = shell.run(&format!("curl {flag} {base}/method")).await;
+            assert_eq!(out.status, 0, "{flag}");
+            assert!(
+                out.stdout.starts_with("HTTP/1.1 200 OK\r\n"),
+                "{flag}: {}",
+                out.stdout
+            );
+            assert!(
+                out.stdout.contains("x-method: HEAD\r\n"),
+                "{flag}: {}",
+                out.stdout
+            );
+            assert!(out.stdout.ends_with("\r\n\r\n"), "{flag}: {}", out.stdout);
+        }
+    }));
+}
+
+#[test]
+fn curl_head_flag_lets_request_pick_the_method() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!(
+                "curl -sI -X GET -w '%{{size_download}}' {base}/method"
+            ))
+            .await;
+        assert_eq!(out.status, 0);
+        assert!(out.stdout.contains("x-method: GET\r\n"), "{}", out.stdout);
+        // The body is fetched but, as in curl, neither shown nor counted.
+        assert!(out.stdout.ends_with("\r\n\r\n0"), "{}", out.stdout);
+    }));
+}
+
+#[test]
+fn curl_head_flag_follows_redirects_showing_every_hop() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell.run(&format!("curl -sIL {base}/redirect")).await;
+        assert_eq!(out.status, 0);
+        let blocks: Vec<&str> = out.stdout.split_terminator("\r\n\r\n").collect();
+        assert_eq!(blocks.len(), 2, "{}", out.stdout);
+        assert!(blocks[0].starts_with("HTTP/1.1 307 "), "{}", out.stdout);
+        assert!(blocks[0].contains("location: /hello"), "{}", out.stdout);
+        assert!(blocks[1].starts_with("HTTP/1.1 200 OK"), "{}", out.stdout);
+
+        // Without `-L` only the redirect itself is shown.
+        let out = shell.run(&format!("curl -sI {base}/redirect")).await;
+        assert!(out.stdout.starts_with("HTTP/1.1 307 "), "{}", out.stdout);
+        assert_eq!(out.stdout.matches("HTTP/").count(), 1, "{}", out.stdout);
+    }));
+}
+
+#[test]
+fn curl_head_flag_keeps_headers_when_a_later_hop_fails() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        for (path, flags, status, location) in [
+            ("/redirect-ftp", "", 1, "ftp://example.com/file"),
+            ("/redirect", "--proto-redir '=https'", 1, "/hello"),
+            ("/redirect-slow", "-m 1 -w done", 28, "/slow"),
+        ] {
+            for output in ["", "-o /tmp/headers"] {
+                let out = shell
+                    .run(&format!("curl -sSIL {flags} {output} {base}{path}"))
+                    .await;
+                assert_eq!(out.status, status, "{path}: {}", out.stderr);
+                assert!(!out.stderr.is_empty(), "{path}");
+                let headers = if output.is_empty() {
+                    out.stdout
+                } else {
+                    assert_eq!(out.stdout, if status == 28 { "done" } else { "" });
+                    shell.run("cat /tmp/headers").await.stdout
+                };
+                assert!(headers.starts_with("HTTP/1.1 307 "), "{path}: {headers}");
+                assert!(
+                    headers.contains(&format!("\r\nlocation: {location}\r\n")),
+                    "{path}: {headers}"
+                );
+                assert!(
+                    headers.ends_with(if status == 28 && output.is_empty() {
+                        "\r\n\r\ndone"
+                    } else {
+                        "\r\n\r\n"
+                    }),
+                    "{path}: {headers}"
+                );
+            }
+        }
+    }));
+}
+
+#[test]
+fn curl_head_flag_keeps_headers_when_a_redirect_connection_fails() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = format!("http://{}", target_listener.local_addr().unwrap());
+        let location = target.clone();
+        let app = Router::new().route(
+            "/away",
+            get(move || async move { Redirect::temporary(&location) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::task::spawn_local(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        // Hold the target port, but close every connection without a response.
+        tokio::task::spawn_local(async move {
+            while let Ok((stream, _)) = target_listener.accept().await {
+                drop(stream);
+            }
+        });
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .allow_url(&target)
+            .build()
+            .unwrap();
+        for output in ["", "-o /tmp/headers"] {
+            let out = shell.run(&format!("curl -sSIL {output} {base}/away")).await;
+            assert_eq!(out.status, 6, "{}", out.stderr);
+            let headers = if output.is_empty() {
+                out.stdout
+            } else {
+                assert_eq!(out.stdout, "");
+                shell.run("cat /tmp/headers").await.stdout
+            };
+            assert!(headers.starts_with("HTTP/1.1 307 "), "{headers}");
+            assert!(headers.contains(&format!("location: {target}\r\n")));
+        }
+    }));
+}
+
+#[test]
+fn curl_head_flag_with_output_writes_headers_to_the_file() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!(
+                "curl -sI -o /tmp/head.txt -w '%{{http_code}}' {base}/hello"
+            ))
+            .await;
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout, "200");
+        let out = shell.run("cat /tmp/head.txt").await;
+        assert!(
+            out.stdout.starts_with("HTTP/1.1 200 OK\r\n"),
+            "{}",
+            out.stdout
+        );
+        assert!(out.stdout.ends_with("\r\n\r\n"), "{}", out.stdout);
+    }));
+}
+
+#[test]
+fn curl_head_flag_with_fail_shows_headers_then_exits_22() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!("curl -sIf -w '%{{http_code}}' {base}/status/404"))
+            .await;
+        assert_eq!(out.status, 22);
+        assert!(
+            out.stdout.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{}",
+            out.stdout
+        );
+        assert!(out.stdout.ends_with("\r\n\r\n404"), "{}", out.stdout);
+
+        let out = shell
+            .run(&format!(
+                "curl -sIf -o /tmp/headers -w '%{{http_code}}' {base}/status/404"
+            ))
+            .await;
+        assert_eq!(out.status, 22);
+        assert_eq!(out.stdout, "404");
+        let headers = shell.run("cat /tmp/headers").await.stdout;
+        assert!(headers.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert!(headers.ends_with("\r\n\r\n"));
+    }));
+}
+
+#[test]
+fn curl_head_flag_conflicts_with_data() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell.run(&format!("curl -I -d x {base}/echo")).await;
+        assert_eq!(out.status, 2);
+        assert_eq!(out.stdout, "");
+        assert!(
+            out.stderr
+                .contains("You can only select one HTTP request method!"),
+            "{}",
+            out.stderr
+        );
+        let out = shell.run(&format!("curl -s -I -d x {base}/echo")).await;
+        assert_eq!(out.status, 2);
+        assert_eq!(out.stderr, "");
     }));
 }
 
@@ -696,6 +917,20 @@ fn curl_redirect_to_blocked_ip_denied() {
             "{}",
             out.stderr
         );
+
+        for output in ["", "-o /tmp/headers"] {
+            let out = shell.run(&format!("curl -sSIL {output} {base}/away")).await;
+            assert_eq!(out.status, 1);
+            assert!(out.stderr.contains("access denied: 127.0.0.1"));
+            let headers = if output.is_empty() {
+                out.stdout
+            } else {
+                assert_eq!(out.stdout, "");
+                shell.run("cat /tmp/headers").await.stdout
+            };
+            assert!(headers.starts_with("HTTP/1.1 307 "), "{headers}");
+            assert!(headers.contains(&format!("location: {target}/hello\r\n")));
+        }
     }));
 }
 

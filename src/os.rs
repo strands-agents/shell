@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -16,6 +16,26 @@ pub use crate::command_fallback::{CommandContext, CommandFallback, CommandInput,
 
 /// Monotonic counter for virtual PIDs.
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
+
+type TaskList = std::sync::Mutex<Vec<tokio::task::AbortHandle>>;
+
+/// Tasks that abort when this value drops.
+#[derive(Default)]
+pub(crate) struct Tasks(Arc<TaskList>);
+
+impl Tasks {
+    pub(crate) fn new(handles: Vec<tokio::task::AbortHandle>) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(handles)))
+    }
+}
+
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        for task in self.0.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            task.abort();
+        }
+    }
+}
 
 /// Metadata about a directory entry.
 pub struct DirEntry {
@@ -145,8 +165,20 @@ pub struct Process {
     pub opt_errexit: bool,
     pub opt_nounset: bool,
     pub opt_xtrace: bool,
+    /// `set -o pipefail`: a pipeline fails with its rightmost failing stage.
+    pub opt_pipefail: bool,
+    /// How many commands inverted by `!` enclose the current command, which `set -e` ignores.
+    pub(crate) errexit_ignored: u32,
     /// Set when a nounset error occurs during expansion.
     pub nounset_error: bool,
+    /// Set when the last pipeline stopped before dispatch because the deadline passed.
+    pub(crate) deadline_stop: bool,
+    /// Set when `exit` ran inside a function called by a single-command pipeline.
+    pub(crate) pending_exit: bool,
+    /// An unsupported array aborts its function without requesting a shell exit.
+    pub(crate) refused_array: bool,
+    /// Exit status of the last command substitution performed, for commands with no name.
+    pub(crate) last_subst_status: Option<i32>,
     /// PID of last background job (for $!).
     pub last_bg_pid: Option<u32>,
     /// Background job handles.
@@ -155,6 +187,8 @@ pub struct Process {
     /// Each entry maps variable names to their previous value (None = was unset).
     local_scopes: Vec<HashMap<String, Option<String>>>,
     fds: HashMap<Fd, FdKind>,
+    /// Fds that read input fed from outside the shell, which can stay open.
+    outside_fds: std::collections::HashSet<Fd>,
     next_fd: Fd,
     pub bg_counter: u32,
     /// Offset within current arg for getopts combined flags (e.g. -abc).
@@ -163,6 +197,8 @@ pub struct Process {
     pub readonly_vars: Arc<std::collections::HashSet<String>>,
     /// Shell aliases.
     pub aliases: Arc<HashMap<String, String>>,
+    /// Shell options turned on with `shopt -s`.
+    pub(crate) shopts: std::collections::BTreeSet<String>,
     /// Command hash table (name → full path).
     pub hash_table: Arc<HashMap<String, String>>,
     /// Optional stderr channel for sandboxed error output.
@@ -198,6 +234,10 @@ pub struct Process {
     pub umask: u32,
     /// Host writes that the shell waits for once their writers close.
     host_writes: HostWrites,
+    /// The owner that aborts this process's background jobs, shared with its forks.
+    pub(crate) background_owner: std::sync::Weak<TaskList>,
+    /// Set in a background job, whose pipeline stages abort with it.
+    pub(crate) in_background_job: bool,
 }
 
 /// A task that writes a host file after the last writer of its channel closes.
@@ -324,16 +364,24 @@ impl Process {
             opt_errexit: false,
             opt_nounset: false,
             opt_xtrace: false,
+            opt_pipefail: false,
+            errexit_ignored: 0,
             nounset_error: false,
+            deadline_stop: false,
+            pending_exit: false,
+            refused_array: false,
+            last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
+            outside_fds: std::collections::HashSet::new(),
             next_fd: 3,
             bg_counter: 0,
             optoff: -1,
             readonly_vars: Arc::new(std::collections::HashSet::new()),
             aliases: Arc::new(HashMap::new()),
+            shopts: std::collections::BTreeSet::new(),
             hash_table: Arc::new(HashMap::new()),
             err_tx: None,
             depth: 0,
@@ -350,6 +398,8 @@ impl Process {
             traps: HashMap::new(),
             umask: 0o022,
             host_writes: Default::default(),
+            background_owner: std::sync::Weak::new(),
+            in_background_job: false,
         }
     }
 
@@ -366,16 +416,24 @@ impl Process {
             opt_errexit: false,
             opt_nounset: false,
             opt_xtrace: false,
+            opt_pipefail: false,
+            errexit_ignored: 0,
             nounset_error: false,
+            deadline_stop: false,
+            pending_exit: false,
+            refused_array: false,
+            last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
+            outside_fds: std::collections::HashSet::new(),
             next_fd: 3,
             bg_counter: 0,
             optoff: -1,
             readonly_vars: Arc::new(std::collections::HashSet::new()),
             aliases: Arc::new(HashMap::new()),
+            shopts: std::collections::BTreeSet::new(),
             hash_table: Arc::new(HashMap::new()),
             err_tx: None,
             depth: 0,
@@ -392,7 +450,29 @@ impl Process {
             traps: HashMap::new(),
             umask: 0o022,
             host_writes: Default::default(),
+            background_owner: std::sync::Weak::new(),
+            in_background_job: false,
         }
+    }
+
+    /// Make the returned value abort the background jobs of this process and its forks when it drops.
+    pub(crate) fn own_background_jobs(&mut self) -> Tasks {
+        let owner = Tasks::default();
+        self.background_owner = Arc::downgrade(&owner.0);
+        owner
+    }
+
+    /// Keep a background job for `wait`, and give it to the owner of this process's jobs.
+    pub(crate) fn add_background_job(
+        &mut self,
+        job: tokio::task::JoinHandle<(i32, String, String)>,
+    ) {
+        if let Some(owner) = self.background_owner.upgrade() {
+            let mut tasks = owner.lock().unwrap_or_else(|e| e.into_inner());
+            tasks.retain(|task| !task.is_finished());
+            tasks.push(job.abort_handle());
+        }
+        self.bg_jobs.push(job);
     }
 
     /// Track a host write so that [`Process::settle_host_writes`] waits for it.
@@ -448,16 +528,24 @@ impl Process {
             opt_errexit: self.opt_errexit,
             opt_nounset: self.opt_nounset,
             opt_xtrace: self.opt_xtrace,
+            opt_pipefail: self.opt_pipefail,
+            errexit_ignored: self.errexit_ignored,
             nounset_error: false,
+            deadline_stop: false,
+            pending_exit: false,
+            refused_array: false,
+            last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
+            outside_fds: std::collections::HashSet::new(),
             next_fd: 3,
             bg_counter: 0,
             optoff: self.optoff,
             readonly_vars: self.readonly_vars.clone(),
             aliases: self.aliases.clone(),
+            shopts: self.shopts.clone(),
             hash_table: self.hash_table.clone(),
             err_tx: self.err_tx.clone(),
             depth: self.depth,
@@ -474,12 +562,15 @@ impl Process {
             traps: self.traps.clone(),
             umask: self.umask,
             host_writes: self.host_writes.clone(),
+            background_owner: self.background_owner.clone(),
+            in_background_job: self.in_background_job,
         }
     }
 
     /// Install a pipe: writer on `self[writer_fd]`, reader on returned Process-less FdReader.
     /// Use `set_channel_writer` / `set_channel_reader` for cross-process pipes.
     pub fn set_channel_reader(&mut self, fd: Fd, rx: mpsc::Receiver<Bytes>) {
+        self.outside_fds.remove(&fd);
         self.fds.insert(
             fd,
             FdKind::ChannelReader {
@@ -489,7 +580,20 @@ impl Process {
         );
     }
 
+    /// Like [`Self::set_channel_reader`], for input fed from outside the shell that can stay open.
+    /// A command that reads its whole input before it runs, such as `lua -e`, reads it as empty.
+    pub fn set_outside_reader(&mut self, fd: Fd, rx: mpsc::Receiver<Bytes>) {
+        self.set_channel_reader(fd, rx);
+        self.outside_fds.insert(fd);
+    }
+
+    /// Whether `fd` reads input set with [`Self::set_outside_reader`].
+    pub(crate) fn reads_outside_input(&self, fd: Fd) -> bool {
+        self.outside_fds.contains(&fd) && self.fds.contains_key(&fd)
+    }
+
     pub fn set_channel_writer(&mut self, fd: Fd, tx: mpsc::Sender<Bytes>) {
+        self.outside_fds.remove(&fd);
         self.fds.insert(
             fd,
             FdKind::ChannelWriter {
@@ -503,6 +607,7 @@ impl Process {
     pub(crate) fn inherit_channel_writer(&self, fd: Fd, target: &mut Process) -> bool {
         match self.fds.get(&fd) {
             Some(FdKind::ChannelWriter { tx, error_flag }) => {
+                target.outside_fds.remove(&fd);
                 target.fds.insert(
                     fd,
                     FdKind::ChannelWriter {
@@ -520,6 +625,11 @@ impl Process {
     /// Used to pass stdin across fork boundaries (e.g. CompoundPipeline).
     pub fn transfer_fd(&mut self, fd: Fd, target: &mut Process) {
         if let Some(kind) = self.fds.remove(&fd) {
+            if self.outside_fds.remove(&fd) {
+                target.outside_fds.insert(fd);
+            } else {
+                target.outside_fds.remove(&fd);
+            }
             target.fds.insert(fd, kind);
         }
     }
@@ -529,6 +639,11 @@ impl Process {
             .fds
             .remove(&from)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("bad fd {from}")))?;
+        if self.outside_fds.remove(&from) {
+            self.outside_fds.insert(to);
+        } else {
+            self.outside_fds.remove(&to);
+        }
         self.fds.insert(to, kind);
         Ok(())
     }
@@ -541,6 +656,7 @@ impl Process {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("bad fd {src}")))?
             .try_clone()
             .await?;
+        self.outside_fds.remove(&dst);
         self.fds.insert(dst, kind);
         Ok(())
     }
@@ -571,6 +687,7 @@ impl Process {
     }
 
     pub fn close(&mut self, fd: Fd) {
+        self.outside_fds.remove(&fd);
         self.fds.remove(&fd);
     }
 
@@ -582,6 +699,23 @@ impl Process {
     /// Restore a previously taken fd (e.g. after `take_reader`).
     pub fn restore_fd(&mut self, fd: Fd, kind: FdKind) {
         self.fds.insert(fd, kind);
+    }
+
+    /// Take `fd` out of the table, to put back with [`Self::put_fd`].
+    pub(crate) fn take_fd(&mut self, fd: Fd) -> Option<TakenFd> {
+        let kind = self.fds.remove(&fd)?;
+        let outside = self.outside_fds.remove(&fd);
+        Some(TakenFd { kind, outside })
+    }
+
+    /// Put back an fd taken with [`Self::take_fd`], as input from outside the shell if it was.
+    pub(crate) fn put_fd(&mut self, fd: Fd, taken: TakenFd) {
+        if taken.outside {
+            self.outside_fds.insert(fd);
+        } else {
+            self.outside_fds.remove(&fd);
+        }
+        self.fds.insert(fd, taken.kind);
     }
 
     /// Set the stderr channel for sandboxed error output.
@@ -805,6 +939,17 @@ pub async fn read_to_string_limited<R: tokio::io::AsyncRead + Unpin>(
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Like [`read_to_string_limited`], but replaces invalid UTF-8 with U+FFFD
+/// instead of failing. Still returns Err if the limit is exceeded.
+pub async fn read_to_string_lossy_limited<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+) -> io::Result<String> {
+    let buf = read_to_end_limited(reader, limit).await?;
+    Ok(String::from_utf8(buf)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+}
+
 /// Return the largest char boundary in `s` at or below `index`.
 pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
     if index >= s.len() {
@@ -871,6 +1016,12 @@ pub fn base64_encode(input: &[u8]) -> String {
 /// Create a bounded channel pair for use as a pipe.
 pub fn pipe(buffer: usize) -> (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) {
     mpsc::channel(buffer)
+}
+
+/// An fd taken out of a process with [`Process::take_fd`].
+pub(crate) struct TakenFd {
+    kind: FdKind,
+    outside: bool,
 }
 
 /// Owned async reader extracted from a Process fd.
@@ -1047,6 +1198,39 @@ pub struct HttpResponse {
     pub reason: String,
 }
 
+/// One command, as [`Kernel::check_command`] or [`Kernel::check_fallback`] sees it.
+#[derive(Debug)]
+pub struct CommandRequest {
+    program: String,
+    args: Vec<String>,
+    cwd: PathBuf,
+}
+
+impl CommandRequest {
+    pub(crate) fn new(program: &str, args: &[String], cwd: &Path) -> Self {
+        Self {
+            program: program.to_string(),
+            args: args.to_vec(),
+            cwd: cwd.to_path_buf(),
+        }
+    }
+
+    /// The program name after expansion and multicall or shebang resolution.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// The expanded arguments, without the program name.
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// The virtual working directory.
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+}
+
 /// The core kernel abstraction. All methods take &self — the kernel is shared.
 #[async_trait]
 pub trait Kernel: Send + Sync {
@@ -1061,7 +1245,27 @@ pub trait Kernel: Send + Sync {
     /// Check access permissions (ACCESS_R, ACCESS_W, ACCESS_X).
     async fn access(&self, proc: &Process, path: &str, mode: i32) -> bool;
     /// Canonicalize a path (resolve symlinks).
+    ///
+    /// The default [`Kernel::try_stat`] reports a missing path as refused when this fails with
+    /// [`io::ErrorKind::PermissionDenied`].
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf>;
+    /// Stat a path, following symlinks. `Ok` means the path exists,
+    /// `Err(PermissionDenied)` means the kernel refuses to look it up, and any other error
+    /// means it is missing.
+    ///
+    /// `mkdir -p` makes this one lookup for each ancestor and does not create a refused one.
+    /// The default calls [`Kernel::stat`], then [`Kernel::canonicalize`] for a missing path, so
+    /// refusing in `canonicalize` still works. A kernel that wraps another must forward this.
+    async fn try_stat(&self, proc: &Process, path: &str) -> io::Result<FileStat> {
+        let stat = self.stat(proc, path).await;
+        if stat.exists {
+            return Ok(stat);
+        }
+        match self.canonicalize(proc, path).await {
+            Ok(_) => Err(io::ErrorKind::NotFound.into()),
+            Err(err) => Err(err),
+        }
+    }
     /// Check if a path is an executable file.
     async fn is_executable(&self, proc: &Process, path: &str) -> bool;
     /// Expand a glob pattern relative to the process cwd. Returns sorted matches.
@@ -1111,4 +1315,65 @@ pub trait Kernel: Send + Sync {
     fn command_fallback(&self) -> Option<&dyn CommandFallback> {
         None
     }
+    /// Decide whether a command that Shell implements may run.
+    ///
+    /// Shell calls this for each pipeline stage that names a builtin,
+    /// function, registered command, or script, after expansion and
+    /// resolution, and before any stage starts. For `builtin NAME`, where
+    /// `NAME` is a builtin, Shell asks about `NAME`. Commands that `eval`,
+    /// `source`, traps, `find -exec`, `xargs`, and Lua run come here too, but
+    /// `eval`, `source`, `.`, `exec`, `command`, `exit`, `return`, `break`,
+    /// and `continue` themselves do not.
+    /// Commands for [`Kernel::command_fallback`] go to
+    /// [`Kernel::check_fallback`] instead. An `Err` stops the pipeline: Shell
+    /// writes the error to stderr and returns 126. The default allows every
+    /// command.
+    async fn check_command(&self, _request: &CommandRequest) -> io::Result<()> {
+        Ok(())
+    }
+    /// Decide whether a command for [`Kernel::command_fallback`] may run.
+    ///
+    /// Shell calls this for each pipeline stage that goes to the fallback,
+    /// after expansion and resolution, and before any stage starts, in the
+    /// same pass as [`Kernel::check_command`]. Shell does not call it when
+    /// [`Kernel::command_fallback`] returns `None`. An `Err` stops the
+    /// pipeline: Shell writes the error to stderr, returns 126, and reports
+    /// each command that [`Kernel::check_command`] allowed to
+    /// [`Kernel::command_dropped`]. Shell reports a command for the fallback
+    /// to neither [`Kernel::command_finished`] nor [`Kernel::command_dropped`].
+    /// It also sees names the fallback would decline with `Ok(None)`; refusing
+    /// one stops the pipeline with 126 rather than 127 `command not found`.
+    /// The default allows every command.
+    async fn check_fallback(&self, _request: &CommandRequest) -> io::Result<()> {
+        Ok(())
+    }
+    /// Report the status of a command that [`Kernel::check_command`] allowed
+    /// and Shell ran.
+    ///
+    /// `request` has the same program, args, and cwd that Shell passed to
+    /// [`Kernel::check_command`].
+    /// `status` is the stage's own status, before Shell adjusts the pipeline
+    /// status for a failed host write or the output limit. A command that was
+    /// allowed but ended with no status is reported to
+    /// [`Kernel::command_dropped`] instead. An `Err` cannot undo the command:
+    /// Shell writes the error to stderr and the stage's status becomes 125.
+    /// The default does nothing.
+    async fn command_finished(&self, _request: &CommandRequest, _status: i32) -> io::Result<()> {
+        Ok(())
+    }
+    /// Report that a command [`Kernel::check_command`] allowed ended with no
+    /// status.
+    ///
+    /// Shell calls this instead of [`Kernel::command_finished`] when an
+    /// allowed command never started, because a redirect failed or another
+    /// stage of its pipeline was refused, and when Shell stopped waiting for
+    /// it, because its task failed or the pipeline was cancelled. The command
+    /// may or may not have had an effect. After a cancel it may still be
+    /// running, and calling the kernel, unless the kernel has a
+    /// [`Kernel::command_fallback`]. Shell may call this while dropping a
+    /// future, so it must not block. `request` has the same program,
+    /// args, and cwd that Shell passed to [`Kernel::check_command`]. Shell
+    /// calls this at most once for each allowed command, and never for one
+    /// it reported to [`Kernel::command_finished`]. The default does nothing.
+    fn command_dropped(&self, _request: &CommandRequest) {}
 }

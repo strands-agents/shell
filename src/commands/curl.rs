@@ -15,6 +15,7 @@ Options:
   -f, --fail              Fail silently on HTTP errors (exit 22)
   -L, --location          Follow redirects
   -i, --include           Include response headers in output
+  -I, --head              Fetch the headers only (HEAD request)
   -k, --insecure          Allow insecure TLS connections
   -v, --verbose           Verbose output
   -w, --write-out FORMAT  Output FORMAT after completion
@@ -103,6 +104,16 @@ fn is_absolute(loc: &str) -> bool {
     })
 }
 
+/// A response's status line and headers, as `-i` prints them.
+fn header_block(resp: &crate::os::HttpResponse) -> String {
+    let mut hdr = format!("HTTP/{} {} {}\r\n", resp.version, resp.status, resp.reason);
+    for (name, value) in &resp.headers {
+        hdr.push_str(&format!("{}: {}\r\n", name, value));
+    }
+    hdr.push_str("\r\n");
+    hdr
+}
+
 /// The values a `-w` format can name.
 struct WriteOut<'a> {
     /// The response status, or `0` when no response arrived.
@@ -184,6 +195,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut fail = false;
     let mut follow = false;
     let mut include = false;
+    let mut head = false;
     let mut insecure = false;
     let mut verbose = false;
     let mut write_out: Option<String> = None;
@@ -221,6 +233,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
             Short('f') | Long("fail") => fail = true,
             Short('L') | Long("location") => follow = true,
             Short('i') | Long("include") => include = true,
+            Short('I') | Long("head") => head = true,
             Short('k') | Long("insecure") => insecure = true,
             Short('v') | Long("verbose") => verbose = true,
             Short('w') | Long("write-out") => write_out = Some(parser.value()?.string()?),
@@ -295,8 +308,24 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
         headers.push(format!("User-Agent: {ua}"));
     }
 
+    if head && data.is_some() {
+        if !silent {
+            let mut w = io::stderr()?;
+            wprintln!(
+                w,
+                "Warning: You can only select one HTTP request method! You asked for both POST \n\
+                 Warning: (-d, --data) and HEAD (-I, --head)."
+            )?;
+        }
+        return Ok(2);
+    }
+    // `-I` shows the headers and never a body, even when `-X` picks the method.
+    let include = include || head;
+
     let method = method.unwrap_or_else(|| {
-        if data.is_some() {
+        if head {
+            "HEAD".into()
+        } else if data.is_some() {
             "POST".into()
         } else {
             "GET".into()
@@ -320,6 +349,8 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
     // Manual redirect loop
     let mut current_url = url.clone();
     let mut redirects_left = max_redirects;
+    // `-I` shows the headers of every redirect hop, not just the last.
+    let mut hop_headers = String::new();
     let resp = loop {
         // Build header list for this request
         let mut req_headers: Vec<(String, String)> = Vec::new();
@@ -348,7 +379,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 };
                 wprintln!(w, "curl: (1) Protocol \"{}\" {}", scheme, why)?;
             }
-            return Ok(1);
+            break Err(1);
         }
 
         // Inject credentials (only for original URL, not redirects)
@@ -410,23 +441,13 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     {
                         wprintln!(w, "curl: (28) Operation timed out")?;
                     }
-                    if let Some(ref fmt) = write_out {
-                        let vars = WriteOut {
-                            status: 0,
-                            content_type: "",
-                            size_download: 0,
-                            url_effective: &current_url,
-                        };
-                        let mut w = io::stdout()?;
-                        wprint!(w, "{}", expand_write_out(fmt, &vars))?;
-                    }
-                    return Ok(28);
+                    break Err(28);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                     if let Some(ref mut w) = err {
                         wprintln!(w, "curl: {}", e)?;
                     }
-                    return Ok(1);
+                    break Err(1);
                 }
                 Err(e) => {
                     if (!silent || show_error)
@@ -434,7 +455,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     {
                         wprintln!(w, "curl: (6) {}", e)?;
                     }
-                    return Ok(6);
+                    break Err(6);
                 }
             };
 
@@ -470,11 +491,14 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 if verbose && let Some(ref mut w) = err {
                     wprintln!(w, "* Redirecting to {next}")?;
                 }
+                if head {
+                    hop_headers.push_str(&header_block(&r));
+                }
                 current_url = next;
                 redirects_left -= 1;
                 continue;
             }
-            break r;
+            break Ok(r);
         } else {
             // Redirect hop — minimal headers, no credentials
             let http_req = crate::os::HttpRequest {
@@ -494,23 +518,13 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     {
                         wprintln!(w, "curl: (28) Operation timed out")?;
                     }
-                    if let Some(ref fmt) = write_out {
-                        let vars = WriteOut {
-                            status: 0,
-                            content_type: "",
-                            size_download: 0,
-                            url_effective: &current_url,
-                        };
-                        let mut w = io::stdout()?;
-                        wprint!(w, "{}", expand_write_out(fmt, &vars))?;
-                    }
-                    return Ok(28);
+                    break Err(28);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                     if let Some(ref mut w) = err {
                         wprintln!(w, "curl: {}", e)?;
                     }
-                    return Ok(1);
+                    break Err(1);
                 }
                 Err(e) => {
                     if (!silent || show_error)
@@ -518,7 +532,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     {
                         wprintln!(w, "curl: (6) {}", e)?;
                     }
-                    return Ok(6);
+                    break Err(6);
                 }
             };
 
@@ -554,11 +568,45 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 if verbose && let Some(ref mut w) = err {
                     wprintln!(w, "* Redirecting to {next}")?;
                 }
+                if head {
+                    hop_headers.push_str(&header_block(&r));
+                }
                 current_url = next;
                 redirects_left -= 1;
                 continue;
             }
-            break r;
+            break Ok(r);
+        }
+    };
+    let resp = match resp {
+        Ok(resp) => resp,
+        Err(code) => {
+            // Headers already received survive a failed redirect hop.
+            if !hop_headers.is_empty() || (code == 28 && write_out.is_some()) {
+                let mut out = io::stdout()?;
+                if !hop_headers.is_empty() {
+                    if let Some(ref path) = output {
+                        let fd = io::open(os, path, OpenFlags::write()).await?;
+                        io::take_writer(fd)?
+                            .write_all(hop_headers.as_bytes())
+                            .await?;
+                    } else {
+                        out.write_all(hop_headers.as_bytes()).await?;
+                    }
+                }
+                if code == 28
+                    && let Some(ref fmt) = write_out
+                {
+                    let vars = WriteOut {
+                        status: 0,
+                        content_type: "",
+                        size_download: 0,
+                        url_effective: &current_url,
+                    };
+                    wprint!(out, "{}", expand_write_out(fmt, &vars))?;
+                }
+            }
+            return Ok(code);
         }
     };
 
@@ -574,19 +622,24 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
 
     let mut included: Option<String> = None;
     if verbose || include {
-        let mut hdr = format!("HTTP/{} {} {}\r\n", resp.version, status_code, resp.reason);
-        for (name, value) in &resp.headers {
-            hdr.push_str(&format!("{}: {}\r\n", name, value));
-        }
-        hdr.push_str("\r\n");
+        let hdr = header_block(&resp);
         if include {
-            included = Some(hdr);
+            included = Some(hop_headers + &hdr);
         } else if let Some(ref mut w) = err {
             w.write_all(hdr.as_bytes()).await?;
         }
     }
 
     if fail && status_code >= 400 {
+        // `-I` still shows the error response's headers, as curl does.
+        if head && let Some(ref hdr) = included {
+            if let Some(ref path) = output {
+                let fd = io::open(os, path, OpenFlags::write()).await?;
+                io::take_writer(fd)?.write_all(hdr.as_bytes()).await?;
+            } else {
+                out.write_all(hdr.as_bytes()).await?;
+            }
+        }
         if show_error && let Some(ref mut w) = err {
             wprintln!(
                 w,
@@ -606,7 +659,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
         return Ok(22);
     }
 
-    let body_bytes = &resp.body;
+    let body_bytes: &[u8] = if head { &[] } else { &resp.body };
 
     if let Some(ref path) = output {
         let fd = io::open(os, path, OpenFlags::write()).await?;

@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::commands::CommandResult;
-use crate::os::{Kernel, Process};
+use crate::os::{Kernel, Process, Tasks};
 
 pub fn builtin_wait<'a>(
     _os: &'a dyn Kernel,
@@ -12,6 +12,7 @@ pub fn builtin_wait<'a>(
     Box::pin(async move {
         let mut last = 0;
         let jobs = std::mem::take(&mut proc.bg_jobs);
+        let _cancel = Tasks::new(jobs.iter().map(|job| job.abort_handle()).collect());
         for handle in jobs {
             let (code, stdout, stderr) = handle.await.unwrap_or((1, String::new(), String::new()));
             last = code;

@@ -510,6 +510,25 @@ fn max_inodes_symlink() {
 }
 
 #[test]
+fn failed_symlinks_preserve_inode_budget() {
+    let mut vfs = Vfs::new();
+    vfs.max_inodes = 3;
+    vfs.symlink("/link", "/target", LASH_UID, LASH_GID).unwrap();
+    for _ in 0..50 {
+        let error = vfs
+            .symlink("/link", "/other", LASH_UID, LASH_GID)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+    vfs.create_file("/after", 0o644, LASH_UID, LASH_GID)
+        .unwrap();
+    assert!(
+        vfs.create_file("/over_limit", 0o644, LASH_UID, LASH_GID)
+            .is_err()
+    );
+}
+
+#[test]
 fn max_inodes_mknod() {
     let mut vfs = Vfs::new();
     vfs.max_inodes = 2;
