@@ -22,6 +22,7 @@ mod readlink;
 mod rm;
 mod rmdir;
 mod sed;
+mod seq;
 mod sleep;
 mod sort;
 mod tail;
@@ -96,6 +97,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "rm" => |os, args| Box::pin(rm::cmd_rm(os, args)),
             "rmdir" => |os, args| Box::pin(rmdir::cmd_rmdir(os, args)),
             "sed" => |os, args| Box::pin(sed::cmd_sed(os, args)),
+            "seq" => |os, args| Box::pin(seq::cmd_seq(os, args)),
             "sleep" => |os, args| Box::pin(sleep::cmd_sleep(os, args)),
             "sort" => |os, args| Box::pin(sort::cmd_sort(os, args)),
             "tail" => |os, args| Box::pin(tail::cmd_tail(os, args)),

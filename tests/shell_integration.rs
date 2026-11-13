@@ -13608,3 +13608,57 @@ expect!(
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
 );
+
+// ── seq ─────────────────────────────────────────────────────────────
+
+expect!(seq_last_only, "seq 3", "1\n2\n3");
+expect!(seq_first_increment_last, "seq 10 -3 1", "10\n7\n4\n1");
+expect!(seq_decimal_step, "seq 0 0.1 0.3", "0.0\n0.1\n0.2\n0.3");
+expect!(seq_precision_ignores_last, "seq 1 1 2.50", "1\n2");
+expect!(seq_equal_width, "seq -w 8 10", "08\n09\n10");
+expect!(seq_equal_width_negative, "seq -w -10 5 0", "-10\n-05\n000");
+expect!(seq_equal_width_decimal, "seq -w 0.5 2.5 6", "0.5\n3.0\n5.5");
+expect!(seq_negative_operands, "seq -3 -1", "-3\n-2\n-1");
+expect!(seq_format, "seq -f 'n%03g%%' 1 2", "n001%\nn002%");
+expect!(
+    seq_big_integers_stay_exact,
+    "seq 99999999999999999999 100000000000000000001",
+    "99999999999999999999\n100000000000000000000\n100000000000000000001"
+);
+shell_test!(
+    seq_separator_ends_with_newline,
+    "seq -s ', ' 3; seq 5 1",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1, 2, 3\n");
+        assert_eq!(out.status, 0);
+    }
+);
+shell_test!(
+    seq_rejects_zero_increment_and_bad_numbers,
+    "seq 1 0 5; echo $?; seq abc; echo $?; seq -f %d 3; echo $?",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\n1\n1\n");
+        assert_eq!(out.stderr.lines().count(), 3, "stderr={:?}", out.stderr);
+    }
+);
+expect_output!(
+    seq_stops_quietly_when_the_reader_goes_away,
+    "seq 100000000000 | head -2",
+    "1\n2\n",
+    "",
+    0
+);
+
+#[test]
+fn seq_stops_at_the_deadline() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let out = shell.run("seq 100000000000 > /tmp/seq").await;
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("timeout"), "stderr={:?}", out.stderr);
+    }));
+}

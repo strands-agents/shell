@@ -9,7 +9,7 @@ mod getopts;
 mod hash;
 mod local;
 pub mod lua;
-mod printf;
+pub(crate) mod printf;
 mod pwd;
 mod read;
 mod set;
