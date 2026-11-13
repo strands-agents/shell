@@ -171,6 +171,8 @@ pub struct Process {
     pub(crate) errexit_ignored: u32,
     /// Set when a nounset error occurs during expansion.
     pub nounset_error: bool,
+    /// Set when the last pipeline stopped before dispatch because the deadline passed.
+    pub(crate) deadline_stop: bool,
     /// Set when `exit` ran inside a function called by a single-command pipeline.
     pub(crate) pending_exit: bool,
     /// An unsupported array aborts its function without requesting a shell exit.
@@ -185,6 +187,8 @@ pub struct Process {
     /// Each entry maps variable names to their previous value (None = was unset).
     local_scopes: Vec<HashMap<String, Option<String>>>,
     fds: HashMap<Fd, FdKind>,
+    /// Fds that read input fed from outside the shell, which can stay open.
+    outside_fds: std::collections::HashSet<Fd>,
     next_fd: Fd,
     pub bg_counter: u32,
     /// Offset within current arg for getopts combined flags (e.g. -abc).
@@ -363,6 +367,7 @@ impl Process {
             opt_pipefail: false,
             errexit_ignored: 0,
             nounset_error: false,
+            deadline_stop: false,
             pending_exit: false,
             refused_array: false,
             last_subst_status: None,
@@ -370,6 +375,7 @@ impl Process {
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
+            outside_fds: std::collections::HashSet::new(),
             next_fd: 3,
             bg_counter: 0,
             optoff: -1,
@@ -413,6 +419,7 @@ impl Process {
             opt_pipefail: false,
             errexit_ignored: 0,
             nounset_error: false,
+            deadline_stop: false,
             pending_exit: false,
             refused_array: false,
             last_subst_status: None,
@@ -420,6 +427,7 @@ impl Process {
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
+            outside_fds: std::collections::HashSet::new(),
             next_fd: 3,
             bg_counter: 0,
             optoff: -1,
@@ -523,6 +531,7 @@ impl Process {
             opt_pipefail: self.opt_pipefail,
             errexit_ignored: self.errexit_ignored,
             nounset_error: false,
+            deadline_stop: false,
             pending_exit: false,
             refused_array: false,
             last_subst_status: None,
@@ -530,6 +539,7 @@ impl Process {
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
+            outside_fds: std::collections::HashSet::new(),
             next_fd: 3,
             bg_counter: 0,
             optoff: self.optoff,
@@ -560,6 +570,7 @@ impl Process {
     /// Install a pipe: writer on `self[writer_fd]`, reader on returned Process-less FdReader.
     /// Use `set_channel_writer` / `set_channel_reader` for cross-process pipes.
     pub fn set_channel_reader(&mut self, fd: Fd, rx: mpsc::Receiver<Bytes>) {
+        self.outside_fds.remove(&fd);
         self.fds.insert(
             fd,
             FdKind::ChannelReader {
@@ -569,7 +580,20 @@ impl Process {
         );
     }
 
+    /// Like [`Self::set_channel_reader`], for input fed from outside the shell that can stay open.
+    /// A command that reads its whole input before it runs, such as `lua -e`, reads it as empty.
+    pub fn set_outside_reader(&mut self, fd: Fd, rx: mpsc::Receiver<Bytes>) {
+        self.set_channel_reader(fd, rx);
+        self.outside_fds.insert(fd);
+    }
+
+    /// Whether `fd` reads input set with [`Self::set_outside_reader`].
+    pub(crate) fn reads_outside_input(&self, fd: Fd) -> bool {
+        self.outside_fds.contains(&fd) && self.fds.contains_key(&fd)
+    }
+
     pub fn set_channel_writer(&mut self, fd: Fd, tx: mpsc::Sender<Bytes>) {
+        self.outside_fds.remove(&fd);
         self.fds.insert(
             fd,
             FdKind::ChannelWriter {
@@ -583,6 +607,7 @@ impl Process {
     pub(crate) fn inherit_channel_writer(&self, fd: Fd, target: &mut Process) -> bool {
         match self.fds.get(&fd) {
             Some(FdKind::ChannelWriter { tx, error_flag }) => {
+                target.outside_fds.remove(&fd);
                 target.fds.insert(
                     fd,
                     FdKind::ChannelWriter {
@@ -600,6 +625,11 @@ impl Process {
     /// Used to pass stdin across fork boundaries (e.g. CompoundPipeline).
     pub fn transfer_fd(&mut self, fd: Fd, target: &mut Process) {
         if let Some(kind) = self.fds.remove(&fd) {
+            if self.outside_fds.remove(&fd) {
+                target.outside_fds.insert(fd);
+            } else {
+                target.outside_fds.remove(&fd);
+            }
             target.fds.insert(fd, kind);
         }
     }
@@ -609,6 +639,11 @@ impl Process {
             .fds
             .remove(&from)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("bad fd {from}")))?;
+        if self.outside_fds.remove(&from) {
+            self.outside_fds.insert(to);
+        } else {
+            self.outside_fds.remove(&to);
+        }
         self.fds.insert(to, kind);
         Ok(())
     }
@@ -621,6 +656,7 @@ impl Process {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("bad fd {src}")))?
             .try_clone()
             .await?;
+        self.outside_fds.remove(&dst);
         self.fds.insert(dst, kind);
         Ok(())
     }
@@ -651,6 +687,7 @@ impl Process {
     }
 
     pub fn close(&mut self, fd: Fd) {
+        self.outside_fds.remove(&fd);
         self.fds.remove(&fd);
     }
 
