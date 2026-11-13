@@ -12116,6 +12116,23 @@ shell_test!(
 );
 
 expect!(date_percent_escape, "date '+%%Y 100%%'", "%Y 100%");
+expect!(date_d_epoch, "date -d @0", "Thu Jan  1 00:00:00 UTC 1970");
+expect!(
+    date_long_date_with_format,
+    "date -u --date='2024-01-15T10:30:45+05:30' '+%F %T %s'",
+    "2024-01-15 05:00:45 1705294845"
+);
+expect!(
+    date_d_relative,
+    "date -d '2024-01-31 +1 month' +%F",
+    "2024-03-02"
+);
+expect_streams!(
+    date_d_invalid,
+    "date -d xyz; echo \"status=$?\"",
+    "status=1\n",
+    "strands-shell: date: invalid date 'xyz'\n"
+);
 
 // ── sleep ───────────────────────────────────────────────────────────
 
