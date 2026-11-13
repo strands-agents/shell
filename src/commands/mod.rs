@@ -11,6 +11,7 @@ mod env;
 mod r#false;
 mod grep;
 mod head;
+mod hostname;
 mod jq;
 mod ln;
 mod ls;
@@ -85,6 +86,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "false" => |os, args| Box::pin(r#false::cmd_false(os, args)),
             "grep" => |os, args| Box::pin(grep::cmd_grep(os, args)),
             "head" => |os, args| Box::pin(head::cmd_head(os, args)),
+            "hostname" => |os, args| Box::pin(hostname::cmd_hostname(os, args)),
             "jq" => |os, args| Box::pin(jq::cmd_jq(os, args)),
             "ln" => |os, args| Box::pin(ln::cmd_ln(os, args)),
             "ls" => |os, args| Box::pin(ls::cmd_ls(os, args)),
