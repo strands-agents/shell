@@ -29,10 +29,10 @@ struct Operand {
 /// Parses `[+-]DIGITS[.DIGITS]` (or `.DIGITS`), the forms GNU seq takes at face value.
 fn parse_operand(arg: &str) -> Result<Operand, String> {
     let invalid = || format!("invalid floating point argument: '{arg}'");
-    let text = arg.trim_start().trim_start_matches('+');
+    let text = arg.trim_start();
     let (negative, unsigned) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
-        None => (false, text),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
     };
     let (int, frac) = unsigned.split_once('.').unwrap_or((unsigned, ""));
     let all_digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
@@ -46,7 +46,8 @@ fn parse_operand(arg: &str) -> Result<Operand, String> {
             .and_then(|d| d.checked_add(i128::from(b - b'0')))
             .ok_or_else(invalid)?;
     }
-    let mut width = text.len() as i64;
+    // A leading `+` is not printed, so it doesn't count toward the width.
+    let mut width = (unsigned.len() + usize::from(negative)) as i64;
     if unsigned.contains('.') {
         if frac.is_empty() {
             width -= 1; // `1.` prints as `1`
@@ -115,6 +116,10 @@ fn parse_format(fmt: &str) -> Result<Format, String> {
             } else {
                 break;
             }
+        }
+        // `%Lg` from C examples: the long double modifier changes nothing here.
+        if chars.peek() == Some(&'L') {
+            chars.next();
         }
         let conv = match chars.next() {
             Some(c @ ('e' | 'E' | 'f' | 'F' | 'g' | 'G')) => c,

@@ -13662,3 +13662,10 @@ fn seq_stops_at_the_deadline() {
         assert!(out.stderr.contains("timeout"), "stderr={:?}", out.stderr);
     }));
 }
+expect!(seq_format_long_double_modifier, "seq -f %Lg 2", "1\n2");
+expect!(
+    seq_plus_sign_is_not_printed,
+    "seq -w +5 10",
+    "05\n06\n07\n08\n09\n10"
+);
+expect_status!(seq_rejects_a_doubled_sign, "seq ++5", 1);
