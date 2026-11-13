@@ -13676,3 +13676,17 @@ shell_test!(
         assert_eq!(out.status, 1);
     }
 );
+expect_output!(
+    fold_counts_display_width,
+    "printf '日本語日本語\\n' | fold -w 4; printf 'e\\314\\201e\\314\\201e\\n' | fold -w 2",
+    "日本\n語日\n本語\ne\u{301}e\u{301}\ne\n",
+    "",
+    0
+);
+expect_output!(
+    fold_bytes_keeps_characters_whole,
+    "printf 'a\\303\\251\\n' | fold -b -w 2",
+    "a\né\n",
+    "",
+    0
+);

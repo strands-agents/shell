@@ -1,11 +1,12 @@
 use crate::prelude::*;
+use unicode_width::UnicodeWidthChar;
 
 const HELP: &str = "Usage: fold [OPTION]... [FILE]...
 Wrap input lines in each FILE, writing to standard output.
 With no FILE, or when FILE is -, read standard input.
 
 Options:
-  -b, --bytes         count bytes rather than columns
+  -b, --bytes         count bytes rather than columns (characters stay whole)
   -s, --spaces        break at spaces
   -w, --width=WIDTH   use WIDTH columns instead of 80";
 
@@ -17,8 +18,9 @@ struct Options {
     spaces: bool,
 }
 
-/// The column after `unit`, counting tabs, backspaces and carriage returns like GNU
-/// unless counting bytes.
+/// The column after `unit`. Like GNU fold in a UTF-8 locale, a character takes its
+/// display width (two for most CJK, none for a combining mark), and tabs, backspaces
+/// and carriage returns move the column, unless counting bytes.
 fn advance(column: usize, unit: &[u8], bytes: bool) -> usize {
     if bytes {
         return column + unit.len();
@@ -27,34 +29,33 @@ fn advance(column: usize, unit: &[u8], bytes: bool) -> usize {
         b"\x08" => column.saturating_sub(1),
         b"\r" => 0,
         b"\t" => column + TAB_WIDTH - column % TAB_WIDTH,
-        _ => column + 1,
+        _ => {
+            let width = std::str::from_utf8(unit)
+                .ok()
+                .and_then(|s| s.chars().next())
+                .and_then(UnicodeWidthChar::width);
+            column + width.unwrap_or(1)
+        }
     }
 }
 
-/// Splits a line into the units fold counts: bytes with `-b`, else UTF-8 characters,
-/// keeping each invalid byte on its own.
-fn units(line: &[u8], bytes: bool) -> Vec<&[u8]> {
-    if bytes {
-        return line.chunks(1).collect();
-    }
-    let mut units = Vec::with_capacity(line.len());
-    for chunk in line.utf8_chunks() {
+/// Splits a line into UTF-8 characters, keeping each invalid byte on its own, so a
+/// fold never splits a character, even with `-b`.
+fn units(line: &[u8]) -> impl Iterator<Item = &[u8]> {
+    line.utf8_chunks().flat_map(|chunk| {
         let valid = chunk.valid();
-        units.extend(
-            valid
-                .char_indices()
-                .map(|(i, c)| &valid.as_bytes()[i..i + c.len_utf8()]),
-        );
-        units.extend(chunk.invalid().chunks(1));
-    }
-    units
+        valid
+            .char_indices()
+            .map(move |(i, c)| &valid.as_bytes()[i..i + c.len_utf8()])
+            .chain(chunk.invalid().chunks(1))
+    })
 }
 
 /// Folds one line (without its newline) into `out`, following GNU fold's algorithm.
 fn fold_line(line: &[u8], opts: &Options, out: &mut Vec<u8>) {
     let mut held: Vec<&[u8]> = Vec::new();
     let mut column = 0;
-    for unit in units(line, opts.bytes) {
+    for unit in units(line) {
         loop {
             let next = advance(column, unit, opts.bytes);
             if next <= opts.width {
