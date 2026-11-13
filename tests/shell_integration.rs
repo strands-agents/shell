@@ -4988,6 +4988,232 @@ expect!(
     "/tmp/proj/bin"
 );
 
+// ── diff ────────────────────────────────────────────────────────────
+/// Writes `/tmp/df/a` and `/tmp/df/b`, which differ in a changed, a
+/// deleted and an added line, then `cd`s into `/tmp/df`.
+const DIFF_FILES: &str = "mkdir -p /tmp/df && cd /tmp/df && \
+    printf '1\\n2\\n3\\n4\\n5\\n6\\n7\\n8\\n9\\n' > a && \
+    printf '1\\nTWO\\n3\\n4\\n5\\n6\\n8\\n9\\n10\\n' > b; ";
+
+/// Writes two trees under `/tmp/dd` that hold a same file, a changed
+/// file, a file on each side only, and a subdirectory with a changed file.
+const DIFF_TREES: &str = "mkdir -p /tmp/dd/x/sub /tmp/dd/y/sub && cd /tmp/dd && \
+    echo s > x/same && echo s > y/same && echo old > x/f && echo new > y/f && \
+    echo o > x/onlyx && echo o > y/onlyy && echo a > x/sub/z && echo b > y/sub/z; ";
+
+macro_rules! diff_case {
+    ($name:ident, $setup:expr, $script:expr, $stdout:expr, $stderr:expr, $status:expr) => {
+        expect_output!(
+            $name,
+            &format!("{}{}", $setup, $script),
+            $stdout,
+            $stderr,
+            $status
+        );
+    };
+}
+
+diff_case!(diff_same_files, DIFF_FILES, "diff a a", "", "", 0);
+diff_case!(
+    diff_normal_format,
+    DIFF_FILES,
+    "diff a b",
+    "2c2\n< 2\n---\n> TWO\n7d6\n< 7\n9a9\n> 10\n",
+    "",
+    1
+);
+diff_case!(
+    diff_unified_format,
+    DIFF_FILES,
+    "diff -u a b | tail -n +3",
+    "@@ -1,9 +1,9 @@\n 1\n-2\n+TWO\n 3\n 4\n 5\n 6\n-7\n 8\n 9\n+10\n",
+    "",
+    0
+);
+diff_case!(
+    diff_unified_splits_distant_hunks,
+    DIFF_FILES,
+    "diff -U1 a b | tail -n +3",
+    "@@ -1,3 +1,3 @@\n 1\n-2\n+TWO\n 3\n@@ -6,4 +6,4 @@\n 6\n-7\n 8\n 9\n+10\n",
+    "",
+    0
+);
+diff_case!(
+    diff_unified_zero_context,
+    DIFF_FILES,
+    "diff --unified=0 a b | tail -n +3",
+    "@@ -2 +2 @@\n-2\n+TWO\n@@ -7 +6,0 @@\n-7\n@@ -9,0 +9 @@\n+10\n",
+    "",
+    0
+);
+diff_case!(
+    diff_unified_keeps_the_widest_context,
+    DIFF_FILES,
+    "diff -U0 -u a b | sed -n 3p",
+    "@@ -1,9 +1,9 @@\n",
+    "",
+    0
+);
+diff_case!(
+    diff_no_newline_at_end,
+    "cd /tmp && printf 'a\\nb' > p && printf 'a\\nc' > q; ",
+    "diff p q; diff -u p q | tail -n +3",
+    "2c2\n< b\n\\ No newline at end of file\n---\n> c\n\\ No newline at end of file\n\
+     @@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+c\n\\ No newline at end of file\n",
+    "",
+    0
+);
+diff_case!(
+    diff_brief,
+    DIFF_FILES,
+    "diff -q a b; echo $?; diff --brief a a; echo $?",
+    "Files a and b differ\n1\n0\n",
+    "",
+    0
+);
+diff_case!(
+    diff_binary_files,
+    "cd /tmp && printf 'a\\0' > p && printf 'b\\0' > q; ",
+    "diff p q",
+    "Binary files p and q differ\n",
+    "",
+    1
+);
+diff_case!(
+    diff_stdin_operand,
+    DIFF_FILES,
+    "printf '1\\n' | diff - a | head -1; echo same | diff - -",
+    "1a2,9\n",
+    "",
+    0
+);
+diff_case!(
+    diff_missing_file,
+    DIFF_FILES,
+    "diff a nope",
+    "",
+    "diff: nope: No such file or directory\n",
+    2
+);
+diff_case!(
+    diff_unknown_option,
+    DIFF_FILES,
+    "diff --bogus a b",
+    "",
+    "diff: unrecognized option '--bogus'\ndiff: Try 'diff --help' for more information.\n",
+    2
+);
+diff_case!(
+    diff_missing_operand,
+    DIFF_FILES,
+    "diff a",
+    "",
+    "diff: missing operand after 'a'\ndiff: Try 'diff --help' for more information.\n",
+    2
+);
+diff_case!(
+    diff_new_file_treats_absent_as_empty,
+    DIFF_FILES,
+    "diff -N nope a > out; echo $?; head -1 out",
+    "1\n0a1,9\n",
+    "",
+    0
+);
+diff_case!(
+    diff_recursive_stops_at_a_directory_loop,
+    DIFF_TREES,
+    "ln -s . x/sub/up && ln -s . y/sub/up && diff -r x/sub y/sub",
+    "diff -r x/sub/z y/sub/z\n1c1\n< a\n---\n> b\n",
+    "diff: x/sub/up: recursive directory loop\n",
+    2
+);
+diff_case!(
+    diff_file_against_directory,
+    DIFF_TREES,
+    "diff x/f y",
+    "1c1\n< old\n---\n> new\n",
+    "",
+    1
+);
+diff_case!(
+    diff_directories,
+    DIFF_TREES,
+    "diff x y",
+    "diff x/f y/f\n1c1\n< old\n---\n> new\nOnly in x: onlyx\nOnly in y: onlyy\n\
+     Common subdirectories: x/sub and y/sub\n",
+    "",
+    1
+);
+diff_case!(
+    diff_recursive,
+    DIFF_TREES,
+    "diff -rq x y; diff -r x/sub y/sub",
+    "Files x/f and y/f differ\nOnly in x: onlyx\nOnly in y: onlyy\nFiles x/sub/z and y/sub/z differ\n\
+     diff -r x/sub/z y/sub/z\n1c1\n< a\n---\n> b\n",
+    "",
+    1
+);
+diff_case!(
+    diff_recursive_new_file,
+    DIFF_TREES,
+    "diff -rN x y",
+    "diff -rN x/f y/f\n1c1\n< old\n---\n> new\ndiff -rN x/onlyx y/onlyx\n1d0\n< o\n\
+     diff -rN x/onlyy y/onlyy\n0a1\n> o\ndiff -rN x/sub/z y/sub/z\n1c1\n< a\n---\n> b\n",
+    "",
+    1
+);
+
+#[test]
+fn diff_unified_header_names_each_file_and_its_time() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run(&format!("{DIFF_FILES}diff -u a b | head -2"))
+            .await;
+        let lines: Vec<&str> = out.stdout.lines().collect();
+        assert_eq!(lines.len(), 2, "stdout: {:?}", out.stdout);
+        for (line, prefix) in lines.iter().zip(["--- a\t", "+++ b\t"]) {
+            let time = line
+                .strip_prefix(prefix)
+                .unwrap_or_else(|| panic!("{line:?}"));
+            // e.g. `2025-11-06 11:34:56.123456789 +0000`
+            assert_eq!(time.len(), 35, "{time:?}");
+            assert!(time.ends_with(" +0000"), "{time:?}");
+        }
+    }));
+}
+
+/// On a direct bind, host symlinks and missing paths come back from the
+/// host, not the in-memory VFS.
+#[cfg(unix)]
+#[test]
+fn diff_on_a_direct_bind_handles_loops_and_absent_files() {
+    let dir = TestDir::new("diff_direct_bind");
+    for side in ["x", "y"] {
+        std::fs::create_dir(dir.join(side)).unwrap();
+        std::fs::write(dir.join(side).join("f"), format!("{side}\n")).unwrap();
+        std::os::unix::fs::symlink(".", dir.join(side).join("self")).unwrap();
+    }
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/t")
+            .build()
+            .unwrap();
+        let out = shell.run("cd /t && diff -r x y").await;
+        assert_eq!(out.stdout, "diff -r x/f y/f\n1c1\n< x\n---\n> y\n");
+        assert_eq!(out.stderr, "diff: x/self: recursive directory loop\n");
+        assert_eq!(out.status, 2);
+        let out = shell.run("cd /t && diff -N x/f nope").await;
+        assert_eq!(out.stdout, "1d0\n< x\n");
+        assert_eq!(out.status, 1);
+        let out = shell.run("cd /t && diff x/f nope").await;
+        assert_eq!(out.stderr, "diff: nope: No such file or directory\n");
+        assert_eq!(out.status, 2);
+    }));
+}
+
 // ── type builtin extended ───────────────────────────────────────────
 shell_test!(
     type_function,

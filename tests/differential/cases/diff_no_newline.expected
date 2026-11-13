@@ -1,0 +1,13 @@
+status: 0
+stderr: empty
+--- stdout
+2c2
+< b
+\ No newline at end of file
+---
+> c
+@@ -1,2 +1,2 @@
+ a
+-b
+\ No newline at end of file
++c
