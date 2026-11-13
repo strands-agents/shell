@@ -2777,7 +2777,7 @@ expect!(
     "for b in : . [ alias break builtin cd command continue echo eval exec exit export \
      false find getopts hash help local lua printf pwd read readonly return set shift \
      shopt source test trap true type umask unalias unset wait xargs; do \
-     help -s \"$b\" >/dev/null || echo \"$b\"; done",
+     case $(help -s \"$b\") in \"$b: \"*) ;; *) echo \"$b\";; esac; done",
     ""
 );
 expect!(
@@ -2794,6 +2794,33 @@ expect!(
     help_command_skips_function,
     "cut() { echo shadowed; }; help cut | head -n 1",
     "Usage: cut OPTION [FILE]..."
+);
+
+expect!(
+    help_short_command_first_line,
+    "help -s cut",
+    "Usage: cut OPTION [FILE]..."
+);
+expect!(help_after_double_dash, "help -s -- cd", "cd: cd [DIR]");
+
+shell_test!(
+    help_command_not_traced,
+    "set -x; help -s cut",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout.trim(), "Usage: cut OPTION [FILE]...");
+        assert_eq!(out.stderr.trim(), "+ help -s cut");
+    }
+);
+
+shell_test!(
+    help_rejects_option,
+    "help -d cd",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 2);
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.stderr.trim(), "strands-shell: help: -d: invalid option");
+    }
 );
 
 shell_test!(

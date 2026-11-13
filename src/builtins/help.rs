@@ -15,9 +15,9 @@ struct Topic {
 /// Every shell builtin, in the order `help` lists them.
 const TOPICS: &[Topic] = &[
     Topic {
-        names: &[":", "true"],
+        names: &[":"],
         synopsis: ": [ARG...]",
-        description: "Do nothing and exit 0. `true` is the same command.",
+        description: "Do nothing and exit 0.",
     },
     Topic {
         names: &["."],
@@ -87,7 +87,7 @@ const TOPICS: &[Topic] = &[
     Topic {
         names: &["find"],
         synopsis: "find [PATH...] [EXPRESSION]",
-        description: "Search the directory trees under each PATH (default .) for files matching EXPRESSION.\nTests: -name, -iname, -path, -type, -size, -empty, -mtime, -mmin, -newer,\n-maxdepth, -mindepth. Operators: -not, -a, -o. Actions: -print, -exec.",
+        description: "Search the directory trees under each PATH (default .) for files matching EXPRESSION.\nTests: -name, -iname, -path, -type, -size, -empty, -mtime, -mmin, -newer,\n-maxdepth, -mindepth. Operators: -not, -a, -o. Actions: -print, -print0, -exec.",
     },
     Topic {
         names: &["getopts"],
@@ -102,7 +102,7 @@ const TOPICS: &[Topic] = &[
     Topic {
         names: &["help"],
         synopsis: "help [-s] [NAME...]",
-        description: "Print usage for each builtin NAME, or list the builtins and commands.\nFor a command that is not a builtin, print `NAME --help`.\n  -s  print only the synopsis",
+        description: "Print usage for each builtin NAME, or list the builtins and commands.\nFor a command that is not a builtin, print `NAME --help`.\n  -s  print only the synopsis (the first line for a command)",
     },
     Topic {
         names: &["local"],
@@ -127,7 +127,7 @@ const TOPICS: &[Topic] = &[
     Topic {
         names: &["read"],
         synopsis: "read [-r] [-p PROMPT] [NAME...]",
-        description: "Read a line from stdin and split it into the NAMEs (default REPLY).\n  -r         do not treat backslash as an escape\n  -p PROMPT  write PROMPT to stderr first",
+        description: "Read a line from stdin and split it into the NAMEs (default REPLY).\n  -r         accepted for compatibility; backslashes are always kept\n  -p PROMPT  write PROMPT to stderr first",
     },
     Topic {
         names: &["readonly"],
@@ -141,8 +141,8 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         names: &["set"],
-        synopsis: "set [-eux] [-o NAME] [--] [ARG...]",
-        description: "Set shell options or the positional parameters. `+` instead of `-` turns an option off.\nWith no arguments, print every variable.\n  -e       exit when a command fails (errexit)\n  -u       treat unset variables as an error (nounset)\n  -x       print commands before running them (xtrace)\n  -o NAME  set option NAME, such as pipefail; with no NAME, list the options\n  --       assign the remaining ARGs to the positional parameters",
+        synopsis: "set [-eux] [-o NAME] [ARG...]  or  set -- [ARG...]",
+        description: "Set shell options or the positional parameters. `+` instead of `-` turns an option off.\nWith no arguments, print every variable.\n  -e       exit when a command fails (errexit)\n  -u       treat unset variables as an error (nounset)\n  -x       print commands before running them (xtrace)\n  -o NAME  set option NAME, such as pipefail; with no NAME, list the options\n  --       assign the ARGs that follow to the positional parameters",
     },
     Topic {
         names: &["shift"],
@@ -151,7 +151,7 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         names: &["shopt"],
-        synopsis: "shopt [-pqsu] [OPTNAME...]",
+        synopsis: "shopt [-s | -u] [-q] [-p] [OPTNAME...]",
         description: "Set or print bash-style shell options, as commands that can be reused as input.\n  -s  enable each OPTNAME\n  -u  disable each OPTNAME\n  -q  print nothing; the status tells whether each OPTNAME is enabled\n  -p  print the options (the default)",
     },
     Topic {
@@ -167,7 +167,12 @@ const TOPICS: &[Topic] = &[
     Topic {
         names: &["trap"],
         synopsis: "trap [ACTION SIGNAL...]",
-        description: "Run ACTION when the shell receives SIGNAL, such as EXIT. `trap - SIGNAL` resets it.",
+        description: "Run ACTION when the shell exits. Only the EXIT signal is supported. `trap - EXIT` resets it.",
+    },
+    Topic {
+        names: &["true"],
+        synopsis: "true",
+        description: "Do nothing and exit 0.",
     },
     Topic {
         names: &["type"],
@@ -187,7 +192,7 @@ const TOPICS: &[Topic] = &[
     Topic {
         names: &["unset"],
         synopsis: "unset [-f | -v] NAME...",
-        description: "Remove each variable or function NAME.\n  -f  remove functions\n  -v  remove variables",
+        description: "Remove each variable NAME.\n  -f  remove functions instead\n  -v  remove variables (the default)",
     },
     Topic {
         names: &["wait"],
@@ -197,7 +202,7 @@ const TOPICS: &[Topic] = &[
     Topic {
         names: &["xargs"],
         synopsis: "xargs [-0] [-I STR] [-n N] [-d DELIM] [COMMAND [ARG...]]",
-        description: "Run COMMAND (default echo) with ARGs plus the words read from stdin.\n  -0        split input on NUL\n  -d DELIM  split input on DELIM\n  -I STR    run COMMAND once per line, replacing STR in ARGs with the line\n  -n N      pass at most N words per run",
+        description: "Run COMMAND (default echo) with ARGs plus the words read from stdin.\n  -0        split input on NUL\n  -d DELIM  split input on DELIM\n  -I STR    run COMMAND once per input word, replacing STR in ARGs with the word\n  -n N      pass at most N words per run",
     },
 ];
 
@@ -219,16 +224,27 @@ fn command_names() -> Vec<&'static str> {
 
 /// Print usage for the named builtins, or list every builtin and command.
 pub fn builtin_help<'a>(
-    os: &'a dyn Kernel,
+    _os: &'a dyn Kernel,
     proc: &'a mut Process,
     args: &'a [String],
 ) -> Pin<Box<dyn Future<Output = CommandResult> + 'a>> {
     Box::pin(async move {
-        let (short, names) = match args.first().map(String::as_str) {
-            Some("-s") => (true, &args[1..]),
-            Some("--") => (false, &args[1..]),
-            _ => (false, args),
-        };
+        let mut short = false;
+        let mut names = args;
+        while let Some(opt) = names.first().filter(|a| a.starts_with('-') && a.len() > 1) {
+            match opt.as_str() {
+                "-s" => short = true,
+                "--" => {
+                    names = &names[1..];
+                    break;
+                }
+                _ => {
+                    proc.err_msg(&format!("strands-shell: help: {opt}: invalid option"));
+                    return Ok(2);
+                }
+            }
+            names = &names[1..];
+        }
 
         if names.is_empty() {
             let mut w = io::stdout()?;
@@ -261,19 +277,23 @@ pub fn builtin_help<'a>(
                         wprintln!(w, "    {}", line)?;
                     }
                 }
-            } else if crate::commands::lookup(name).is_some()
-                || crate::command_fallback::serves(os, name)
-            {
-                // Run `NAME --help` without the shell's functions and aliases, so
-                // neither can shadow the command.
+            } else if crate::commands::lookup(name).is_some() {
+                // Run `NAME --help` without the shell's functions, aliases, or
+                // tracing, so none of them can shadow or add to its output.
                 let mut sub = proc.fork();
                 sub.depth += 1;
                 sub.capture = true;
+                sub.opt_xtrace = false;
                 sub.functions = Default::default();
                 sub.aliases = Default::default();
-                let line = format!("{name} --help");
+                let line = format!("{} --help", super::xargs::shell_quote(name));
                 let (exit, _) = Box::pin(crate::exec::execute(io::kernel(), &mut sub, &line)).await;
-                w.write_all(sub.captured_output.as_bytes()).await?;
+                let first_line = short
+                    .then(|| sub.captured_output.lines().next())
+                    .flatten()
+                    .map(|line| format!("{line}\n"));
+                let output = first_line.as_deref().unwrap_or(&sub.captured_output);
+                w.write_all(output.as_bytes()).await?;
                 if let Some(ew) = ew.as_mut() {
                     ew.write_all(sub.captured_stderr.as_bytes()).await?;
                 }
