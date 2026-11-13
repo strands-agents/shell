@@ -124,11 +124,30 @@ fn mime_from_extension(path: &str) -> Option<&'static str> {
 
 // ── Tool definitions ────────────────────────────────────────────────
 
+/// Description of the `shell` tool: the dialect, the registered commands,
+/// and the session state that persists between calls.
+fn shell_tool_description() -> String {
+    let commands = crate::commands::names().join(", ");
+    format!(
+        "Runs a command in Strands Shell, an in-process virtual shell. \
+         The dialect is POSIX sh, not bash: there is no `[[ ]]`, arrays, \
+         process substitution `<(...)`, brace expansion `{{a,b}}`, here-strings `<<<`, \
+         `(( ))`, or `$'...'`; use `[ ]`, `$(( ))`, and `case` instead. \
+         Commands: {commands}; plus sh builtins such as cd, export, set, read, printf, \
+         test, find, xargs, and lua. The host may provide more; check with `command -v NAME`. \
+         State carries over between calls: working directory, environment and exported \
+         variables, shell options (`set`), functions, and aliases. \
+         Returns two text content blocks: content[0].text is stdout, content[1].text is \
+         stderr (both always present, empty string when a stream produced nothing). \
+         The exit code is in metadata.exit_code."
+    )
+}
+
 fn tool_list() -> Value {
     json!({"tools": [
         {
             "name": "shell",
-            "description": "Runs a command in the strands-shell virtual shell. Returns two text content blocks: content[0].text is stdout, content[1].text is stderr (both always present, empty string when a stream produced nothing). The exit code is in metadata.exit_code.",
+            "description": shell_tool_description(),
             "inputSchema": {
                 "type": "object",
                 "properties": {

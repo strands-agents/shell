@@ -116,3 +116,11 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
 pub fn iter() -> inventory::iter<CommandEntry> {
     inventory::iter::<CommandEntry>
 }
+
+/// Names of all registered commands, sorted.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = iter().into_iter().map(|c| c.name).collect();
+    names.sort_unstable();
+    names
+}

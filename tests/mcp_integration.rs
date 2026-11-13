@@ -106,6 +106,27 @@ fn mcp_tools_list() {
     assert_eq!(names.len(), 4);
 }
 
+#[test]
+fn mcp_shell_description_names_dialect_commands_and_state() {
+    let r = mcp_method(2, "tools/list", json!({}));
+    let tools = r["result"]["tools"].as_array().expect("tools array");
+    let shell = tools.iter().find(|t| t["name"] == "shell").unwrap();
+    let desc = shell["description"].as_str().unwrap();
+
+    assert!(desc.contains("POSIX sh, not bash"), "{desc}");
+    for bashism in ["`[[ ]]`", "arrays", "`<(...)`", "`{a,b}`", "`<<<`"] {
+        assert!(desc.contains(bashism), "missing {bashism}: {desc}");
+    }
+    let commands = strands_shell::commands::names();
+    assert!(!commands.is_empty());
+    assert!(
+        desc.contains(&format!("Commands: {};", commands.join(", "))),
+        "{desc}"
+    );
+    assert!(desc.contains("State carries over between calls"), "{desc}");
+    assert!(desc.contains("metadata.exit_code"), "{desc}");
+}
+
 // ── shell tool ──────────────────────────────────────────────────────
 
 #[test]
