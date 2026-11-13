@@ -181,6 +181,8 @@ async fn cmd_fold(os: &dyn Kernel, args: &[String]) -> CommandResult {
     }
     let mut w = io::stdout()?;
     let mut status = 0;
+    // Stderr is taken once, on the first error, so later errors are reported too.
+    let mut stderr = None;
     for path in &files {
         let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if path == "-" {
             Box::new(io::stdin()?)
@@ -188,7 +190,10 @@ async fn cmd_fold(os: &dyn Kernel, args: &[String]) -> CommandResult {
             match io::open(os, path, OpenFlags::read()).await {
                 Ok(fd) => Box::new(io::take_reader(fd)?),
                 Err(e) => {
-                    let mut ew = io::stderr()?;
+                    let ew = match &mut stderr {
+                        Some(ew) => ew,
+                        None => stderr.insert(io::stderr()?),
+                    };
                     wprintln!(ew, "fold: {path}: {e}")?;
                     status = 1;
                     continue;

@@ -13662,3 +13662,17 @@ shell_test!(
         assert_eq!(out.status, 1);
     }
 );
+shell_test!(
+    fold_reports_each_missing_file_and_continues,
+    "printf 'abc\\n' > /tmp/f1; fold -w 2 /tmp/nope /tmp/nope2 /tmp/f1",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "ab\nc\n");
+        assert!(out.stderr.contains("/tmp/nope:"), "stderr={:?}", out.stderr);
+        assert!(
+            out.stderr.contains("/tmp/nope2:"),
+            "stderr={:?}",
+            out.stderr
+        );
+        assert_eq!(out.status, 1);
+    }
+);
