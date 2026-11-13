@@ -13608,3 +13608,50 @@ expect!(
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
 );
+
+// ── paste ───────────────────────────────────────────────────────────
+
+expect_output!(
+    paste_joins_files_side_by_side,
+    "printf '1\\n2\\n3\\n' > /tmp/p1; printf 'a\\nb\\n' > /tmp/p2; paste /tmp/p1 /tmp/p2",
+    "1\ta\n2\tb\n3\t\n",
+    "",
+    0
+);
+expect_output!(
+    paste_cycles_the_delimiter_list,
+    "printf '1\\n2\\n' > /tmp/p1; paste -d ',;' /tmp/p1 /tmp/p1 /tmp/p1 /tmp/p1",
+    "1,1;1,1\n2,2;2,2\n",
+    "",
+    0
+);
+expect_output!(
+    paste_serial,
+    "printf '1\\n2\\n3\\n' > /tmp/p1; paste -s /tmp/p1; paste -s -d ',;' /tmp/p1",
+    "1\t2\t3\n1,2;3\n",
+    "",
+    0
+);
+expect_output!(
+    paste_dashes_share_stdin,
+    "printf 'x\\ny\\nz\\n' | paste -d: - -",
+    "x:y\nz:\n",
+    "",
+    0
+);
+expect_output!(
+    paste_delimiter_escapes,
+    "printf '1\\n' > /tmp/p1; paste -d '\\n\\0\\\\' /tmp/p1 /tmp/p1 /tmp/p1 /tmp/p1",
+    "1\n11\\1\n",
+    "",
+    0
+);
+shell_test!(
+    paste_rejects_a_trailing_backslash,
+    "echo a | paste -d '\\' - -",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert!(!out.stderr.is_empty());
+        assert_eq!(out.status, 1);
+    }
+);
