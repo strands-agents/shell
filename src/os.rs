@@ -230,6 +230,8 @@ pub struct Process {
     host_writes: HostWrites,
     /// The owner that aborts this process's background jobs, shared with its forks.
     background_owner: std::sync::Weak<TaskList>,
+    /// Set in a background job, whose pipeline stages abort with it.
+    pub(crate) in_background_job: bool,
 }
 
 /// A task that writes a host file after the last writer of its channel closes.
@@ -388,6 +390,7 @@ impl Process {
             umask: 0o022,
             host_writes: Default::default(),
             background_owner: std::sync::Weak::new(),
+            in_background_job: false,
         }
     }
 
@@ -436,6 +439,7 @@ impl Process {
             umask: 0o022,
             host_writes: Default::default(),
             background_owner: std::sync::Weak::new(),
+            in_background_job: false,
         }
     }
 
@@ -544,6 +548,7 @@ impl Process {
             umask: self.umask,
             host_writes: self.host_writes.clone(),
             background_owner: self.background_owner.clone(),
+            in_background_job: self.in_background_job,
         }
     }
 

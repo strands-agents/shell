@@ -14,20 +14,28 @@ use crate::os::{
 };
 use crate::parser::{self, Connector, Item, Redirect, Word, WordPart};
 
-/// Foreground tasks that abort on drop when the kernel has a command fallback.
-struct ForegroundTasks(Option<Vec<tokio::task::AbortHandle>>);
+/// Foreground tasks that abort on drop when the kernel has a command fallback or the
+/// process is a background job.
+struct ForegroundTasks {
+    handles: Option<Vec<tokio::task::AbortHandle>>,
+    concurrent_stderr: bool,
+}
 
 impl ForegroundTasks {
-    fn new(os: &dyn Kernel) -> Self {
-        Self(os.command_fallback().map(|_| Vec::new()))
+    fn new(os: &dyn Kernel, proc: &Process) -> Self {
+        let concurrent_stderr = os.command_fallback().is_some();
+        Self {
+            handles: (concurrent_stderr || proc.in_background_job).then(Vec::new),
+            concurrent_stderr,
+        }
     }
 
     fn concurrent_stderr(&self) -> bool {
-        self.0.is_some()
+        self.concurrent_stderr
     }
 
     fn own<T>(&mut self, handle: &tokio::task::JoinHandle<T>) {
-        if let Some(handles) = &mut self.0 {
+        if let Some(handles) = &mut self.handles {
             handles.push(handle.abort_handle());
         }
     }
@@ -35,7 +43,7 @@ impl ForegroundTasks {
 
 impl Drop for ForegroundTasks {
     fn drop(&mut self) {
-        for handle in self.0.iter().flatten() {
+        for handle in self.handles.iter().flatten() {
             handle.abort();
         }
     }
@@ -2048,7 +2056,7 @@ async fn run_capturing_status(
                     // The stage's refusal must not mask an exit in a later function.
                     proc.refused_array = false;
                     let (tx, rx) = os::pipe(64);
-                    let mut tasks = ForegroundTasks::new(os.as_ref());
+                    let mut tasks = ForegroundTasks::new(os.as_ref(), proc);
                     let handle = tokio::task::spawn_local(async move {
                         if !captured.is_empty() {
                             let _ = tx.send(Bytes::from(captured.into_bytes())).await;
@@ -2192,6 +2200,7 @@ async fn execute_command_line_inner(
                 let os2 = os.clone();
                 let mut sub = proc.fork();
                 sub.isolate_host_writes();
+                sub.in_background_job = true;
                 let item = item.clone();
                 proc.bg_counter += 1;
                 let pid = proc.bg_counter;
@@ -2300,7 +2309,7 @@ async fn execute_item(
             let os2 = os.clone();
 
             let (tx, rx) = os::pipe(64);
-            let mut tasks = ForegroundTasks::new(os.as_ref());
+            let mut tasks = ForegroundTasks::new(os.as_ref(), proc);
             let handle = tokio::task::spawn_local(async move {
                 let (output, result) =
                     Box::pin(run_capturing_status(os2, &mut sub, &compound_cl)).await;
@@ -3215,7 +3224,7 @@ async fn run_pipeline(
     capture: bool,
 ) -> (i32, String) {
     let len = pipeline.len();
-    let mut tasks = ForegroundTasks::new(os.as_ref());
+    let mut tasks = ForegroundTasks::new(os.as_ref(), shell_proc);
 
     if shell_proc.max_pipeline > 0 && len > shell_proc.max_pipeline {
         shell_proc.err_msg("strands-shell: pipeline too long");
