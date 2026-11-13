@@ -22,7 +22,8 @@ Summarize the space used by each FILE, recursively for directories.
 The virtual filesystem does not allocate blocks, so the space a file uses is
 its apparent size: the number of bytes in it. Like GNU du --apparent-size,
 totals add up bytes and are rounded up to whole 1K blocks only when printed.
-Symbolic links are not followed.";
+Symbolic links are not followed, except in a directory bound directly from
+the host, where the kernel reports a link as the file it points to.";
 
 #[derive(Clone, Copy)]
 enum Unit {
@@ -65,7 +66,7 @@ async fn cmd_du(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut max_depth = None;
     let mut unit = Unit::Kilo;
     let mut paths = Vec::new();
-    let mut e = io::stderr()?;
+    // Stderr is taken only after parsing, so the shell can report a bad option.
     while let Some(arg) = parser.next()? {
         match arg {
             Short('a') | Long("all") => all = true,
@@ -76,8 +77,8 @@ async fn cmd_du(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 match val.parse::<usize>() {
                     Ok(n) => max_depth = Some(n),
                     Err(_) => {
-                        let msg = format!("invalid maximum depth ‘{val}’");
-                        wprintln!(e, "{}", usage_error(&msg))?;
+                        let msg = format!("invalid maximum depth '{val}'");
+                        wprintln!(io::stderr()?, "{}", usage_error(&msg))?;
                         return Ok(1);
                     }
                 }
@@ -95,6 +96,7 @@ async fn cmd_du(os: &dyn Kernel, args: &[String]) -> CommandResult {
             _ => return Err(arg.unexpected().into()),
         }
     }
+    let mut e = io::stderr()?;
     if summarize {
         if all {
             let msg = "cannot both summarize and show all entries";
@@ -163,12 +165,9 @@ fn walk<'a>(
             match io::list_dir(os, path).await {
                 Ok(mut entries) => {
                     entries.sort_by(|a, b| a.name.cmp(&b.name));
+                    let base = path.trim_end_matches('/');
                     for entry in entries {
-                        let child = if path.ends_with('/') {
-                            format!("{path}{}", entry.name)
-                        } else {
-                            format!("{path}/{}", entry.name)
-                        };
+                        let child = format!("{base}/{}", entry.name);
                         size += walk(os, &child, depth + 1, opts, out).await?;
                     }
                 }

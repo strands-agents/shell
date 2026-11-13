@@ -4487,11 +4487,54 @@ shell_test!(
              Try 'du --help' for more information.\n\
              du: warning: summarizing conflicts with --max-depth=1\n\
              Try 'du --help' for more information.\n\
-             du: invalid maximum depth ‘x’\n\
+             du: invalid maximum depth 'x'\n\
              Try 'du --help' for more information.\n"
         );
     }
 );
+shell_test!(
+    du_reports_unknown_options,
+    "du --foo; echo $?; du -x /tmp; du -d",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\n");
+        assert!(
+            out.stderr.contains("du: invalid option '--foo'"),
+            "{}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("du: invalid option '-x'"),
+            "{}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("du: missing argument for option '-d'"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    du_joins_children_under_trailing_slashes,
+    &format!("{DU_TREE}; du du/a//"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\tdu/a/b\n2\tdu/a//\n");
+    }
+);
+
+// A directory symlink on a direct bind is followed because the kernel's
+// lstat follows links there (#254); GNU counts only the link.
+#[cfg(unix)]
+#[test]
+#[ignore = "lstat follows symlinks on direct binds (#254)"]
+fn du_does_not_follow_directory_symlinks_on_a_direct_bind() {
+    let dir = ls_fixture("du_symlink", &[]);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::os::unix::fs::symlink("..", dir.join("d/up")).unwrap();
+    let out = run_ls_fixture(&dir, "du -ab /fx");
+    assert!(out.stdout.contains("2\t/fx/d/up\n"), "{}", out.stdout);
+    assert!(!out.stdout.contains("/fx/d/up/"), "{}", out.stdout);
+}
 
 #[cfg(unix)]
 #[test]
