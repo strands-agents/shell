@@ -181,6 +181,11 @@ async fn run_script(
         };
         return run_sourced(os, proc, command, "-c", arg0, args).await;
     }
+    if script_path.starts_with('-') {
+        // An option is not a script path, so `sh --help` is not looked up as a file.
+        proc.err_msg(&format!("{}: {script_path}: invalid option", proc.arg0));
+        return 2;
+    }
     let fd = match os.open(proc, script_path, OpenFlags::read()).await {
         Ok(fd) => fd,
         Err(e) => {
