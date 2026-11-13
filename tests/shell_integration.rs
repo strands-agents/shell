@@ -2898,6 +2898,155 @@ expect_streams!(
     ""
 );
 
+// ── Stderr of a compound piped into a command ───────────────────────
+
+expect_streams!(
+    compound_pipe_for_stderr,
+    "for i in 1; do echo out; echo err >&2; done | cat",
+    "out\n",
+    "err\n"
+);
+expect_streams!(
+    compound_pipe_if_stderr,
+    "if true; then echo e >&2; fi | cat",
+    "",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_while_no_output,
+    "while false; do :; done | cat",
+    "",
+    ""
+);
+expect_streams!(
+    compound_pipe_tail_stderr_redirect,
+    "{ echo o; echo e >&2; } | cat 2>/dev/null",
+    "o\n",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_tail_stdout_redirect,
+    "{ echo o; echo e >&2; } | cat >/dev/null",
+    "",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_negated_stderr,
+    "! { echo e >&2; false; } | cat; echo \"rc=$?\"",
+    "rc=1\n",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_pipefail_stderr,
+    "{ echo off >&2; exit 3; } | cat; echo $?; \
+     set -o pipefail; { echo on >&2; exit 3; } | cat; echo $?; \
+     f() { return 4; }; { echo tail >&2; exit 3; } | f; echo $?",
+    "0\n3\n4\n",
+    "off\non\ntail\n"
+);
+expect_streams!(
+    compound_pipe_pipefail_return_and_negation_stderr,
+    "set -o pipefail; f() { { echo ret >&2; return 5; } | cat; }; f; echo $?; \
+     ! { echo neg >&2; false; } | cat; echo $?",
+    "5\n0\n",
+    "ret\nneg\n"
+);
+expect_streams!(
+    compound_pipe_tail_function_exit_preserves_stderr,
+    "set -o pipefail; f() { exit 7; }; \
+     { echo producer >&2; exit 3; } | f; echo \"pipe $?\"; echo after",
+    "pipe 7\nafter\n",
+    "producer\n"
+);
+expect_streams!(
+    compound_pipe_in_substitution_stderr,
+    "x=$({ echo o; echo e >&2; } | cat); echo \"x=$x\"",
+    "x=o\n",
+    "e\n"
+);
+expect_streams!(
+    compound_pipe_stderr_many_lines,
+    "i=0; while [ $i -lt 2000 ]; do i=$((i+1)); echo $i >&2; done | cat; \
+     i=0; while [ $i -lt 2000 ]; do i=$((i+1)); echo $i >&2; done | cat",
+    "",
+    format!(
+        "{0}{0}",
+        (1..=2000).map(|i| format!("{i}\n")).collect::<String>()
+    )
+);
+expect_streams!(
+    compound_pipe_stderr_inside_pipeline_stage,
+    "f() { i=0; while [ $i -lt 2000 ]; do i=$((i+1)); echo $i >&2; done | cat; }; f | cat; f | cat",
+    "",
+    format!(
+        "{0}{0}",
+        (1..=2000).map(|i| format!("{i}\n")).collect::<String>()
+    )
+);
+
+#[test]
+fn compound_pipe_stderr_timeout_reported_once() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        let out = shell
+            .run("{ while true; do echo x >&2; done; } | head -1")
+            .await;
+        assert_eq!(
+            out.stderr.matches("execution timeout exceeded").count(),
+            1,
+            "stderr: {:?}",
+            out.stderr.get(out.stderr.len().saturating_sub(200)..)
+        );
+        assert!(out.stderr.starts_with("x\n"));
+    }));
+}
+
+#[test]
+fn compound_pipe_stderr_from_cli() {
+    let dir = TestDir::new("compound_pipe_stderr_cli");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg("{ echo o; echo e >&2; } | cat; f() { if true; then echo e2 >&2; fi | cat; }; f | cat")
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "o\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "e\ne2\n");
+    assert!(out.status.success());
+}
+
+// ── Subshell stderr in captured paths ───────────────────────────────
+
+expect_streams!(subshell_stderr_plain, "( echo e >&2 )", "", "e\n");
+expect_streams!(
+    subshell_stderr_in_substitution,
+    "x=$( (echo e >&2) ); echo \"[$x]\"",
+    "[]\n",
+    "e\n"
+);
+expect_streams!(
+    subshell_command_stderr_in_substitution,
+    "x=$( (cd /nope) ); echo \"[$x]\"",
+    "[]\n",
+    CD_NOPE
+);
+expect_streams!(
+    subshell_stderr_with_stdout_to_file,
+    "( echo o; echo e >&2 ) >/tmp/out; cat /tmp/out",
+    "o\n",
+    "e\n"
+);
+expect_streams!(
+    nested_subshell_stderr_in_substitution,
+    "x=$( ( (echo e >&2); echo o ) ); echo \"$x\"",
+    "o\n",
+    "e\n"
+);
+
 // ── Heredoc expansion ───────────────────────────────────────────────
 
 #[test]
@@ -6603,6 +6752,150 @@ expect!(
     "1\n2\nend"
 );
 
+// ── exec: status of assignment-only commands ───────────────────────
+expect!(assign_subst_false_status, "x=$(false); echo $?", "1");
+expect!(assign_subst_exit_status, "x=$(exit 3); echo $?", "3");
+expect!(assign_backtick_false_status, "x=`false`; echo $?", "1");
+expect!(
+    assign_quoted_subst_false_status,
+    "x=\"$(false)\"; echo $?",
+    "1"
+);
+expect!(
+    assign_subst_last_assignment_wins,
+    "x=$(true) y=$(exit 4); echo $?",
+    "4"
+);
+expect!(
+    assign_subst_with_redirect_status,
+    "x=$(false) >/dev/null; echo $?",
+    "1"
+);
+expect!(lone_subst_status, "$(false); echo $?", "1");
+expect!(assign_subst_parse_error_status, "x=$(fi); echo $?", "1");
+expect!(
+    assign_arith_subst_status,
+    "x=$(( $(exit 3) + 1 )); echo $?",
+    "3"
+);
+expect!(
+    assign_subst_then_empty_subst_word_status,
+    "x=$(false) $(true); echo $?",
+    "1"
+);
+expect!(
+    assign_subst_or_fires,
+    "out=$(false) || echo failed",
+    "failed"
+);
+expect!(
+    assign_subst_and_skips,
+    "x=$(false) && echo no || echo yes",
+    "yes"
+);
+expect!(
+    assign_subst_if_not_fires,
+    "if ! out=$(false); then echo neg; fi",
+    "neg"
+);
+expect!(
+    assign_subst_errexit_aborts,
+    "(set -e; x=$(false); echo unreachable); echo $?",
+    "1"
+);
+expect!(
+    assign_subst_pipefail_status,
+    "set -o pipefail; x=$(false | true); echo $?",
+    "1"
+);
+expect_output!(
+    assign_subst_pipefail_errexit_aborts,
+    "set -euo pipefail; x=$(false | true); echo unreachable",
+    "",
+    "",
+    1
+);
+expect!(
+    assign_subst_nested_status,
+    "x=$(y=$(false); echo $?); echo $x $?",
+    "1 0"
+);
+expect!(
+    assign_subst_subshell_status,
+    "x=$( (exit 7) ); echo $?",
+    "7"
+);
+expect!(
+    assign_subst_function_return_status,
+    "x=$(f() { return 3; }; f); echo $?",
+    "3"
+);
+expect!(
+    assign_subst_in_function,
+    "f() { x=$(exit 5); echo $?; }; f",
+    "5"
+);
+expect!(
+    assign_subst_in_loop,
+    "for i in 1 2; do x=$(exit $i); echo $?; done",
+    "1
+2"
+);
+expect!(assign_subst_true_status, "false; x=$(true); echo $?", "0");
+expect!(assign_empty_status, "x=; echo $?", "0");
+expect!(assign_empty_after_false_status, "false; x=; echo $?", "0");
+expect!(
+    assign_plain_var_after_false_status,
+    "false; x=$y; echo $?",
+    "0"
+);
+expect!(
+    local_subst_false_status,
+    "f() { local x=$(false); echo $?; }; f",
+    "0"
+);
+expect!(export_subst_false_status, "export x=$(false); echo $?", "0");
+expect!(
+    assign_subst_next_assignment_resets,
+    "x=$(false); y=$(true); echo $?",
+    "0"
+);
+expect!(
+    assign_subst_last_substitution_true,
+    "x=$(false)$(true); echo $?",
+    "0"
+);
+expect!(
+    assign_subst_last_substitution_false,
+    "x=$(true)$(false); echo $?",
+    "1"
+);
+expect!(
+    assign_subst_prefix_true_command,
+    "x=$(false) true; echo $?",
+    "0"
+);
+expect!(
+    assign_subst_prefix_false_command,
+    "x=$(true) false; echo $?",
+    "1"
+);
+expect!(
+    subst_in_case_word_status,
+    "case $(exit 3) in *) esac; echo $?",
+    "0"
+);
+expect!(
+    subst_in_for_list_status,
+    "for i in $(exit 3); do :; done; echo $?",
+    "0"
+);
+expect!(
+    subst_in_command_arg_status,
+    "echo $(exit 3) >/dev/null; echo $?",
+    "0"
+);
+
 // ── exec: shebang / script execution ──────────────────────────────
 expect!(
     script_shebang_source,
@@ -7390,6 +7683,74 @@ fn stdout_max_output_truncate_multibyte() {
     }));
 }
 
+// ── captured output with invalid UTF-8 keeps its valid parts ───────
+
+fn invalid_utf8_run(tag: &str, max_output: usize, cmd: &str) -> strands_shell::Output {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new(&format!("lsh_invalid_utf8_{tag}"));
+        std::fs::write(dir.join("bin"), b"ok\xffbad\n").unwrap();
+        let mut shell = Shell::builder()
+            .max_output(max_output)
+            .bind_direct(dir.to_str().unwrap(), "/g")
+            .build()
+            .unwrap();
+        shell.run(cmd).await
+    }))
+}
+
+#[test]
+fn subst_invalid_utf8_is_replaced_not_dropped() {
+    let out = invalid_utf8_run(
+        "subst",
+        0,
+        "x=$(cat /g/bin); printf '[%s]\\n' \"$x\"; echo tail",
+    );
+    assert_eq!(out.stdout, "[ok\u{FFFD}bad]\ntail\n");
+    assert_eq!(out.status, 0);
+    let out = invalid_utf8_run("pipe", 0, "x=$(cat /g/bin | cat); printf '[%s]\\n' \"$x\"");
+    assert_eq!(out.stdout, "[ok\u{FFFD}bad]\n");
+}
+
+#[test]
+fn run_output_invalid_utf8_is_replaced_not_dropped() {
+    let out = invalid_utf8_run("run", 0, "cat /g/bin; echo tail");
+    assert_eq!(out.stdout, "ok\u{FFFD}bad\ntail\n");
+    let out = invalid_utf8_run("runpipe", 0, "cat /g/bin | cat; echo tail");
+    assert_eq!(out.stdout, "ok\u{FFFD}bad\ntail\n");
+    let out = invalid_utf8_run("runerr", 0, "cat /g/bin >&2; echo tail");
+    assert_eq!(out.stdout, "tail\n");
+    assert_eq!(out.stderr, "ok\u{FFFD}bad\n");
+}
+
+#[test]
+fn invalid_utf8_bytes_stay_raw_in_pipes_and_files() {
+    let out = invalid_utf8_run(
+        "raw",
+        0,
+        "cat /g/bin | wc -c; cat /g/bin > /g/out; wc -c < /g/out",
+    );
+    let counts: Vec<&str> = out.stdout.split_whitespace().collect();
+    assert_eq!(counts, ["7", "7"]);
+}
+
+#[test]
+fn invalid_utf8_capture_still_enforces_max_output() {
+    // Over-limit output is still dropped as before. That drop is silent,
+    // which is pre-existing behaviour and not something this test pins.
+    let out = invalid_utf8_run("limit", 4, "x=$(cat /g/bin); echo \"[$x]\"");
+    assert_eq!(out.stdout, "[]\n");
+    let out = invalid_utf8_run("limitrun", 4, "cat /g/bin");
+    assert_eq!(out.stdout, "");
+
+    // The raw bytes fit, but replacement characters expand stdout past the
+    // limit, so the post-conversion check truncates and reports the overflow.
+    let out = invalid_utf8_run("expandedlimit", 7, "cat /g/bin");
+    assert_eq!(out.stdout, "ok\u{FFFD}ba");
+    assert_eq!(out.status, 1);
+    assert!(out.stderr.contains("output size limit exceeded"));
+}
+
 // ── exec.rs coverage: exit inside function ─────────────────────────
 
 expect_status!(func_exit_code, "f() { exit 42; }; f", 42);
@@ -7636,6 +7997,38 @@ fn builder_bind_direct_readonly_host() {
         assert_eq!(out.stdout.trim(), "ro_direct");
         let out2 = shell.run("echo x > /mnt/dro/newfile").await;
         assert_ne!(out2.status, 0);
+    }));
+}
+
+// Uses std::os::unix::fs::symlink to plant a host symlink
+#[cfg(unix)]
+#[test]
+fn ln_force_keeps_direct_bind_files_when_linking_fails() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_ln_force_direct");
+        std::fs::write(dir.join("old"), "old").unwrap();
+        std::fs::write(dir.join("plain"), "plain").unwrap();
+        std::os::unix::fs::symlink("old", dir.join("link")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/mnt/w")
+            .build()
+            .unwrap();
+        let out = shell
+            .run("cd /mnt/w; ln -sf missing link; ln -sf missing plain")
+            .await;
+        assert_ne!(out.status, 0);
+        assert!(!out.stderr.contains("invalid option"), "{}", out.stderr);
+        let out = shell.run("cd /mnt/w; ln -sf plain old").await;
+        assert_ne!(out.status, 0);
+        assert!(!out.stderr.contains("invalid option"), "{}", out.stderr);
+        assert!(!out.stderr.contains("same file"), "{}", out.stderr);
+        assert_eq!(std::fs::read_to_string(dir.join("old")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(dir.join("plain")).unwrap(), "plain");
+        assert_eq!(
+            std::fs::read_link(dir.join("link")).unwrap().to_str(),
+            Some("old")
+        );
     }));
 }
 
@@ -9428,6 +9821,100 @@ expect_status!(
     symlink_loop_error,
     "ln -s /tmp/a /tmp/b && ln -s /tmp/b /tmp/a && cat /tmp/a",
     1
+);
+expect_output!(
+    ln_force_replaces_only_the_link,
+    "cd /tmp && echo old > old && echo new > new && ln -s old l && ln -sf new l && readlink l && cat old",
+    "new\nold\n",
+    "",
+    0
+);
+#[test]
+fn ln_force_replacements_preserve_inode_budget() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().max_inodes(128).build().unwrap();
+        let out = shell
+            .run("echo keep >/tmp/source; echo old >/tmp/link")
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        for i in 0..200 {
+            let out = shell.run("ln -sf /tmp/source /tmp/link").await;
+            assert_eq!(out.status, 0, "replacement {i}: {}", out.stderr);
+            assert!(out.stderr.is_empty(), "replacement {i}: {}", out.stderr);
+        }
+        let out = shell.run("touch /tmp/after_replacements").await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        let out = shell.run("cat /tmp/source; readlink /tmp/link").await;
+        assert_eq!(out.stdout, "keep\n/tmp/source\n");
+        assert!(out.stderr.is_empty(), "{}", out.stderr);
+    }));
+}
+
+expect!(
+    ln_force_replaces_a_file,
+    "cd /tmp && echo a > a && echo b > b && ln -sf a b && readlink b && cat b",
+    "a\na"
+);
+expect!(
+    ln_force_long_option,
+    "cd /tmp && echo a > a && echo b > b && ln -s --force a b && readlink b",
+    "a"
+);
+expect!(
+    ln_force_missing_destination,
+    "cd /tmp && ln -sf a fresh && readlink fresh",
+    "a"
+);
+expect_output!(
+    ln_without_force_keeps_destination,
+    "cd /tmp && echo b > b && ln -s a b; echo $?; cat b",
+    "1\nb\n",
+    "strands-shell: ln: b: already exists\n",
+    0
+);
+expect!(
+    ln_into_directory,
+    "cd /tmp && mkdir d && ln -s ../a d && readlink d/a && ln -sf ../b d/ && readlink d/b",
+    "../a\n../b"
+);
+expect!(
+    ln_force_through_symlink_to_directory,
+    "cd /tmp && mkdir d && ln -s d ld && ln -sf a ld && readlink ld && readlink d/a",
+    "d\na"
+);
+expect!(
+    ln_force_replaces_link_inside_directory,
+    "cd /tmp && mkdir d && ln -s a d/a && ln -sf b d/a && ln -sf b d && readlink d/b",
+    "b"
+);
+expect_output!(
+    ln_force_same_file,
+    "cd /tmp && echo a > a && ln -sf ./a a; echo $?; ln -f a a; echo $?; cat a",
+    "1\n1\na\n",
+    "strands-shell: ln: './a' and 'a' are the same file\nstrands-shell: ln: 'a' and 'a' are the same file\n",
+    0
+);
+expect_output!(
+    ln_force_trailing_slash_keeps_file,
+    "cd /tmp && printf 'B\\n' > b && ln -s b bl && ln -sf a b/; echo $?; ln -sf a bl/; echo $?; cat b; readlink bl",
+    "1\n1\nB\nb\n",
+    "strands-shell: ln: failed to access 'b/': Not a directory\nstrands-shell: ln: failed to access 'bl/': Not a directory\n",
+    0
+);
+expect_output!(
+    ln_trailing_slash_missing_destination,
+    "cd /tmp && ln -sf a nx/; echo $?; test -e nx || echo absent",
+    "1\nabsent\n",
+    "strands-shell: ln: failed to create symbolic link 'nx/': No such file or directory\n",
+    0
+);
+expect_output!(
+    ln_force_refuses_directory,
+    "cd /tmp && mkdir -p h/a && ln -sf a h; echo $?",
+    "1\n",
+    "strands-shell: ln: h/a: cannot overwrite directory\n",
+    0
 );
 
 // ── VFS canonicalize ────────────────────────────────────────────────

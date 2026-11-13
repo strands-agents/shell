@@ -1,7 +1,9 @@
 use std::cell::RefCell;
+use std::io::Write;
 use std::sync::Arc;
 
-use tokio::io::AsyncWriteExt;
+use bytes::Bytes;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::builtins;
 use crate::command_fallback;
@@ -134,7 +136,6 @@ async fn resolve_executable(
     let fd = os.open(&mut child, &found, OpenFlags::read()).await.ok()?;
     let mut reader = child.take_reader(fd).ok()?;
     let mut buf = [0u8; 256];
-    use tokio::io::AsyncReadExt;
     let n = reader.read(&mut buf).await.ok()?;
     if n >= 2 && buf[0] == b'#' && buf[1] == b'!' {
         let line_end = buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
@@ -1716,11 +1717,15 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
             .push_str("strands-shell: input too large\n");
         proc.err_msg("strands-shell: input too large");
         proc.last_exit = 1;
+        proc.last_subst_status = Some(1);
         return String::new();
     }
     let command_line = match parser::parse(cmd) {
         Ok(cl) => cl,
-        Err(_) => return String::new(),
+        Err(_) => {
+            proc.last_subst_status = Some(1);
+            return String::new();
+        }
     };
     let mut sub = proc.fork();
     sub.depth += 1;
@@ -1729,22 +1734,15 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
             .push_str("strands-shell: maximum recursion depth exceeded\n");
         proc.err_msg("strands-shell: maximum recursion depth exceeded");
         proc.last_exit = 1;
+        proc.last_subst_status = Some(1);
         return String::new();
     }
-    let result = run_capturing(os, &mut sub, &command_line).await;
+    let (output, result) = run_capturing_status(os, &mut sub, &command_line).await;
     if !sub.captured_stderr.is_empty() {
         proc.captured_stderr.push_str(&sub.captured_stderr);
     }
-    result
-}
-
-/// Execute a command line, capturing all stdout into a String instead of printing it.
-async fn run_capturing(
-    os: Arc<dyn Kernel>,
-    proc: &mut Process,
-    command_line: &parser::CommandLine,
-) -> String {
-    run_capturing_status(os, proc, command_line).await.0
+    proc.last_subst_status = Some(captured_status(result, sub.last_exit));
+    output
 }
 
 /// Whether `pipeline` is a lone `break`, `continue`, `exit` or `return`, with or without `builtin`.
@@ -1837,8 +1835,8 @@ fn captured_status(result: Result<i32, ControlFlow>, last_exit: i32) -> i32 {
     }
 }
 
-/// [`run_capturing`], also returning the exit status of the last item it ran, or the
-/// control flow that stopped it.
+/// Execute a command line, capturing stdout along with the exit status of the last
+/// item it ran or the control flow that stopped it.
 async fn run_capturing_status(
     os: Arc<dyn Kernel>,
     proc: &mut Process,
@@ -1904,7 +1902,7 @@ async fn run_capturing_status(
                 Item::Subshell(cl) => {
                     let mut sub = proc.fork();
                     sub.depth += 1;
-                    if let Some(msg) = sub.check_limits() {
+                    let ran = if let Some(msg) = sub.check_limits() {
                         sub.err_msg(msg);
                         (1, String::new())
                     } else {
@@ -1913,7 +1911,9 @@ async fn run_capturing_status(
                             Box::pin(run_capturing_status(os.clone(), &mut sub, cl)).await;
                         sub.transfer_fd(STDIN, proc);
                         (captured_status(result, sub.last_exit), s)
-                    }
+                    };
+                    proc.captured_stderr.push_str(&sub.captured_stderr);
+                    ran
                 }
                 Item::If {
                     branches,
@@ -2050,7 +2050,6 @@ async fn run_capturing_status(
                     let (tx, rx) = os::pipe(64);
                     let mut tasks = ForegroundTasks::new(os.as_ref());
                     let handle = tokio::task::spawn_local(async move {
-                        use bytes::Bytes;
                         if !captured.is_empty() {
                             let _ = tx.send(Bytes::from(captured.into_bytes())).await;
                         }
@@ -2305,11 +2304,13 @@ async fn execute_item(
             let handle = tokio::task::spawn_local(async move {
                 let (output, result) =
                     Box::pin(run_capturing_status(os2, &mut sub, &compound_cl)).await;
-                use bytes::Bytes;
                 if !output.is_empty() {
                     let _ = tx.send(Bytes::from(output.into_bytes())).await;
                 }
-                captured_status(result, sub.last_exit)
+                (
+                    captured_status(result, sub.last_exit),
+                    std::mem::take(&mut sub.captured_stderr),
+                )
             });
             tasks.own(&handle);
 
@@ -2318,7 +2319,22 @@ async fn execute_item(
             let mut exit = execute_pipeline(os, proc, tail).await;
             // The tail is a pipeline stage, so `exit` in it ends only that stage.
             proc.pending_exit = false;
-            let compound_exit = handle.await.unwrap_or(0);
+            let (compound_exit, mut stderr) = handle.await.unwrap_or_default();
+            // The compound's stderr is not piped; pass it on without dropping any,
+            // except a limit message that this process will report itself.
+            if let Some(msg) = proc.check_limits()
+                && stderr.ends_with(&format!("{msg}\n"))
+            {
+                stderr.truncate(stderr.len() - msg.len() - 1);
+            }
+            if !stderr.is_empty() {
+                if let Some(tx) = proc.take_err_tx() {
+                    let _ = tx.send(bytes::Bytes::from(stderr)).await;
+                    proc.set_err_tx(tx);
+                } else {
+                    proc.write_stderr(&stderr);
+                }
+            }
             proc.close(0);
             if proc.opt_pipefail && exit == 0 {
                 exit = compound_exit;
@@ -2890,7 +2906,6 @@ where
                 proc.captured_output.push_str(&to_stdout);
             }
         } else {
-            use std::io::Write;
             let mut out = std::io::stdout();
             let _ = out.write_all(to_stdout.as_bytes());
             let _ = out.flush();
@@ -3212,6 +3227,7 @@ async fn run_pipeline(
     let mut expanded_env: Vec<Vec<(String, String)>> = Vec::with_capacity(len);
     let mut expanded_redirects: Vec<Vec<(Redirect, String)>> = Vec::with_capacity(len);
 
+    shell_proc.last_subst_status = None;
     for cmd in pipeline {
         expanded_args.push(expand_words(os.clone(), shell_proc, &cmd.args).await);
         let mut env = Vec::new();
@@ -3263,7 +3279,8 @@ async fn run_pipeline(
         for (k, v) in &expanded_env[0] {
             shell_proc.set_env(k, v);
         }
-        return (0, String::new());
+        // With no command name, the status is that of the last command substitution.
+        return (shell_proc.last_subst_status.unwrap_or(0), String::new());
     }
 
     // Resolve executables: for each stage, if the command is not a builtin,
@@ -3391,7 +3408,7 @@ async fn run_pipeline(
             let stdout_drain = if capture {
                 Drain::Capture(tokio::task::spawn_local(async move {
                     let mut reader = FdReader::from_receiver(out_rx);
-                    os::read_to_string_limited(&mut reader, max_output)
+                    os::read_to_string_lossy_limited(&mut reader, max_output)
                         .await
                         .unwrap_or_default()
                 }))
@@ -3404,7 +3421,6 @@ async fn run_pipeline(
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
-                        use tokio::io::AsyncReadExt;
                         let mut buf = Vec::new();
                         let _ = reader.read_to_end(&mut buf).await;
                         let _ = std::io::Write::write_all(&mut std::io::stdout(), &buf);
@@ -3414,7 +3430,7 @@ async fn run_pipeline(
             let stderr_drain = if capture {
                 Drain::Capture(tokio::task::spawn_local(async move {
                     let mut reader = FdReader::from_receiver(err_rx);
-                    os::read_to_string_limited(&mut reader, max_output)
+                    os::read_to_string_lossy_limited(&mut reader, max_output)
                         .await
                         .unwrap_or_default()
                 }))
@@ -3427,7 +3443,6 @@ async fn run_pipeline(
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
-                        use tokio::io::AsyncReadExt;
                         let mut buf = Vec::new();
                         let _ = reader.read_to_end(&mut buf).await;
                         let _ = std::io::Write::write_all(&mut std::io::stderr(), &buf);
@@ -3766,7 +3781,7 @@ async fn run_pipeline(
     let stdout_drain = if capture {
         let handle = tokio::spawn(async move {
             let mut reader = FdReader::from_receiver(last_rx);
-            os::read_to_string_limited(&mut reader, max_output)
+            os::read_to_string_lossy_limited(&mut reader, max_output)
                 .await
                 .unwrap_or_default()
         });
@@ -3782,7 +3797,6 @@ async fn run_pipeline(
             }
             #[cfg(target_arch = "wasm32")]
             {
-                use tokio::io::AsyncReadExt;
                 let mut buf = Vec::new();
                 let _ = reader.read_to_end(&mut buf).await;
                 let _ = std::io::Write::write_all(&mut std::io::stdout(), &buf);
@@ -3807,7 +3821,7 @@ async fn run_pipeline(
                 let mut reader = FdReader::from_receiver(rx);
                 if capture {
                     all.push_str(
-                        &os::read_to_string_limited(&mut reader, max_output)
+                        &os::read_to_string_lossy_limited(&mut reader, max_output)
                             .await
                             .unwrap_or_default(),
                     );
@@ -3820,7 +3834,6 @@ async fn run_pipeline(
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
-                    use tokio::io::AsyncReadExt;
                     let mut buf = Vec::new();
                     let _ = reader.read_to_end(&mut buf).await;
                     let _ = std::io::Write::write_all(&mut std::io::stderr(), &buf);

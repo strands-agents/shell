@@ -153,6 +153,8 @@ pub struct Process {
     pub(crate) pending_exit: bool,
     /// An unsupported array aborts its function without requesting a shell exit.
     pub(crate) refused_array: bool,
+    /// Exit status of the last command substitution performed, for commands with no name.
+    pub(crate) last_subst_status: Option<i32>,
     /// PID of last background job (for $!).
     pub last_bg_pid: Option<u32>,
     /// Background job handles.
@@ -336,6 +338,7 @@ impl Process {
             nounset_error: false,
             pending_exit: false,
             refused_array: false,
+            last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
@@ -382,6 +385,7 @@ impl Process {
             nounset_error: false,
             pending_exit: false,
             refused_array: false,
+            last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
@@ -468,6 +472,7 @@ impl Process {
             nounset_error: false,
             pending_exit: false,
             refused_array: false,
+            last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
@@ -823,6 +828,17 @@ pub async fn read_to_string_limited<R: tokio::io::AsyncRead + Unpin>(
 ) -> io::Result<String> {
     let buf = read_to_end_limited(reader, limit).await?;
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Like [`read_to_string_limited`], but replaces invalid UTF-8 with U+FFFD
+/// instead of failing. Still returns Err if the limit is exceeded.
+pub async fn read_to_string_lossy_limited<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+) -> io::Result<String> {
+    let buf = read_to_end_limited(reader, limit).await?;
+    Ok(String::from_utf8(buf)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
 }
 
 /// Return the largest char boundary in `s` at or below `index`.
