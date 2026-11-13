@@ -1335,9 +1335,13 @@ pub trait Kernel: Send + Sync {
     async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String>;
     /// Set Unix permission mode bits on a path.
     async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()>;
-    /// Set the access and modification times of a path.
+    /// Set the access and modification times of the file a path names, following a symlink as
+    /// [`Kernel::stat`] does.
     ///
-    /// The default refuses with `Unsupported`, so a kernel that predates this method still builds.
+    /// Permission follows `utimensat`: [`TimeChange::Now`] needs write access, [`TimeChange::To`]
+    /// needs ownership, and [`TimeChange::Keep`] leaves that time alone. A kernel that wraps
+    /// another must forward this. The default refuses with `Unsupported`, so a kernel that
+    /// predates this method still builds; `touch` of an existing file then fails on it.
     async fn set_times(&self, _proc: &Process, _path: &str, _times: FileTimes) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,

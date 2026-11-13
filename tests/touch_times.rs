@@ -256,3 +256,24 @@ async fn touch_creates_a_missing_in_memory_file_at_the_date() {
         })
         .await;
 }
+
+#[tokio::test]
+async fn an_in_memory_time_change_follows_utimensat_permission() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut sh = Shell::builder().build().expect("shell builds");
+            // The shell's user can write /tmp but does not own it, and cannot write /.
+            let out = sh.run("touch /tmp").await;
+            assert_eq!(
+                out.status, 0,
+                "a writer may set the current time: {}",
+                out.stderr
+            );
+            let out = sh.run("touch -d @0 /tmp").await;
+            assert_eq!(out.status, 1, "only the owner may set an explicit time");
+            assert!(out.stderr.contains("permission denied"), "{}", out.stderr);
+            let out = sh.run("touch /").await;
+            assert_eq!(out.status, 1, "a non-writer may not set the current time");
+        })
+        .await;
+}
