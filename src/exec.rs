@@ -1749,7 +1749,9 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
         proc.last_subst_status = Some(1);
         return String::new();
     }
+    proc.transfer_fd(STDIN, &mut sub);
     let (output, result) = run_capturing_status(os, &mut sub, &command_line).await;
+    sub.transfer_fd(STDIN, proc);
     if !sub.captured_stderr.is_empty() {
         proc.captured_stderr.push_str(&sub.captured_stderr);
     }
@@ -2075,12 +2077,14 @@ async fn run_capturing_status(
                         }
                     });
                     tasks.own(&handle);
-                    proc.set_channel_reader(0, rx);
+                    let saved_stdin = take_stdin(proc);
+                    proc.set_channel_reader(STDIN, rx);
                     let (mut exit, out) = execute_pipeline_capture(os.clone(), proc, tail).await;
                     // The tail is a pipeline stage, so `exit` in it ends only that stage.
                     proc.pending_exit = false;
                     let _ = handle.await;
-                    proc.close(0);
+                    proc.close(STDIN);
+                    give_stdin(proc, saved_stdin);
                     if proc.opt_pipefail && exit == 0 {
                         exit = compound_exit;
                     }
@@ -2322,6 +2326,7 @@ async fn execute_item(
             // stdin into the tail pipeline.
             let compound_cl = vec![(*compound.clone(), None)];
             let mut sub = proc.fork();
+            proc.transfer_fd(STDIN, &mut sub);
             let os2 = os.clone();
 
             let (tx, rx) = os::pipe(64);
@@ -2335,16 +2340,17 @@ async fn execute_item(
                 (
                     captured_status(result, sub.last_exit),
                     std::mem::take(&mut sub.captured_stderr),
+                    take_stdin(&mut sub),
                 )
             });
             tasks.own(&handle);
 
             // Set stdin on proc so the tail pipeline inherits it.
-            proc.set_channel_reader(0, rx);
+            proc.set_channel_reader(STDIN, rx);
             let mut exit = execute_pipeline(os, proc, tail).await;
             // The tail is a pipeline stage, so `exit` in it ends only that stage.
             proc.pending_exit = false;
-            let (compound_exit, mut stderr) = handle.await.unwrap_or_default();
+            let (compound_exit, mut stderr, unread) = handle.await.unwrap_or_default();
             // The compound's stderr is not piped; pass it on without dropping any,
             // except a limit message that this process will report itself.
             if let Some(msg) = proc.check_limits()
@@ -2360,7 +2366,8 @@ async fn execute_item(
                     proc.write_stderr(&stderr);
                 }
             }
-            proc.close(0);
+            proc.close(STDIN);
+            give_stdin(proc, unread);
             if proc.opt_pipefail && exit == 0 {
                 exit = compound_exit;
             }
@@ -3243,6 +3250,43 @@ async fn report_finished(
     }
 }
 
+/// Whether `redirects` replace stdin, other than `0<&0`.
+fn replaces_stdin(redirects: &[(Redirect, String)]) -> bool {
+    redirects.iter().any(|(redirect, target)| match redirect {
+        Redirect::Read(0, _) | Redirect::ReadWrite(0, _) | Redirect::HereDoc(0, ..) => true,
+        Redirect::DupRead(0, _) => target != "0",
+        _ => false,
+    })
+}
+
+/// Take stdin out of `proc`, to give back with [`give_stdin`].
+fn take_stdin(proc: &mut Process) -> Option<FdReader> {
+    proc.take_reader(STDIN).ok()
+}
+
+/// Give `stdin` back to `proc`, if there is one.
+fn give_stdin(proc: &mut Process, stdin: Option<FdReader>) {
+    if let Some(stdin) = stdin {
+        proc.restore_fd(STDIN, stdin.into_fd_kind());
+    }
+}
+
+/// Run `body` as a pipeline stage on `child`, then send the stdin it left unread through `back`.
+fn run_stage(
+    back: Option<tokio::sync::oneshot::Sender<Option<FdReader>>>,
+    child: Process,
+    body: impl std::future::Future<Output = i32>,
+) -> impl std::future::Future<Output = i32> {
+    let body = Box::pin(body);
+    CURRENT_PROCESS.scope(RefCell::new(child), async move {
+        let code = body.await;
+        if let Some(back) = back {
+            let _ = back.send(CURRENT_PROCESS.with(|p| take_stdin(&mut p.borrow_mut())));
+        }
+        code
+    })
+}
+
 async fn run_pipeline(
     os: Arc<dyn Kernel>,
     shell_proc: &mut Process,
@@ -3413,8 +3457,11 @@ async fn run_pipeline(
             let args: Vec<String> = expanded_args[0][1..].to_vec();
 
             let mut io_proc = shell_proc.fork();
-            // Inherit stdin from shell_proc if present (e.g. CompoundPipeline).
+            // Inherit stdin from shell_proc if present (e.g. CompoundPipeline). A stdin
+            // redirect sets the caller's stdin aside until the builtin ends.
             shell_proc.transfer_fd(STDIN, &mut io_proc);
+            let redirects_stdin = replaces_stdin(&expanded_redirects[0]);
+            let mut kept_stdin = redirects_stdin.then(|| take_stdin(&mut io_proc)).flatten();
             let (out_tx, out_rx) = os::pipe(64);
             let (err_tx, err_rx) = os::pipe(64);
             // A writer the caller installed takes the place of the local pipe.
@@ -3437,6 +3484,7 @@ async fn run_pipeline(
                 }
                 shell_proc.err_msg(&format!("strands-shell: {e}"));
                 shell_proc.clear_err_tx();
+                give_stdin(shell_proc, kept_stdin);
                 return (1, String::new());
             }
             // Builtin diagnostics follow the command's own stderr redirection.
@@ -3509,8 +3557,13 @@ async fn run_pipeline(
                     os.clone(),
                     CURRENT_PROCESS.scope(io_cell, async {
                         let r = f(os.as_ref(), shell_proc, &args).await;
-                        // Transfer stdin back so it survives across loop iterations
-                        CURRENT_PROCESS.with(|p| p.borrow_mut().transfer_fd(STDIN, shell_proc));
+                        // Transfer stdin back so it survives across loop iterations, or give
+                        // back the caller's own when a redirect replaced it.
+                        if redirects_stdin {
+                            give_stdin(shell_proc, kept_stdin.take());
+                        } else {
+                            CURRENT_PROCESS.with(|p| p.borrow_mut().transfer_fd(STDIN, shell_proc));
+                        }
                         r
                     }),
                 )
@@ -3610,8 +3663,13 @@ async fn run_pipeline(
         .map(Process::isolate_host_writes)
         .collect();
 
-    // Inherit stdin from shell_proc if present (used by CompoundPipeline).
+    // Inherit stdin from shell_proc if present (used by CompoundPipeline). The first stage hands
+    // back what it leaves unread when it ends, or a stdin redirect sets it aside.
     shell_proc.transfer_fd(STDIN, &mut procs[0]);
+    let redirects_stdin = replaces_stdin(&expanded_redirects[0]);
+    let kept_stdin = redirects_stdin.then(|| take_stdin(&mut procs[0])).flatten();
+    let (stdin_back, mut stdin_returned) = tokio::sync::oneshot::channel();
+    let mut stdin_back = (!redirects_stdin).then_some(stdin_back);
 
     // Apply per-command env prefixes
     for (i, env) in expanded_env.iter().enumerate() {
@@ -3650,6 +3708,11 @@ async fn run_pipeline(
     for (i, redirs) in expanded_redirects.iter().enumerate() {
         if let Err(e) = apply_redirects(&os, &mut procs[i], redirs).await {
             shell_proc.err_msg(&format!("strands-shell: {e}"));
+            if redirects_stdin {
+                give_stdin(shell_proc, kept_stdin);
+            } else {
+                procs[0].transfer_fd(STDIN, shell_proc);
+            }
             return (1, String::new());
         }
         if let Some(tx) = procs[i].stderr_channel() {
@@ -3664,6 +3727,7 @@ async fn run_pipeline(
         if expanded_args[i].is_empty() {
             continue;
         }
+        let back = if i == 0 { stdin_back.take() } else { None };
         let name = expanded_args[i][0].clone();
         let args: Vec<String> = expanded_args[i][1..].to_vec();
         let os = os.clone();
@@ -3683,7 +3747,7 @@ async fn run_pipeline(
             }
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
-                CURRENT_PROCESS.scope(RefCell::new(child), async move {
+                run_stage(back, child, async move {
                     if is_script {
                         // Hand the stage's stdin to the script's commands.
                         CURRENT_PROCESS
@@ -3695,6 +3759,8 @@ async fn run_pipeline(
                         state_proc.capture = true;
                         state_proc.clear_err_tx();
                         let exit = run_script(os, &mut state_proc, &args[0], &args[1..]).await;
+                        CURRENT_PROCESS
+                            .with(|p| state_proc.transfer_fd(STDIN, &mut p.borrow_mut()));
                         let output = std::mem::take(&mut state_proc.captured_output);
                         if !output.is_empty()
                             && let Ok(mut w) = crate::io::stdout()
@@ -3755,6 +3821,9 @@ async fn run_pipeline(
                             Err(_) => state_proc.last_exit,
                         };
                         state_proc.pop_local_scope();
+                        CURRENT_PROCESS.with(|p| {
+                            state_proc.transfer_fd(STDIN, &mut p.borrow_mut());
+                        });
                         // Write captured output to the pipeline's stdout
                         let output = std::mem::take(&mut state_proc.captured_output);
                         if !output.is_empty()
@@ -3779,7 +3848,7 @@ async fn run_pipeline(
             // External commands
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
-                CURRENT_PROCESS.scope(RefCell::new(child), async move {
+                run_stage(back, child, async move {
                     match commands::lookup(&name) {
                         Some(f) => match f(os.as_ref(), &args).await {
                             Ok(code) => code,
@@ -3899,6 +3968,11 @@ async fn run_pipeline(
             stage_exits[stage] =
                 report_finished(os.as_ref(), shell_proc, requests[stage].take(), exit).await;
         }
+    }
+    if redirects_stdin {
+        give_stdin(shell_proc, kept_stdin);
+    } else if let Ok(unread) = stdin_returned.try_recv() {
+        give_stdin(shell_proc, unread);
     }
 
     let stdout_str = if let Some(h) = stdout_drain {

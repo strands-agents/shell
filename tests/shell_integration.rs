@@ -9082,6 +9082,163 @@ fn script_args_and_isolation_unchanged() {
     }));
 }
 
+// ── Stdin of command substitutions and subshells ────────────────────
+
+/// Asserts that each `(cmd, stdout)` prints `stdout`, with no stderr and status 0.
+async fn assert_prints(cases: &[(&str, &str)]) {
+    for (cmd, stdout) in cases {
+        let out = Shell::builder().build().unwrap().run(cmd).await;
+        assert_eq!(out.stdout, *stdout, "stdout of {cmd}");
+        assert_eq!(out.stderr, "", "stderr of {cmd}");
+        assert_eq!(out.status, 0, "status of {cmd}");
+    }
+}
+
+#[test]
+fn a_command_substitution_reads_the_callers_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            (r#"printf hi | { x=$(cat); echo "[$x]"; }"#, "[hi]\n"),
+            (
+                r#"printf hi > /tmp/in; { x=$(cat); echo "[$x]"; } < /tmp/in"#,
+                "[hi]\n",
+            ),
+            (
+                r#"echo q | { x=$(cat); echo "[$x]"; } | tr a-z A-Z"#,
+                "[Q]\n",
+            ),
+            (
+                r#"printf hi | { { x=$(cat); echo "[$x]"; } | tr a-z A-Z; }"#,
+                "[HI]\n",
+            ),
+            (
+                r#"printf hi | { y=$({ x=$(cat); echo "[$x]"; } | tr a-z A-Z); echo "$y"; }"#,
+                "[HI]\n",
+            ),
+        ])
+        .await;
+    }));
+}
+
+#[test]
+fn a_subshell_reads_the_callers_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            ("printf hi | ( cat )", "hi"),
+            (r#"printf hi | ( x=$(cat); echo "[$x]" )"#, "[hi]\n"),
+            (r#"printf hi | { y=$( (cat) ); echo "[$y]"; }"#, "[hi]\n"),
+        ])
+        .await;
+    }));
+}
+
+#[test]
+fn nested_substitutions_and_subshells_read_the_callers_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            (
+                r#"printf hi | { y=$(x=$(cat); echo "<$x>"); echo "[$y]"; }"#,
+                "[<hi>]\n",
+            ),
+            (r#"printf hi | ( ( x=$(cat); echo "[$x]" ) )"#, "[hi]\n"),
+            (
+                r#"printf hi | { y=$( (x=$(cat); echo "<$x>") ); echo "[$y]"; }"#,
+                "[<hi>]\n",
+            ),
+        ])
+        .await;
+    }));
+}
+
+#[test]
+fn a_script_fed_through_sh_reads_its_input_with_a_substitution() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            (
+                r#"printf 'input=$(cat)\necho "[$input]"\n' > /tmp/s.sh; printf hi | sh /tmp/s.sh"#,
+                "[hi]\n",
+            ),
+            (
+                r#"printf 'f() { x=$(cat); echo "[$x]"; }\nf\n' > /tmp/f.sh; printf hi | sh /tmp/f.sh"#,
+                "[hi]\n",
+            ),
+        ])
+        .await;
+    }));
+}
+
+#[test]
+fn the_shells_own_stdin_reaches_a_substitution() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let (tx, rx) = strands_shell::os::pipe(4);
+        shell.proc.set_channel_reader(0, rx);
+        tx.send(bytes::Bytes::from_static(b"{\"event\":1}"))
+            .await
+            .unwrap();
+        drop(tx);
+        let out = shell.run(r#"input=$(cat); echo "[$input]""#).await;
+        assert_eq!(out.stdout, "[{\"event\":1}]\n");
+        assert_eq!(out.stderr, "");
+    }));
+}
+
+#[test]
+fn stdin_is_read_once_and_what_is_left_reaches_the_next_reader() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            (
+                r#"printf 'a\nb\n' | { x=$(cat); y=$(cat); echo "[$x][$y]"; }"#,
+                "[a\nb][]\n",
+            ),
+            (
+                r#"printf 'a\nb\n' | { read l; x=$(cat); echo "[$l][$x]"; }"#,
+                "[a][b]\n",
+            ),
+            (
+                r#"printf 'a\nb\n' | { x=$(cat); cat; echo "[$x]"; }"#,
+                "[a\nb]\n",
+            ),
+            (r#"printf hi | { x=$(true); cat; echo "[$x]"; }"#, "hi[]\n"),
+            (
+                r#"printf hi | { x=$(date >/dev/null); cat; echo "[$x]"; }"#,
+                "hi[]\n",
+            ),
+            (
+                r#"printf hi | { x=$(echo y | tr y z); cat; echo "[$x]"; }"#,
+                "hi[z]\n",
+            ),
+            (
+                r#"printf hi | { x=$(cat </dev/null); cat; echo "[$x]"; }"#,
+                "hi[]\n",
+            ),
+            ("printf hi | { (cat </dev/null); cat; echo; }", "hi\n"),
+            ("printf hi | { printf x </dev/null; cat; echo; }", "xhi\n"),
+            (
+                r#"printf hi | { x=$({ printf x; } | cat); cat; echo "[$x]"; }"#,
+                "hi[x]\n",
+            ),
+            (
+                r#"printf hi | { y=$({ printf x; } | cat; cat); echo "[$y]"; }"#,
+                "[xhi]\n",
+            ),
+            ("printf hi | { { printf x; } | cat; cat; echo; }", "xhi\n"),
+            (
+                "printf true > /tmp/t.sh; printf hi | { sh /tmp/t.sh | cat; cat; echo; }",
+                "hi\n",
+            ),
+            ("f() { true; }; printf hi | { f | cat; cat; echo; }", "hi\n"),
+        ])
+        .await;
+    }));
+}
+
 // ── Script execution via sh ─────────────────────────────────────────
 
 /// Runs `cmd` after writing a `cat` script and a `read` script.
