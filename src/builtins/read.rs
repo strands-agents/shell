@@ -54,7 +54,11 @@ pub fn builtin_read<'a>(
                     line.push(byte[0] as char);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    io::with_process(|p| p.restore_fd(0, reader.into_fd_kind()));
+                    let mut kind = reader.into_fd_kind();
+                    if let crate::os::FdKind::ChannelReader { buf, .. } = &mut kind {
+                        buf.splice(0..0, line.chars().map(|c| c as u8));
+                    }
+                    io::with_process(|p| p.restore_fd(0, kind));
                     return Err(e.into());
                 }
                 Err(_) => break,

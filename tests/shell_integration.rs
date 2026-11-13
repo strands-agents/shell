@@ -9338,10 +9338,21 @@ fn a_read_from_stdin_with_no_end_stops_at_the_deadline() {
                 "x=$(read y)",
                 "(cat)",
                 "cat | cat",
+                "sleep 10 | cat",
+                "grep x",
+                "grep x; touch /tmp/after",
+                "lua -e 'io.write(\"ran\")'; touch /tmp/after",
                 "x=$(cat); touch /tmp/after",
             ] {
+                if matches!(stdin, OpenStdin::Outside) && script.starts_with("lua") {
+                    continue;
+                }
                 let started = std::time::Instant::now();
                 let (mut shell, out) = run_on_open_stdin(script, stdin, b"first part").await;
+                assert!(
+                    !out.stdout.contains("ran"),
+                    "{script} on {stdin:?} stdin: ran after the deadline"
+                );
                 let (status, stderr) = (out.status, out.stderr);
                 assert!(
                     started.elapsed() < std::time::Duration::from_secs(3),
@@ -9372,6 +9383,17 @@ fn a_read_from_stdin_with_no_end_stops_at_the_deadline() {
                 );
             }
         }
+    }));
+}
+
+#[test]
+fn a_read_cut_off_by_the_deadline_leaves_its_partial_line_for_the_next_read() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, out) = run_on_open_stdin("read x", OpenStdin::Outside, b"abc").await;
+        assert_eq!(out.status, 1, "{}", out.stderr);
+        let next = shell.run("read y; echo \"[$y]\"").await;
+        assert_eq!(next.stdout, "[abc]\n", "{}", next.stderr);
     }));
 }
 
