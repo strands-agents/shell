@@ -13647,11 +13647,16 @@ expect_output!(
     0
 );
 shell_test!(
-    tac_reports_a_missing_file_and_continues,
-    "printf '1\\n2\\n' > /tmp/t1; tac /tmp/nope /tmp/t1",
+    tac_reports_each_missing_file_and_continues,
+    "printf '1\\n2\\n' > /tmp/t1; tac /tmp/nope /tmp/nope2 /tmp/t1",
     |_shell: &mut Shell, out: strands_shell::Output| {
         assert_eq!(out.stdout, "2\n1\n");
-        assert!(out.stderr.contains("/tmp/nope"), "stderr={:?}", out.stderr);
+        assert!(out.stderr.contains("/tmp/nope:"), "stderr={:?}", out.stderr);
+        assert!(
+            out.stderr.contains("/tmp/nope2:"),
+            "stderr={:?}",
+            out.stderr
+        );
         assert_eq!(out.status, 1);
     }
 );
