@@ -4124,6 +4124,55 @@ fn mktemp_template() {
     }));
 }
 
+// ── hostname ────────────────────────────────────────────────────────
+
+expect!(hostname_default, "hostname", "localhost");
+expect!(hostname_follows_variable, "HOSTNAME=box hostname", "box");
+expect!(hostname_empty_variable, "HOSTNAME= hostname", "localhost");
+expect!(
+    hostname_help,
+    "hostname --help | head -1",
+    "Usage: hostname"
+);
+shell_test!(
+    hostname_refuses_to_set,
+    "hostname newname",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr
+                .contains("hostname: unexpected argument \"newname\""),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    hostname_bad_option,
+    "hostname -x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("hostname: invalid option"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+
+#[test]
+fn hostname_uses_builder_variable() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().env("HOSTNAME", "box").build().unwrap();
+        let out = shell.run("hostname").await;
+        assert_eq!(out.stdout, "box\n");
+        assert_eq!(out.status, 0);
+    }));
+}
+
 // ── test builtin coverage ───────────────────────────────────────────
 
 expect!(
