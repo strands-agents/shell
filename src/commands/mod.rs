@@ -5,6 +5,7 @@ mod cp;
 mod curl;
 mod cut;
 mod date;
+mod diff;
 mod dirname;
 mod echo;
 mod env;
@@ -79,6 +80,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "curl" => |os, args| Box::pin(curl::cmd_curl(os, args)),
             "cut" => |os, args| Box::pin(cut::cmd_cut(os, args)),
             "date" => |os, args| Box::pin(date::cmd_date(os, args)),
+            "diff" => |os, args| Box::pin(diff::cmd_diff(os, args)),
             "dirname" => |os, args| Box::pin(dirname::cmd_dirname(os, args)),
             "echo" => |os, args| Box::pin(echo::cmd_echo(os, args)),
             "env" => |os, args| Box::pin(env::cmd_env(os, args)),

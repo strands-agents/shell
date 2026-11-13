@@ -38,6 +38,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 lexopt = "0.3"
 strands-shell-macros = { path = "strands-shell-macros", version = "0.1.0" }
 regex = "1"
+similar = { version = "3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"

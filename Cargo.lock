@@ -1576,6 +1576,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "similar"
+version = "3.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f8bec09ae8fae0f4f265a4559a9334be3929d8504e9b536df0a41302bd1733"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1626,6 +1632,7 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
+ "similar",
  "strands-shell-macros",
  "tokio",
  "toml",
