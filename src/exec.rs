@@ -1716,11 +1716,15 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
             .push_str("strands-shell: input too large\n");
         proc.err_msg("strands-shell: input too large");
         proc.last_exit = 1;
+        proc.last_subst_status = Some(1);
         return String::new();
     }
     let command_line = match parser::parse(cmd) {
         Ok(cl) => cl,
-        Err(_) => return String::new(),
+        Err(_) => {
+            proc.last_subst_status = Some(1);
+            return String::new();
+        }
     };
     let mut sub = proc.fork();
     sub.depth += 1;
@@ -1729,22 +1733,15 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
             .push_str("strands-shell: maximum recursion depth exceeded\n");
         proc.err_msg("strands-shell: maximum recursion depth exceeded");
         proc.last_exit = 1;
+        proc.last_subst_status = Some(1);
         return String::new();
     }
-    let result = run_capturing(os, &mut sub, &command_line).await;
+    let (output, result) = run_capturing_status(os, &mut sub, &command_line).await;
     if !sub.captured_stderr.is_empty() {
         proc.captured_stderr.push_str(&sub.captured_stderr);
     }
-    result
-}
-
-/// Execute a command line, capturing all stdout into a String instead of printing it.
-async fn run_capturing(
-    os: Arc<dyn Kernel>,
-    proc: &mut Process,
-    command_line: &parser::CommandLine,
-) -> String {
-    run_capturing_status(os, proc, command_line).await.0
+    proc.last_subst_status = Some(captured_status(result, sub.last_exit));
+    output
 }
 
 /// Whether `pipeline` is a lone `break`, `continue`, `exit` or `return`, with or without `builtin`.
@@ -1837,8 +1834,8 @@ fn captured_status(result: Result<i32, ControlFlow>, last_exit: i32) -> i32 {
     }
 }
 
-/// [`run_capturing`], also returning the exit status of the last item it ran, or the
-/// control flow that stopped it.
+/// Execute a command line, capturing stdout along with the exit status of the last
+/// item it ran or the control flow that stopped it.
 async fn run_capturing_status(
     os: Arc<dyn Kernel>,
     proc: &mut Process,
@@ -3214,6 +3211,7 @@ async fn run_pipeline(
     let mut expanded_env: Vec<Vec<(String, String)>> = Vec::with_capacity(len);
     let mut expanded_redirects: Vec<Vec<(Redirect, String)>> = Vec::with_capacity(len);
 
+    shell_proc.last_subst_status = None;
     for cmd in pipeline {
         expanded_args.push(expand_words(os.clone(), shell_proc, &cmd.args).await);
         let mut env = Vec::new();
@@ -3265,7 +3263,8 @@ async fn run_pipeline(
         for (k, v) in &expanded_env[0] {
             shell_proc.set_env(k, v);
         }
-        return (0, String::new());
+        // With no command name, the status is that of the last command substitution.
+        return (shell_proc.last_subst_status.unwrap_or(0), String::new());
     }
 
     // Resolve executables: for each stage, if the command is not a builtin,

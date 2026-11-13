@@ -153,6 +153,8 @@ pub struct Process {
     pub(crate) pending_exit: bool,
     /// An unsupported array aborts its function without requesting a shell exit.
     pub(crate) refused_array: bool,
+    /// Exit status of the last command substitution performed, for commands with no name.
+    pub(crate) last_subst_status: Option<i32>,
     /// PID of last background job (for $!).
     pub last_bg_pid: Option<u32>,
     /// Background job handles.
@@ -336,6 +338,7 @@ impl Process {
             nounset_error: false,
             pending_exit: false,
             refused_array: false,
+            last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
@@ -382,6 +385,7 @@ impl Process {
             nounset_error: false,
             pending_exit: false,
             refused_array: false,
+            last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
@@ -468,6 +472,7 @@ impl Process {
             nounset_error: false,
             pending_exit: false,
             refused_array: false,
+            last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
             local_scopes: Vec::new(),
