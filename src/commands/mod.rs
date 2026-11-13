@@ -81,6 +81,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "date" => |os, args| Box::pin(date::cmd_date(os, args)),
             "dirname" => |os, args| Box::pin(dirname::cmd_dirname(os, args)),
             "echo" => |os, args| Box::pin(echo::cmd_echo(os, args)),
+            "egrep" => |os, args| Box::pin(grep::cmd_egrep(os, args)),
             "env" => |os, args| Box::pin(env::cmd_env(os, args)),
             "false" => |os, args| Box::pin(r#false::cmd_false(os, args)),
             "grep" => |os, args| Box::pin(grep::cmd_grep(os, args)),
