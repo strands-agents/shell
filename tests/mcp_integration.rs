@@ -154,9 +154,17 @@ fn mcp_shell_result_has_the_block_count_the_description_states() {
             content.iter().all(|block| block["type"] == "text"),
             "{command}: {content:?}"
         );
+        let expected = if command.contains("exit 3") { 3 } else { 0 };
         if description.contains("metadata.exit_code") {
-            let expected = if command.contains("exit 3") { 3 } else { 0 };
             assert_eq!(r["result"]["metadata"]["exit_code"], expected, "{command}");
+        } else if description.contains("`exit code: N`") {
+            assert_eq!(
+                content[2]["text"],
+                format!("exit code: {expected}"),
+                "{command}"
+            );
+        } else {
+            panic!("the description names no exit-code channel: {description:?}");
         }
     }
 }

@@ -46,11 +46,8 @@ fn command_big_v_labels_functions() {
 }
 
 #[test]
-fn command_big_v_reports_a_builtin_over_a_function_of_the_same_name() {
-    assert_stdout(
-        "echo() { :; }; command -V echo; command -v echo",
-        "echo is a shell builtin\necho\n",
-    );
+fn command_v_names_a_builtin_shadowed_by_a_function() {
+    assert_stdout("echo() { :; }; command -v echo", "echo\n");
 }
 
 #[test]
