@@ -28,21 +28,35 @@ pub fn builtin_readonly<'a>(
 }
 
 fn do_export(proc: &mut Process, args: &[String], readonly: bool) -> CommandResult {
-    for s in args {
-        if let Some(eq) = s.find('=') {
-            let key = &s[..eq];
-            let val = &s[eq + 1..];
-            if !proc.set_env(key, val) {
-                return Ok(1);
+    // `export -n` removes the export instead of adding it.
+    let mut export = !readonly;
+    let mut names = args;
+    while let Some((first, rest)) = names.split_first() {
+        match first.as_str() {
+            "--" => {
+                names = rest;
+                break;
             }
-            if readonly {
-                proc.mark_readonly(key);
+            "-n" if !readonly => export = false,
+            _ => break,
+        }
+        names = rest;
+    }
+    for s in names {
+        let key = match s.find('=') {
+            Some(eq) => {
+                let key = &s[..eq];
+                if !proc.set_env(key, &s[eq + 1..]) {
+                    return Ok(1);
+                }
+                key
             }
+            None => s.as_str(),
+        };
+        if readonly {
+            proc.mark_readonly(key);
         } else {
-            // `export VAR` / `readonly VAR` without value
-            if readonly {
-                proc.mark_readonly(s.as_str());
-            }
+            proc.set_exported(key, export);
         }
     }
     Ok(0)

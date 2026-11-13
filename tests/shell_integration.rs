@@ -646,6 +646,47 @@ expect!(
     "X=hello"
 );
 
+expect!(
+    unexported_hidden_from_env,
+    "X=hello; env | grep '^X=' || echo hidden; echo $X",
+    "hidden\nhello"
+);
+
+expect!(
+    prefix_assignment_visible_to_env,
+    "X=hello env | grep '^X='",
+    "X=hello"
+);
+
+expect!(
+    default_vars_exported,
+    "env | grep -E '^(HOME|PATH|PWD|USER)=' | wc -l",
+    "4"
+);
+
+expect!(
+    cd_exports_oldpwd,
+    "cd /tmp; env | grep -E '^(OLDPWD|PWD)='",
+    "OLDPWD=/home/lash\nPWD=/tmp"
+);
+
+expect!(
+    lua_sees_only_exported,
+    "X=1; lua -e 'print(os.getenv(\"X\"))'; export X; lua -e 'print(os.getenv(\"X\"))'",
+    "nil\n1"
+);
+
+#[test]
+fn embedder_vars_exported() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().env("BUILT", "1").build().unwrap();
+        shell.set_env("SET", "2");
+        let out = shell.run("env | grep -E '^(BUILT|SET)='").await;
+        assert_eq!(out.stdout, "BUILT=1\nSET=2\n");
+    }));
+}
+
 // ── State persistence across runs ───────────────────────────────────
 
 #[test]

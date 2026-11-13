@@ -3743,10 +3743,11 @@ async fn run_pipeline(
     let (stdin_back, mut stdin_returned) = tokio::sync::oneshot::channel();
     let mut stdin_back = (!redirects_stdin).then_some(stdin_back);
 
-    // Apply per-command env prefixes
+    // Apply per-command env prefixes, which the command sees exported
     for (i, env) in expanded_env.iter().enumerate() {
         for (k, v) in env {
             procs[i].set_env(k, v);
+            procs[i].set_exported(k, true);
         }
     }
 
@@ -3820,6 +3821,8 @@ async fn run_pipeline(
             if is_script {
                 // The child shell's argv[0], used as `$0` by `sh -c`.
                 state_proc.arg0 = name.clone();
+                // A child shell starts with only the exported variables.
+                state_proc.keep_exported_only();
             }
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
@@ -3921,7 +3924,9 @@ async fn run_pipeline(
             tasks.own(&handle);
             handles.push((i, handle));
         } else {
-            // External commands
+            // External commands see only the exported variables.
+            let mut child = child;
+            child.keep_exported_only();
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
                 run_stage(back, child, async move {

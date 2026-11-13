@@ -39,8 +39,11 @@ pub fn builtin_cd<'a>(
             return Ok(1);
         }
         let newpwd = proc.cwd.to_string_lossy().to_string();
-        proc.set_env("OLDPWD", &oldpwd);
-        proc.set_env("PWD", &newpwd);
+        // Programs the shell runs see both, as in bash.
+        for (key, value) in [("OLDPWD", oldpwd), ("PWD", newpwd.clone())] {
+            proc.set_env(key, value);
+            proc.set_exported(key, true);
+        }
 
         if print {
             let mut w = io::stdout()?;

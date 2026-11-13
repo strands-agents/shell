@@ -184,8 +184,9 @@ pub struct Process {
     /// Background job handles.
     pub bg_jobs: Vec<tokio::task::JoinHandle<(i32, String, String)>>,
     /// Stack of local variable scopes (for shell functions).
-    /// Each entry maps variable names to their previous value (None = was unset).
-    local_scopes: Vec<HashMap<String, Option<String>>>,
+    /// Each entry maps variable names to their previous value (None = was unset)
+    /// and whether they were exported.
+    local_scopes: Vec<HashMap<String, (Option<String>, bool)>>,
     fds: HashMap<Fd, FdKind>,
     /// Fds that read input fed from outside the shell, which can stay open.
     outside_fds: std::collections::HashSet<Fd>,
@@ -195,6 +196,8 @@ pub struct Process {
     pub optoff: i32,
     /// Set of readonly variable names.
     pub readonly_vars: Arc<std::collections::HashSet<String>>,
+    /// Names of the variables that programs the shell runs can see.
+    exported: Arc<std::collections::HashSet<String>>,
     /// Shell aliases.
     pub aliases: Arc<HashMap<String, String>>,
     /// Shell options turned on with `shopt -s`.
@@ -352,7 +355,9 @@ impl Process {
             }
         }
     }
+    /// Every variable in `env` is exported.
     pub fn new(cwd: PathBuf, env: HashMap<String, String>) -> Self {
+        let exported = Arc::new(env.keys().cloned().collect());
         Self {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
             cwd,
@@ -380,6 +385,7 @@ impl Process {
             bg_counter: 0,
             optoff: -1,
             readonly_vars: Arc::new(std::collections::HashSet::new()),
+            exported,
             aliases: Arc::new(HashMap::new()),
             shopts: std::collections::BTreeSet::new(),
             hash_table: Arc::new(HashMap::new()),
@@ -432,6 +438,7 @@ impl Process {
             bg_counter: 0,
             optoff: -1,
             readonly_vars: Arc::new(std::collections::HashSet::new()),
+            exported: Arc::new(std::collections::HashSet::new()),
             aliases: Arc::new(HashMap::new()),
             shopts: std::collections::BTreeSet::new(),
             hash_table: Arc::new(HashMap::new()),
@@ -544,6 +551,7 @@ impl Process {
             bg_counter: 0,
             optoff: self.optoff,
             readonly_vars: self.readonly_vars.clone(),
+            exported: self.exported.clone(),
             aliases: self.aliases.clone(),
             shopts: self.shopts.clone(),
             hash_table: self.hash_table.clone(),
@@ -824,7 +832,8 @@ impl Process {
         }
     }
 
-    /// Set an environment variable (COW — clones map on first write if shared).
+    /// Set a shell variable (COW — clones map on first write if shared). It stays
+    /// unexported unless it already is; see [`Self::set_exported`].
     /// Returns false if the variable is readonly.
     pub fn set_env(&mut self, key: impl Into<String>, value: impl Into<String>) -> bool {
         let key = key.into();
@@ -836,14 +845,44 @@ impl Process {
         true
     }
 
-    /// Remove an environment variable. Returns false if readonly.
+    /// Remove an environment variable and its export. Returns false if readonly.
     pub fn unset_env(&mut self, key: &str) -> bool {
         if self.readonly_vars.contains(key) {
             self.err_msg(&format!("strands-shell: {key}: readonly variable"));
             return false;
         }
         Arc::make_mut(&mut self.env).remove(key);
+        self.set_exported(key, false);
         true
+    }
+
+    /// Set whether programs the shell runs see the variable `key`.
+    pub fn set_exported(&mut self, key: &str, exported: bool) {
+        if self.exported.contains(key) != exported {
+            let names = Arc::make_mut(&mut self.exported);
+            if exported {
+                names.insert(key.to_string());
+            } else {
+                names.remove(key);
+            }
+        }
+    }
+
+    /// Keep only the variables that are both set and exported, the environment
+    /// a program the shell runs receives.
+    pub(crate) fn keep_exported_only(&mut self) {
+        if self.env.keys().any(|key| !self.exported.contains(key)) {
+            // Clone only the exported entries, not the whole shared map.
+            let env = self
+                .env
+                .iter()
+                .filter(|(key, _)| self.exported.contains(*key));
+            self.env = Arc::new(env.map(|(k, v)| (k.clone(), v.clone())).collect());
+        }
+        if self.exported.len() != self.env.len() {
+            let env = &self.env;
+            Arc::make_mut(&mut self.exported).retain(|key| env.contains_key(key));
+        }
     }
 
     /// Mark a variable as readonly.
@@ -895,7 +934,7 @@ impl Process {
     /// Pop the top local scope, restoring all localized variables.
     pub fn pop_local_scope(&mut self) {
         if let Some(scope) = self.local_scopes.pop() {
-            for (name, prev) in scope {
+            for (name, (prev, exported)) in scope {
                 match prev {
                     Some(val) => {
                         self.set_env(&name, &val);
@@ -904,6 +943,7 @@ impl Process {
                         self.unset_env(&name);
                     }
                 }
+                self.set_exported(&name, exported);
             }
         }
     }
@@ -914,7 +954,7 @@ impl Process {
         if let Some(scope) = self.local_scopes.last_mut() {
             scope
                 .entry(name.to_string())
-                .or_insert_with(|| self.env.get(name).cloned());
+                .or_insert_with(|| (self.env.get(name).cloned(), self.exported.contains(name)));
         }
         self.set_env(name, value);
     }
@@ -924,7 +964,7 @@ impl Process {
         if let Some(scope) = self.local_scopes.last_mut() {
             scope
                 .entry(name.to_string())
-                .or_insert_with(|| self.env.get(name).cloned());
+                .or_insert_with(|| (self.env.get(name).cloned(), self.exported.contains(name)));
         }
     }
 }
