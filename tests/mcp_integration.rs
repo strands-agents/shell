@@ -176,7 +176,7 @@ fn mcp_shell_timeout() {
     assert_eq!(timed_out["result"]["content"][0]["text"], "");
     assert_eq!(
         timed_out["result"]["content"][1]["text"],
-        "strands-shell: execution timeout exceeded\n"
+        "strands-shell: sleep: execution timeout exceeded\nstrands-shell: execution timeout exceeded\n"
     );
     assert_eq!(timed_out["result"]["metadata"]["exit_code"], 1);
 

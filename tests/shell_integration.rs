@@ -5532,13 +5532,201 @@ fn timeout_interrupts_sleep_with_failure() {
             .build()
             .unwrap();
         let out = shell.run("sleep 5").await;
-        assert_ne!(out.status, 0, "sleep past the deadline must fail");
+        assert_eq!(out.status, 1, "sleep past the deadline must fail");
         assert_eq!(
             out.stderr.trim(),
-            "strands-shell: execution timeout exceeded",
+            "strands-shell: sleep: execution timeout exceeded",
             "stderr={:?}",
             out.stderr
         );
+    }));
+}
+
+#[test]
+fn captured_timeout_stops_following_commands_before_host_writes() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "x=$(sleep 5 || echo ran > /out/marker)",
+            "x=$(if sleep 5; then :; else echo ran > /out/marker; fi)",
+            "{ sleep 5 || echo ran > /out/marker; } | cat",
+            "{ if sleep 5; then :; else echo ran > /out/marker; fi; } | cat",
+            "x=$(sleep 5; echo ran > /out/marker)",
+            "{ sleep 5; echo ran > /out/marker; } | cat",
+        ] {
+            let dir = TestDir::new("captured_timeout_host_write");
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let before = shell.run("echo before > /out/before").await;
+            assert_eq!(before.status, 0, "{script}: {}", before.stderr);
+            assert_eq!(std::fs::read(dir.join("before")).unwrap(), b"before\n");
+
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            assert!(!dir.join("marker").exists(), "{script}");
+        }
+    }));
+}
+
+#[test]
+fn a_substitution_cut_short_by_the_deadline_does_not_run_the_command_it_feeds() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "rm -rf \"/out/$(sleep 5; echo sub)\"",
+            "rm -rf \"/out/$(sleep 5 && echo sub)\"",
+            "rm -rf \"/out/$(sleep 5)\"",
+            "d=$(sleep 5; echo sub); rm -rf \"/out/$d\"",
+            "echo ran > \"/out/marker$(sleep 5)\"",
+        ] {
+            let dir = TestDir::new("substitution_timeout_host_write");
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+            std::fs::create_dir_all(dir.join("keep")).unwrap();
+            std::fs::write(dir.join("keep/important"), b"keep").unwrap();
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let within = shell.run("rm -rf \"/out/$(echo sub)\"").await;
+            assert_eq!(within.status, 0, "{script}: {}", within.stderr);
+            assert!(!dir.join("sub").exists(), "{script}");
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            assert!(dir.join("keep/important").exists(), "{script}");
+            assert!(dir.join("sub").exists(), "{script}");
+            assert!(!dir.join("marker").exists(), "{script}");
+        }
+    }));
+}
+
+#[test]
+fn timed_out_redirect_preserves_host_files() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "{ echo new; } > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "(echo new) > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "x=$(exit > \"/out/$(printf keep; sleep 5; printf suffix)\")",
+            "eval : > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "x=$(eval : > \"/out/$(printf keep; sleep 5; printf suffix)\")",
+            "source /out/code > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "x=$(source /out/code > \"/out/$(printf keep; sleep 5; printf suffix)\")",
+        ] {
+            let dir = TestDir::new("timed_out_compound_redirect");
+            for name in ["keep", "keepsuffix"] {
+                std::fs::write(dir.join(name), name).unwrap();
+            }
+            std::fs::write(dir.join("code"), ":\n").unwrap();
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            for name in ["keep", "keepsuffix"] {
+                assert_eq!(
+                    std::fs::read(dir.join(name)).unwrap(),
+                    name.as_bytes(),
+                    "{script}: {name}"
+                );
+            }
+        }
+    }));
+}
+
+#[test]
+fn timed_out_captured_compound_redirect_does_not_create_host_files() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "x=$({ :; } <> \"/out/$(printf new; sleep 5; printf suffix)\")",
+            "x=$( (: ) <> \"/out/$(printf new; sleep 5; printf suffix)\")",
+        ] {
+            let dir = TestDir::new("timed_out_captured_compound_redirect");
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            assert!(!dir.join("new").exists(), "{script}");
+            assert!(!dir.join("newsuffix").exists(), "{script}");
+        }
+    }));
+}
+
+#[test]
+fn a_here_doc_cut_short_by_the_deadline_writes_no_partial_body() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "cat > /out/important <<EOF\nkey=$(sleep 5; echo val)\nEOF",
+            "cat > /out/important <<EOF\nkey=$(sleep 5 && echo val)\nEOF",
+            "{ cat; } > /out/important <<EOF\nkey=$(sleep 5; echo val)\nEOF",
+        ] {
+            let dir = TestDir::new("heredoc_timeout_host_write");
+            std::fs::write(dir.join("important"), b"orig").unwrap();
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let within = shell
+                .run("cat > /out/within <<EOF\nkey=$(echo val)\nEOF")
+                .await;
+            assert_eq!(within.status, 0, "{script}: {}", within.stderr);
+            assert_eq!(std::fs::read(dir.join("within")).unwrap(), b"key=val\n");
+
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            let content = std::fs::read(dir.join("important")).unwrap();
+            assert!(!content.starts_with(b"key="), "{script}: {content:?}");
+        }
+    }));
+}
+
+#[test]
+fn a_here_doc_reads_its_target_after_the_target_is_truncated() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("echo old > /tmp/f; cat > /tmp/f <<EOF\n[$(cat /tmp/f)]\nEOF\ncat /tmp/f")
+            .await;
+        assert_eq!(out.stdout, "[]\n", "{}", out.stderr);
     }));
 }
 
