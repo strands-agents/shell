@@ -1754,6 +1754,7 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
         proc.captured_stderr.push_str(&sub.captured_stderr);
     }
     proc.last_subst_status = Some(captured_status(result, sub.last_exit));
+    proc.deadline_stop |= sub.deadline_stop;
     output
 }
 
@@ -2081,6 +2082,10 @@ async fn run_capturing_status(
                     proc.pending_exit = false;
                     let _ = handle.await;
                     proc.close(0);
+                    if let Err(flow) = stop_at_deadline(proc) {
+                        output.push_str(&out);
+                        return (output, Err(flow));
+                    }
                     if proc.opt_pipefail && exit == 0 {
                         exit = compound_exit;
                     }
@@ -2361,6 +2366,7 @@ async fn execute_item(
                 }
             }
             proc.close(0);
+            stop_at_deadline(proc)?;
             if proc.opt_pipefail && exit == 0 {
                 exit = compound_exit;
             }
@@ -3112,6 +3118,7 @@ async fn execute_pipeline_checked(
                     };
                     let exit = execute_pipeline(os, proc, &[fake_cmd]).await;
                     proc.pending_exit = false;
+                    stop_at_deadline(proc)?;
                     return Ok(exit);
                 }
                 _ => {}
@@ -3121,11 +3128,20 @@ async fn execute_pipeline_checked(
     let exit = execute_pipeline(os, proc, pipeline).await;
     // nounset errors and `exit` inside a function are fatal — abort the shell
     let function_exited = std::mem::take(&mut proc.pending_exit);
+    stop_at_deadline(proc)?;
     if proc.nounset_error || function_exited {
         proc.nounset_error = false;
         return Err(ControlFlow::Exit(exit));
     }
     Ok(exit)
+}
+
+/// Stop the command list when a pipeline already reported the deadline.
+fn stop_at_deadline(proc: &Process) -> Result<(), ControlFlow> {
+    if proc.deadline_stop {
+        return Err(ControlFlow::Exit(1));
+    }
+    Ok(())
 }
 
 /// Get the optional numeric argument for break/continue (default 1).
@@ -3249,6 +3265,7 @@ async fn run_pipeline(
     pipeline: &[parser::Command],
     capture: bool,
 ) -> (i32, String) {
+    shell_proc.deadline_stop = false;
     let len = pipeline.len();
     let mut tasks = ForegroundTasks::new(os.as_ref(), shell_proc);
 
@@ -3289,6 +3306,15 @@ async fn run_pipeline(
             redirs.push((word, expanded));
         }
         expanded_redirects.push(redirs);
+    }
+
+    // A command substitution can use up the deadline before dispatch and redirection.
+    if let Some(msg) = shell_proc.check_limits() {
+        if !shell_proc.deadline_stop {
+            shell_proc.err_msg(msg);
+        }
+        shell_proc.deadline_stop = true;
+        return (1, String::new());
     }
 
     // Abort if nounset error occurred during expansion

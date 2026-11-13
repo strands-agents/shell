@@ -169,6 +169,8 @@ pub struct Process {
     pub opt_pipefail: bool,
     /// Set when a nounset error occurs during expansion.
     pub nounset_error: bool,
+    /// Set when the last pipeline stopped before dispatch because the deadline passed.
+    pub(crate) deadline_stop: bool,
     /// Set when `exit` ran inside a function called by a single-command pipeline.
     pub(crate) pending_exit: bool,
     /// An unsupported array aborts its function without requesting a shell exit.
@@ -360,6 +362,7 @@ impl Process {
             opt_xtrace: false,
             opt_pipefail: false,
             nounset_error: false,
+            deadline_stop: false,
             pending_exit: false,
             refused_array: false,
             last_subst_status: None,
@@ -409,6 +412,7 @@ impl Process {
             opt_xtrace: false,
             opt_pipefail: false,
             nounset_error: false,
+            deadline_stop: false,
             pending_exit: false,
             refused_array: false,
             last_subst_status: None,
@@ -518,6 +522,7 @@ impl Process {
             opt_xtrace: self.opt_xtrace,
             opt_pipefail: self.opt_pipefail,
             nounset_error: false,
+            deadline_stop: false,
             pending_exit: false,
             refused_array: false,
             last_subst_status: None,
