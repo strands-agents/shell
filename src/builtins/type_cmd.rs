@@ -22,11 +22,11 @@ pub fn builtin_type<'a>(
                 wprintln!(w, "{} is a shell builtin", name)?;
             } else if proc.get_function(name).is_some() {
                 wprintln!(w, "{} is a shell function", name)?;
+            } else if crate::command_fallback::serves(os, name) {
+                wprintln!(w, "{} is a shell builtin", name)?;
             } else if let Some(path) = proc.hash_table.get(name.as_str()) {
                 wprintln!(w, "{} is hashed ({})", name, path)?;
-            } else if crate::commands::lookup(name).is_some()
-                || crate::command_fallback::serves(os, name)
-            {
+            } else if crate::commands::lookup(name).is_some() {
                 wprintln!(w, "{} is a shell builtin", name)?;
             } else {
                 wprintln!(w, "strands-shell: type: {}: not found", name)?;

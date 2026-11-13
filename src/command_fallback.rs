@@ -46,8 +46,9 @@ pub trait CommandFallback: Send + Sync {
     /// Shell treats a served name like a registered command: `command -v`,
     /// `command -V`, `type`, and `hash` find it, and Shell sends it to
     /// [`CommandFallback::run`] without a `PATH` search. Builtins,
-    /// functions, and registered commands still win. Shell never asks about
-    /// a name that contains `/`. The default serves no name.
+    /// functions, registered commands, `sh`, and `lash` still win, and a
+    /// served name that `run` declines still fails with status 127. Shell
+    /// never asks about a name that contains `/`. The default serves no name.
     fn serves(&self, _name: &str) -> bool {
         false
     }

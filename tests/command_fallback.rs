@@ -579,13 +579,13 @@ fn a_served_name_wins_over_a_path_script_of_the_same_name() {
             ("PATH=/tmp/bin; python3 --version", "served\n"),
             ("PATH=/tmp/bin; command -v python3", "python3\n"),
             (
-                "PATH=/tmp/bin; hash python3; command -v python3",
-                "python3\n",
+                "PATH=/tmp/bin; hash python3; type python3",
+                "python3 is a shell builtin\n",
             ),
             ("/tmp/bin/python3", "shadow\n"),
             (
-                "python3() { echo function; }; python3; unset -f python3",
-                "function\n",
+                "python3() { echo function; }; python3; command -V python3; unset -f python3",
+                "function\npython3 is a shell function\n",
             ),
         ];
         for (script, stdout) in cases {
@@ -597,6 +597,23 @@ fn a_served_name_wins_over_a_path_script_of_the_same_name() {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].program, "python3");
         assert_eq!(calls[0].args, ["--version"]);
+    });
+}
+
+#[test]
+fn type_reports_a_served_name_over_a_stale_hash_entry() {
+    block_on(async {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut shell = python_shell(calls.clone());
+        plant_path_script(&mut shell, "python3").await;
+        Arc::make_mut(&mut shell.proc.hash_table)
+            .insert("python3".into(), "/tmp/bin/python3".into());
+        let out = shell.run("type python3; python3").await;
+        assert_eq!(
+            out.stdout, "python3 is a shell builtin\nserved\n",
+            "{}",
+            out.stderr
+        );
     });
 }
 
