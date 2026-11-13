@@ -40,8 +40,9 @@ Date strings for -d:
   YYYY-MM-DD HH:MM[:SS[.N]]    also with T between date and time; a
                                time may end in Z, UTC, +HH, +HHMM or
                                +HH:MM, otherwise it is UTC
+  HH:MM[:SS]                   that time today
   now, today, yesterday, tomorrow
-  [+-]N UNIT [ago]             relative offset; UNIT is year, month,
+  [+-][N] UNIT [ago]           relative offset; UNIT is year, month,
                                fortnight, week, day, hour, min[ute] or
                                sec[ond], optionally plural
 
@@ -298,9 +299,14 @@ impl<'a> Cursor<'a> {
         })
     }
 
-    /// Reads `YYYY-MM-DD`, rejecting days the month does not have.
+    /// Reads `YYYY-MM-DD`, rejecting days the month does not have. Like GNU,
+    /// a two-digit year is 1969-2068.
     fn date(&mut self) -> Option<(i64, i64, i64)> {
-        let year = self.number(9)?;
+        let start = self.i;
+        let mut year = self.number(9)?;
+        if self.i - start == 2 {
+            year += if year < 69 { 2000 } else { 1900 };
+        }
         self.eat(b'-');
         let month = self.number(2)?;
         if !self.eat(b'-') {
@@ -386,9 +392,10 @@ fn parse_date(input: &str, now: (i64, u32)) -> Option<(i64, u32)> {
         let mut item = None;
         if c.is_ascii_alphabetic() {
             match cur.take_while(|c| c.is_ascii_alphabetic()) {
+                // Like GNU, these are not relative items `ago` can negate.
                 "now" | "today" => {}
-                "yesterday" => item = Some((Rel::Days, -1)),
-                "tomorrow" => item = Some((Rel::Days, 1)),
+                "yesterday" => rel[Rel::Days as usize] = rel[Rel::Days as usize].checked_sub(1)?,
+                "tomorrow" => rel[Rel::Days as usize] = rel[Rel::Days as usize].checked_add(1)?,
                 "ago" => {
                     let (k, n) = last.take()?;
                     rel[k as usize] = rel[k as usize].checked_sub(n.checked_mul(2)?)?;
@@ -589,6 +596,10 @@ mod tests {
         for (s, want) in [
             ("2024-01-15", "2024-01-15 00:00:00.000000000"),
             ("2024-1-5", "2024-01-05 00:00:00.000000000"),
+            ("24-01-15", "2024-01-15 00:00:00.000000000"),
+            ("68-12-31", "2068-12-31 00:00:00.000000000"),
+            ("69-01-01", "1969-01-01 00:00:00.000000000"),
+            ("024-01-15", "0024-01-15 00:00:00.000000000"),
             ("2024-02-29", "2024-02-29 00:00:00.000000000"),
             ("1960-06-01", "1960-06-01 00:00:00.000000000"),
             ("2024-01-15 10:30", "2024-01-15 10:30:00.000000000"),
@@ -618,6 +629,7 @@ mod tests {
             "10:00 11:00",
             "xyz",
             "ago",
+            "tomorrow ago",
             "1 day ago ago",
             "5 bogus",
         ] {
