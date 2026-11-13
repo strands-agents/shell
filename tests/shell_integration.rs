@@ -660,6 +660,44 @@ fn state_persists_across_runs() {
 }
 
 #[test]
+fn random_seed_persists_across_runs() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell.run("RANDOM=42").await;
+        let out = shell.run("echo $RANDOM $RANDOM").await;
+        assert_eq!(out.stdout.trim(), "17772 26794");
+    }));
+}
+
+#[test]
+fn random_changes_between_expansions() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("for i in 1 2 3 4 5 6 7 8; do echo $RANDOM; done")
+            .await;
+        let values: std::collections::HashSet<&str> = out.stdout.lines().collect();
+        assert!(values.len() > 1, "{}", out.stdout);
+    }));
+}
+
+#[test]
+fn random_in_subshell_differs_from_parent() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("RANDOM=42; echo $(echo $RANDOM $RANDOM $RANDOM); echo $RANDOM $RANDOM $RANDOM")
+            .await;
+        let lines: Vec<&str> = out.stdout.lines().collect();
+        assert_eq!(lines[1], "17772 26794 1435");
+        assert_ne!(lines[0], lines[1]);
+    }));
+}
+
+#[test]
 fn cd_persists_across_runs() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {

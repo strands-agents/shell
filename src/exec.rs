@@ -903,9 +903,7 @@ impl<'a> ArithParser<'a> {
 
     /// Resolve a variable name to its integer value.
     fn var_val(&self, name: &str) -> i64 {
-        self.proc
-            .env
-            .get(name)
+        resolve_var(self.proc, name)
             .and_then(|v| v.parse().ok())
             .unwrap_or(0)
     }
@@ -1344,6 +1342,7 @@ fn resolve_var(proc: &Process, name: &str) -> Option<String> {
         "$" => Some(proc.pid.to_string()),
         "!" => proc.last_bg_pid.map(|p| p.to_string()),
         "#" => Some(proc.args.len().to_string()),
+        "RANDOM" => Some(proc.next_random().to_string()),
         "-" => {
             let mut flags = String::new();
             if proc.opt_errexit {
@@ -1390,7 +1389,7 @@ fn check_nounset(proc: &mut Process, name: &str) -> bool {
     }
     // Special variables never trigger nounset
     match name {
-        "?" | "$" | "!" | "#" | "-" | "0" | "@" | "*" => return false,
+        "?" | "$" | "!" | "#" | "-" | "0" | "@" | "*" | "RANDOM" => return false,
         n if n.len() == 1 && n.as_bytes()[0].is_ascii_digit() => return false,
         _ => {}
     }
