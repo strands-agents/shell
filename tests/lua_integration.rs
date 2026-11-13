@@ -1497,3 +1497,47 @@ fn lua_reads_a_closed_channel_stdin_as_before() {
         }
     }));
 }
+
+#[test]
+fn outside_input_stays_outside_input_through_substitutions_and_pipelines() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let lua = r#"lua -e 'print("[" .. io.read("*a") .. "]")'"#;
+        for script in [
+            format!(r#"x=$({lua}); echo "$x""#),
+            format!("( {lua} )"),
+            format!("x=$(true); {lua}"),
+            format!("x=$(echo a | cat); {lua}"),
+            format!("true </dev/null; {lua}"),
+            format!("echo a | cat >/dev/null; {lua}"),
+        ] {
+            let (output, status) =
+                run_with_open_outside_stdin(&script, b"print('OUTSIDE')\n").await;
+            assert_eq!(output, "[]\n", "{script}");
+            assert_eq!(status, 0, "{script}");
+        }
+    }));
+}
+
+#[test]
+fn a_substitution_reads_outside_input_with_cat() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        sender
+            .send(bytes::Bytes::from_static(b"{\"event\":1}"))
+            .await
+            .unwrap();
+        drop(sender);
+        shell.proc.set_outside_reader(0, receiver);
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            shell.run(r#"input=$(cat); echo "[$input]""#),
+        )
+        .await
+        .expect("a closed stdin ends");
+        assert_eq!(out.stdout, "[{\"event\":1}]\n", "{}", out.stderr);
+        assert_eq!(out.status, 0);
+    }));
+}

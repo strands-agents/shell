@@ -701,6 +701,23 @@ impl Process {
         self.fds.insert(fd, kind);
     }
 
+    /// Take `fd` out of the table, to put back with [`Self::put_fd`].
+    pub(crate) fn take_fd(&mut self, fd: Fd) -> Option<TakenFd> {
+        let kind = self.fds.remove(&fd)?;
+        let outside = self.outside_fds.remove(&fd);
+        Some(TakenFd { kind, outside })
+    }
+
+    /// Put back an fd taken with [`Self::take_fd`], as input from outside the shell if it was.
+    pub(crate) fn put_fd(&mut self, fd: Fd, taken: TakenFd) {
+        if taken.outside {
+            self.outside_fds.insert(fd);
+        } else {
+            self.outside_fds.remove(&fd);
+        }
+        self.fds.insert(fd, taken.kind);
+    }
+
     /// Set the stderr channel for sandboxed error output.
     pub fn set_err_tx(&mut self, tx: mpsc::Sender<Bytes>) {
         self.err_tx = Some(tx);
@@ -999,6 +1016,12 @@ pub fn base64_encode(input: &[u8]) -> String {
 /// Create a bounded channel pair for use as a pipe.
 pub fn pipe(buffer: usize) -> (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) {
     mpsc::channel(buffer)
+}
+
+/// An fd taken out of a process with [`Process::take_fd`].
+pub(crate) struct TakenFd {
+    kind: FdKind,
+    outside: bool,
 }
 
 /// Owned async reader extracted from a Process fd.
