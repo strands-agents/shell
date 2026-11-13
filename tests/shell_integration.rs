@@ -4124,6 +4124,83 @@ fn mktemp_template() {
     }));
 }
 
+// ── base64 coverage ─────────────────────────────────────────────────
+
+#[test]
+fn base64_round_trips_every_byte_value() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let data: Vec<u8> = (0..=255).collect();
+        shell.write_file("/tmp/bin", &data).await.unwrap();
+        let out = shell
+            .run("base64 /tmp/bin > /tmp/enc && base64 -d /tmp/enc > /tmp/dec")
+            .await;
+        assert_eq!((out.status, out.stderr.as_str()), (0, ""));
+        let enc = shell.read_file("/tmp/enc").await.unwrap();
+        let lines: Vec<&[u8]> = enc.split(|&b| b == b'\n').collect();
+        assert_eq!(lines.len(), 6, "five lines plus the empty tail");
+        assert!(lines[..4].iter().all(|line| line.len() == 76));
+        assert!(enc.starts_with(b"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygp"));
+        assert_eq!(shell.read_file("/tmp/dec").await.unwrap(), data);
+    }));
+}
+
+#[test]
+fn base64_decodes_non_utf8_bytes_from_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("echo //79AIA= | base64 -d > /tmp/out").await;
+        assert_eq!((out.status, out.stderr.as_str()), (0, ""));
+        assert_eq!(
+            shell.read_file("/tmp/out").await.unwrap(),
+            [0xff, 0xfe, 0xfd, 0x00, 0x80]
+        );
+    }));
+}
+
+#[test]
+fn base64_encodes_non_utf8_bytes_from_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .write_file("/tmp/bin", &[0xff, 0xfe, 0xfd, 0x00, 0x80])
+            .await
+            .unwrap();
+        let out = shell.run("base64 -w 0 < /tmp/bin").await;
+        assert_eq!((out.status, out.stdout.as_str()), (0, "//79AIA="));
+    }));
+}
+
+shell_test!(
+    base64_rejects_a_bad_wrap_size,
+    "echo hi | base64 -w x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("invalid wrap size"), "{}", out.stderr);
+    }
+);
+
+shell_test!(
+    base64_reports_a_closed_stdin,
+    "base64 <&-",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert!(!out.stderr.is_empty(), "expected an error on stderr");
+    }
+);
+
+shell_test!(
+    base64_rejects_a_second_file,
+    "base64 a b",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("extra operand"), "{}", out.stderr);
+    }
+);
+
 // ── test builtin coverage ───────────────────────────────────────────
 
 expect!(

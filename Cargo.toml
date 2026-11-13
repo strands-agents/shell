@@ -33,6 +33,7 @@ wasm = []
 # ----- Cross-platform dependencies (pure Rust, WASM-safe) -----
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive"], optional = true }
 lexopt = "0.3"
