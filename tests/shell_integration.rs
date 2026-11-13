@@ -13660,3 +13660,17 @@ shell_test!(
         assert_eq!(out.status, 1);
     }
 );
+expect_output!(
+    tac_finds_an_overlapping_separator_from_the_end,
+    "printf 'xaaay' | tac -s aa",
+    "yxaaa",
+    "",
+    0
+);
+expect_output!(
+    tac_second_dash_reads_nothing,
+    "printf 'a\\nb\\n' | tac - -",
+    "b\na\n",
+    "",
+    0
+);

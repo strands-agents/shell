@@ -8,24 +8,31 @@ Options:
   -b, --before             attach the separator before instead of after
   -s, --separator=STRING   use STRING as the separator instead of newline";
 
+/// Output is written in chunks of about this many bytes.
+const CHUNK: usize = 8192;
+
 /// Splits `data` into records that end with `sep`, or start with it when `before`.
+///
+/// Like GNU tac, the separator is searched from the end, which matters when it can
+/// overlap itself (`-s aa` on `aaa`).
 fn records<'a>(data: &'a [u8], sep: &[u8], before: bool) -> Vec<&'a [u8]> {
-    let mut records = Vec::new();
-    if sep.is_empty() {
-        records.push(data);
-        return records;
-    }
-    let mut start = 0;
-    let mut i = 0;
-    while i + sep.len() <= data.len() {
-        if &data[i..i + sep.len()] == sep {
-            let end = if before { i } else { i + sep.len() };
-            records.push(&data[start..end]);
-            start = end;
-            i += sep.len();
-        } else {
-            i += 1;
+    let mut cuts = Vec::new();
+    if !sep.is_empty() {
+        let mut at = data.len().checked_sub(sep.len());
+        while let Some(i) = at {
+            if &data[i..i + sep.len()] == sep {
+                cuts.push(if before { i } else { i + sep.len() });
+                at = i.checked_sub(sep.len());
+            } else {
+                at = i.checked_sub(1);
+            }
         }
+    }
+    let mut records = Vec::with_capacity(cuts.len() + 1);
+    let mut start = 0;
+    for &cut in cuts.iter().rev() {
+        records.push(&data[start..cut]);
+        start = cut;
     }
     records.push(&data[start..]);
     records
@@ -57,11 +64,17 @@ async fn cmd_tac(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut status = 0;
     // Stderr is taken once, on the first error, so later errors are reported too.
     let mut stderr = None;
+    let mut stdin_taken = false;
     for path in &files {
         let mut data = Vec::new();
         let read = async {
             let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if path == "-" {
-                Box::new(io::stdin()?)
+                // A second `-` finds standard input already read to the end.
+                if std::mem::replace(&mut stdin_taken, true) {
+                    Box::new(tokio::io::empty())
+                } else {
+                    Box::new(io::stdin()?)
+                }
             } else {
                 let fd = io::open(os, path, OpenFlags::read()).await?;
                 Box::new(io::take_reader(fd)?)
@@ -77,13 +90,18 @@ async fn cmd_tac(os: &dyn Kernel, args: &[String]) -> CommandResult {
             status = 1;
             continue;
         }
-        let reversed: Vec<u8> = records(&data, separator.as_bytes(), before)
+        let mut out = Vec::new();
+        for record in records(&data, separator.as_bytes(), before)
             .into_iter()
             .rev()
-            .flatten()
-            .copied()
-            .collect();
-        w.write_all(&reversed).await?;
+        {
+            out.extend_from_slice(record);
+            if out.len() >= CHUNK {
+                w.write_all(&out).await?;
+                out.clear();
+            }
+        }
+        w.write_all(&out).await?;
     }
     Ok(status)
 }
