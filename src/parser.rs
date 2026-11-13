@@ -2325,7 +2325,7 @@ mod tests {
         Command {
             env: Vec::new(),
             args: vec![
-                compound_stage_word(),
+                vec![lit(""), lit(COMPOUND_STAGE)],
                 vec![WordPart::DoubleQuoted(vec![WordPart::Var("@".into())])],
             ],
             redirects,

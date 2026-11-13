@@ -894,6 +894,10 @@ fn a_function_the_script_names_strands_compound_is_checked() {
             "_strands_compound() { echo ran; }; _strands_compound a",
             "_strands_compound() { echo ran; }; true | _strands_compound a",
             "( _strands_compound() { echo ran; }; true | _strands_compound a )",
+            "_strands_compound() { echo ran; }; \"\"_strands_compound a",
+            "_strands_compound() { echo ran; }; ''_strands_compound a",
+            "_strands_compound() { echo ran; }; true | \"\"_strands_compound a",
+            "_strands_compound() { echo ran; }; true | ''_strands_compound a",
         ] {
             let (mut shell, events) = checking_shell();
             let out = shell.run(script).await;
