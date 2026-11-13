@@ -1,3 +1,4 @@
+set -u
 i=0
 while [ $i -lt 200 ]; do
   r=$RANDOM

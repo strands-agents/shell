@@ -6,3 +6,5 @@ RANDOM=-5
 echo $((RANDOM % 100))
 RANDOM=4294967338
 echo "$RANDOM"
+RANDOM=42
+echo ${RANDOM:-z} "${RANDOM-z}" $RANDOM

@@ -555,7 +555,8 @@ fn expand_part_split<'a>(
                     // A quoted expansion is one field even when it comes out empty.
                     segments.last_mut().unwrap().push("", false, false);
                 }
-                if uses_alternate_word(proc, name, op, *colon) {
+                let val = resolve_var(proc, name);
+                if uses_alternate_word(val.as_deref(), op, *colon) {
                     for p in word {
                         if !quoted && let WordPart::Literal(s) = p {
                             // Unquoted, the word's own text is split like an expansion.
@@ -565,7 +566,7 @@ fn expand_part_split<'a>(
                         }
                     }
                 } else if op == "-"
-                    && let Some(v) = resolve_var(proc, name)
+                    && let Some(v) = val
                 {
                     segments.last_mut().unwrap().push(&v, !quoted, false);
                 }
@@ -594,8 +595,8 @@ fn expand_part_split<'a>(
 }
 
 /// Whether `${name-word}` or `${name+word}` expands to `word` rather than to the value.
-fn uses_alternate_word(proc: &Process, name: &str, op: &str, colon: bool) -> bool {
-    let is_unset_or_null = match resolve_var(proc, name) {
+fn uses_alternate_word(val: Option<&str>, op: &str, colon: bool) -> bool {
+    let is_unset_or_null = match val {
         None => true,
         Some(v) => colon && v.is_empty(),
     };
