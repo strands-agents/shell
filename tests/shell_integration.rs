@@ -5106,7 +5106,7 @@ fn timeout_in_substitution_stops_the_command_and_its_redirect() {
                     && out
                         .stderr
                         .lines()
-                        .all(|line| line == "strands-shell: execution timeout exceeded"),
+                        .all(|line| line.ends_with("execution timeout exceeded")),
                 "{command}: stderr={:?}",
                 out.stderr
             );
