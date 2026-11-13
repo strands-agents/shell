@@ -159,11 +159,22 @@ fn walk<'a>(
 ) -> Pin<Box<dyn Future<Output = std::io::Result<u64>> + Send + 'a>> {
     Box::pin(async move {
         // On a direct bind, lstat follows links (#254), so read_link is what
-        // tells a link apart. A link's size is the length of its target.
-        let (mut size, is_dir) = match io::read_link(os, path).await {
-            Ok(target) => (target.len() as u64, false),
-            Err(_) => {
-                let st = io::lstat(os, path).await;
+        // tells a link apart. A link's size is the length of its target. An
+        // operand ending in "/" or "/." asks for the directory a link points to.
+        let follow = path.ends_with('/') || path.ends_with("/.");
+        let link = if follow {
+            None
+        } else {
+            io::read_link(os, path).await.ok()
+        };
+        let (mut size, is_dir) = match link {
+            Some(target) => (target.len() as u64, false),
+            None => {
+                let st = if follow {
+                    io::stat(os, path).await
+                } else {
+                    io::lstat(os, path).await
+                };
                 (st.len, st.is_dir)
             }
         };

@@ -4521,6 +4521,16 @@ shell_test!(
         assert_eq!(out.stdout, "1\tdu/a/b\n2\tdu/a//\n");
     }
 );
+shell_test!(
+    du_follows_a_link_operand_with_a_trailing_slash,
+    &format!("{DU_TREE}; ln -s du/a al; du -b al al/ al/."),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(
+            out.stdout,
+            "4\tal\n1\tal/b\n2001\tal/\n1\tal/./b\n2001\tal/.\n"
+        );
+    }
+);
 
 // The kernel's lstat follows links on a direct bind (#254); du still counts
 // only the link, like GNU.
