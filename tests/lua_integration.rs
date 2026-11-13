@@ -1371,3 +1371,48 @@ fn lua_memory_limit_prevents_exhaustion() {
         );
     }));
 }
+
+// ── background jobs ─────────────────────────────────────────────────
+
+/// Wait until `path` has content, then return its size before and after a pause.
+async fn growth_of(reader: &mut Shell, path: &str) -> (String, String) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while reader.run(&format!("test -s {path}")).await.status != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the loop never ran");
+    let before = reader.run(&format!("wc -c < {path}")).await.stdout;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let after = reader.run(&format!("wc -c < {path}")).await.stdout;
+    (before, after)
+}
+
+#[test]
+fn dropping_the_shell_stops_a_lua_background_job() {
+    let lua_loops = [
+        r#"lua -e 'os.execute("while :; do printf x >> /tmp/l; sleep 0.01; done &")'"#,
+        r#"lua -e 'io.popen("while :; do printf x >> /tmp/l; sleep 0.01; done &")'"#,
+        r#"lua -e 'os.execute("while :; do printf x >> /tmp/l; sleep 0.01; done | cat")' &"#,
+        r#"lua -e 'io.popen("while :; do printf x >> /tmp/l; sleep 0.01; done | cat")' &"#,
+    ];
+    for script in lua_loops {
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let mut shell = Shell::builder().build().unwrap();
+            let mut reader = Shell::with_kernel(shell.kernel().clone());
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 0, "{script}: {}", out.stderr);
+            let (before, after) = growth_of(&mut reader, "/tmp/l").await;
+            assert_ne!(before, after, "an open shell stopped {script}");
+            drop(shell);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let (before, after) = growth_of(&mut reader, "/tmp/l").await;
+            assert_eq!(
+                before, after,
+                "{script} kept writing after the shell dropped"
+            );
+        }));
+    }
+}

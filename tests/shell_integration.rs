@@ -13079,3 +13079,97 @@ fn output_is_captured_when_no_writer_is_installed() {
         );
     }));
 }
+
+#[test]
+fn dropping_the_shell_stops_a_background_loop() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let mut reader = Shell::with_kernel(shell.kernel().clone());
+        let out = shell
+            .run("while :; do printf x >> /tmp/tick; sleep 0.01; done &")
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while reader.run("test -s /tmp/tick").await.status != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the loop never ran");
+        drop(shell);
+        let before = reader.run("wc -c < /tmp/tick").await.stdout;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let after = reader.run("wc -c < /tmp/tick").await.stdout;
+        assert_eq!(
+            before, after,
+            "the loop kept writing after the shell dropped"
+        );
+    }));
+}
+
+/// Wait until `path` has content, then return its size after `pause`.
+async fn growth_of(reader: &mut Shell, path: &str) -> (String, String) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while reader.run(&format!("test -s {path}")).await.status != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the loop never ran");
+    let before = reader.run(&format!("wc -c < {path}")).await.stdout;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let after = reader.run(&format!("wc -c < {path}")).await.stdout;
+    (before, after)
+}
+
+const PIPED_LOOPS: [&str; 4] = [
+    "while :; do printf x >> /tmp/tick; sleep 0.01; done | cat &",
+    "f() { while :; do printf x >> /tmp/tick; sleep 0.01; done; }; f | cat &",
+    "(while :; do printf x >> /tmp/tick; sleep 0.01; done | cat) &",
+    "(while :; do printf x >> /tmp/tick; sleep 0.01; done) | cat &",
+];
+
+#[test]
+fn dropping_the_shell_stops_a_background_pipeline() {
+    for script in PIPED_LOOPS {
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let mut shell = Shell::builder().build().unwrap();
+            let mut reader = Shell::with_kernel(shell.kernel().clone());
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 0, "{script}: {}", out.stderr);
+            let (before, after) = growth_of(&mut reader, "/tmp/tick").await;
+            assert_ne!(before, after, "an open shell stopped {script}");
+            drop(shell);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let (before, after) = growth_of(&mut reader, "/tmp/tick").await;
+            assert_eq!(
+                before, after,
+                "{script} kept writing after the shell dropped"
+            );
+        }));
+    }
+}
+
+#[test]
+fn cancelling_wait_stops_a_background_pipeline() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let mut reader = Shell::with_kernel(shell.kernel().clone());
+        let out = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            shell.run("while :; do printf x >> /tmp/tick; sleep 0.01; done | cat & wait"),
+        )
+        .await;
+        assert!(out.is_err(), "wait returned before cancellation");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (before, after) = growth_of(&mut reader, "/tmp/tick").await;
+        assert_eq!(
+            before, after,
+            "the pipeline kept writing after wait was cancelled"
+        );
+        assert_eq!(shell.run("echo ready").await.stdout, "ready\n");
+    }));
+}

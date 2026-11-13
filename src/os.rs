@@ -17,6 +17,26 @@ pub use crate::command_fallback::{CommandContext, CommandFallback, CommandInput,
 /// Monotonic counter for virtual PIDs.
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 
+type TaskList = std::sync::Mutex<Vec<tokio::task::AbortHandle>>;
+
+/// Tasks that abort when this value drops.
+#[derive(Default)]
+pub(crate) struct Tasks(Arc<TaskList>);
+
+impl Tasks {
+    pub(crate) fn new(handles: Vec<tokio::task::AbortHandle>) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(handles)))
+    }
+}
+
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        for task in self.0.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            task.abort();
+        }
+    }
+}
+
 /// Metadata about a directory entry.
 pub struct DirEntry {
     pub name: String,
@@ -208,6 +228,10 @@ pub struct Process {
     pub umask: u32,
     /// Host writes that the shell waits for once their writers close.
     host_writes: HostWrites,
+    /// The owner that aborts this process's background jobs, shared with its forks.
+    pub(crate) background_owner: std::sync::Weak<TaskList>,
+    /// Set in a background job, whose pipeline stages abort with it.
+    pub(crate) in_background_job: bool,
 }
 
 /// A task that writes a host file after the last writer of its channel closes.
@@ -365,6 +389,8 @@ impl Process {
             traps: HashMap::new(),
             umask: 0o022,
             host_writes: Default::default(),
+            background_owner: std::sync::Weak::new(),
+            in_background_job: false,
         }
     }
 
@@ -412,7 +438,29 @@ impl Process {
             traps: HashMap::new(),
             umask: 0o022,
             host_writes: Default::default(),
+            background_owner: std::sync::Weak::new(),
+            in_background_job: false,
         }
+    }
+
+    /// Make the returned value abort the background jobs of this process and its forks when it drops.
+    pub(crate) fn own_background_jobs(&mut self) -> Tasks {
+        let owner = Tasks::default();
+        self.background_owner = Arc::downgrade(&owner.0);
+        owner
+    }
+
+    /// Keep a background job for `wait`, and give it to the owner of this process's jobs.
+    pub(crate) fn add_background_job(
+        &mut self,
+        job: tokio::task::JoinHandle<(i32, String, String)>,
+    ) {
+        if let Some(owner) = self.background_owner.upgrade() {
+            let mut tasks = owner.lock().unwrap_or_else(|e| e.into_inner());
+            tasks.retain(|task| !task.is_finished());
+            tasks.push(job.abort_handle());
+        }
+        self.bg_jobs.push(job);
     }
 
     /// Track a host write so that [`Process::settle_host_writes`] waits for it.
@@ -499,6 +547,8 @@ impl Process {
             traps: self.traps.clone(),
             umask: self.umask,
             host_writes: self.host_writes.clone(),
+            background_owner: self.background_owner.clone(),
+            in_background_job: self.in_background_job,
         }
     }
 
