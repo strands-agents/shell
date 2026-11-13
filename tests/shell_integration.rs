@@ -13608,3 +13608,72 @@ expect!(
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
 );
+
+// ── id ──────────────────────────────────────────────────────────────
+
+expect!(
+    id_default,
+    "id",
+    "uid=1000(lash) gid=1000(lash) groups=1000(lash)"
+);
+expect!(id_u, "id -u", "1000");
+expect!(id_g, "id -g", "1000");
+expect!(
+    id_un,
+    "id -un; id -nu; id -u -n; id --user --name",
+    "lash\nlash\nlash\nlash"
+);
+expect!(id_gn, "id -gn", "lash");
+expect!(id_repeated_choice, "id -u -u", "1000");
+expect!(
+    id_follows_user,
+    "USER=agent id; USER=agent id -un",
+    "uid=1000(agent) gid=1000(agent) groups=1000(agent)\nagent"
+);
+expect!(id_unset_user, "unset USER; id -un", "lash");
+expect!(id_empty_user, "USER= id -un", "lash");
+expect!(id_help, "id --help | head -1", "Usage: id [OPTION]...");
+shell_test!(
+    id_n_alone,
+    "id -n",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("default format"), "{}", out.stderr);
+    }
+);
+shell_test!(
+    id_user_and_group,
+    "id -u -g",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+        assert!(
+            out.stderr.contains("more than one choice"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    id_bad_option,
+    "id -z",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(out.stderr.contains("id: invalid option"), "{}", out.stderr);
+    }
+);
+shell_test!(
+    id_operand,
+    "id someone",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("id: unexpected argument \"someone\""),
+            "{}",
+            out.stderr
+        );
+    }
+);
