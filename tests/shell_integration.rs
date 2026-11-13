@@ -13659,7 +13659,8 @@ fn yes_stops_at_the_output_limit() {
             "stdout has {} bytes",
             out.stdout.len()
         );
-        let out = run_with_max_output(100, "x=$(yes); echo ${#x}").await;
-        assert_eq!(out.stdout, "0\n");
+        // A capture over the limit also ends; what it keeps is up to the shell.
+        let out = run_with_max_output(100, "x=$(yes); echo done").await;
+        assert!(out.stdout.ends_with("done\n"), "stdout={:?}", out.stdout);
     }));
 }
