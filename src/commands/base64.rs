@@ -51,17 +51,20 @@ async fn cmd_base64(os: &dyn Kernel, args: &[String]) -> CommandResult {
     }
 
     let mut w = io::stdout()?;
-    let mut ew = io::stderr()?;
     let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = match file.as_deref() {
         None | Some("-") => Box::new(io::stdin()?),
         Some(path) => match io::open(os, path, OpenFlags::read()).await {
             Ok(fd) => Box::new(io::take_reader(fd)?),
             Err(e) => {
+                let mut ew = io::stderr()?;
                 wprintln!(ew, "base64: {}: {}", path, e)?;
                 return Ok(1);
             }
         },
     };
+    // Taken only once the input is open, so a missing stdin is still
+    // reported by the shell, which needs stderr to print the error.
+    let mut ew = io::stderr()?;
 
     let result = if decode {
         decode_stream(&mut reader, &mut w, ignore_garbage).await
@@ -75,7 +78,7 @@ async fn cmd_base64(os: &dyn Kernel, args: &[String]) -> CommandResult {
             Ok(1)
         }
         Err(e) => {
-            wprintln!(ew, "base64: read error: {}", e)?;
+            wprintln!(ew, "base64: {}", e)?;
             Ok(1)
         }
     }

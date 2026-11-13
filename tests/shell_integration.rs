@@ -4184,6 +4184,15 @@ shell_test!(
 );
 
 shell_test!(
+    base64_reports_a_closed_stdin,
+    "base64 <&-",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert!(!out.stderr.is_empty(), "expected an error on stderr");
+    }
+);
+
+shell_test!(
     base64_rejects_a_second_file,
     "base64 a b",
     |_shell: &mut Shell, out: strands_shell::Output| {
