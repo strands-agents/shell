@@ -707,6 +707,30 @@ fn a_sleep_cut_short_by_the_deadline_reports_a_failure() {
 }
 
 #[test]
+fn a_captured_timeout_does_not_admit_the_fallback_command() {
+    block_on(async {
+        let (mut shell, events) = checking_shell();
+        shell.proc.deadline = Some(tokio::time::Instant::now() + Duration::from_millis(200));
+        let out = shell.run("x=$(sleep 5 || echo after)").await;
+        assert_eq!(out.status, 1);
+        assert!(finished(&events).contains(&Event::Finished(
+            "sleep".into(),
+            strings(&["5"]),
+            PathBuf::from("/home/lash"),
+            1
+        )));
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, Event::Check(program, ..) if program == "echo")),
+            "{events:?}"
+        );
+    });
+}
+
+#[test]
 fn a_kernel_without_command_dropped_sees_no_change() {
     block_on(async {
         for (script, status, stderr, expected) in [

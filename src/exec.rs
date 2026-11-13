@@ -1855,6 +1855,10 @@ async fn run_capturing_status(
             }
         }
         if !skip {
+            if let Some(msg) = proc.check_limits() {
+                proc.err_msg(msg);
+                return (output, Err(ControlFlow::Exit(1)));
+            }
             let (exit, out) = match item {
                 Item::Pipeline(pipeline, negated) if is_control_flow(pipeline) => {
                     match execute_captured_control_flow(os.clone(), proc, pipeline).await {

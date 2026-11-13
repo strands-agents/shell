@@ -5543,6 +5543,40 @@ fn timeout_interrupts_sleep_with_failure() {
 }
 
 #[test]
+fn captured_timeout_stops_following_commands_before_host_writes() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "x=$(sleep 5 || echo ran > /out/marker)",
+            "x=$(if sleep 5; then :; else echo ran > /out/marker; fi)",
+            "{ sleep 5 || echo ran > /out/marker; } | cat",
+            "{ if sleep 5; then :; else echo ran > /out/marker; fi; } | cat",
+            "x=$(sleep 5; echo ran > /out/marker)",
+            "{ sleep 5; echo ran > /out/marker; } | cat",
+        ] {
+            let dir = TestDir::new("captured_timeout_host_write");
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let before = shell.run("echo before > /out/before").await;
+            assert_eq!(before.status, 0, "{script}: {}", before.stderr);
+            assert_eq!(std::fs::read(dir.join("before")).unwrap(), b"before\n");
+
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            assert!(!dir.join("marker").exists(), "{script}");
+        }
+    }));
+}
+
+#[test]
 fn sleep_within_timeout_succeeds() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
