@@ -2306,6 +2306,36 @@ fn find_delete_leaves_the_dot_starting_point() {
 }
 
 #[test]
+fn find_delete_refuses_other_paths_ending_in_dot() {
+    for start in ["./", "./.", ".//", ".."] {
+        let out = find_run(
+            "mkdir -p /tmp/fdx/w/a && touch /tmp/fdx/w/a/b",
+            &format!(
+                "cd /tmp/fdx/w && find {start} -maxdepth 0 -delete; echo st=$?; test -d /tmp/fdx/w && echo kept"
+            ),
+        );
+        assert_eq!(out.stdout, "st=1\nkept\n", "{start}");
+        assert_eq!(
+            out.stderr.trim(),
+            format!("find: cannot delete '{start}': Invalid argument"),
+        );
+    }
+}
+
+#[test]
+fn find_delete_refuses_exec_each() {
+    let out = find_run(
+        "mkdir -p /tmp/fdc && touch /tmp/fdc/a",
+        "find /tmp/fdc -type f -exec false ';' -delete; echo st=$?; ls /tmp/fdc",
+    );
+    assert_eq!(out.stdout, "st=1\na\n");
+    assert_eq!(
+        out.stderr.trim(),
+        "find: -delete cannot be combined with -exec ... ;"
+    );
+}
+
+#[test]
 fn find_delete_reports_a_kernel_refusal() {
     let out = find_run(
         "mkdir -p /tmp/fdr/s && touch /tmp/fdr/s/t /tmp/fdr/u && chmod 555 /tmp/fdr/s",

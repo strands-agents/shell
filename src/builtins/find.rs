@@ -417,13 +417,14 @@ fn eval_expr(
     }
 }
 
-fn has_delete(expr: &Expr) -> bool {
-    match expr {
-        Expr::Delete => true,
-        Expr::Not(e) => has_delete(e),
-        Expr::And(a, b) | Expr::Or(a, b) => has_delete(a) || has_delete(b),
-        _ => false,
-    }
+/// Whether `expr` holds a node for which `want` is true.
+fn contains(expr: &Expr, want: fn(&Expr) -> bool) -> bool {
+    want(expr)
+        || match expr {
+            Expr::Not(e) => contains(e, want),
+            Expr::And(a, b) | Expr::Or(a, b) => contains(a, want) || contains(b, want),
+            _ => false,
+        }
 }
 
 fn has_action(expr: &Expr) -> bool {
@@ -531,7 +532,13 @@ pub fn builtin_find<'a>(
 
         let default_print = !has_action(&expr);
         // -delete implies -depth: a directory is visited after its entries.
-        let depth_first = has_delete(&expr);
+        let depth_first = contains(&expr, |e| matches!(e, Expr::Delete));
+        // `-exec CMD ;` counts as true whatever CMD returns, so a -delete
+        // after it would remove every path the walk reaches.
+        if depth_first && contains(&expr, |e| matches!(e, Expr::Exec(_, false))) {
+            proc.err_msg("find: -delete cannot be combined with -exec ... ;");
+            return Ok(1);
+        }
         let mut failed = false;
         let mut w = io::stdout()?;
         let mut ew = io::stderr().ok();
@@ -729,9 +736,16 @@ async fn visit(
         }
     }
 
-    // Like GNU find, -delete leaves the starting point "." in place.
+    // Like GNU find, -delete leaves the starting point "." in place and
+    // refuses any other path that ends in "." or "..".
+    let dot = matches!(
+        path.trim_end_matches('/').rsplit('/').next(),
+        Some("." | "..")
+    );
     if delete_hit && path != "." {
-        let removed = if st.is_dir {
+        let removed = if dot {
+            Err(std::io::Error::other("Invalid argument"))
+        } else if st.is_dir {
             io::remove_dir(os, path).await
         } else {
             io::remove_file(os, path).await
