@@ -1,4 +1,4 @@
-use super::readlink::{Mode, canonicalize};
+use super::readlink::{CanonError, Mode, canonicalize};
 use crate::os::FdWriter;
 use crate::prelude::*;
 
@@ -48,10 +48,15 @@ async fn cmd_realpath(os: &dyn Kernel, args: &[String]) -> CommandResult {
 
     // Like GNU realpath: --relative-base alone also sets --relative-to, and
     // a --relative-to outside --relative-base makes every path absolute.
+    // With -e the directories must also be directories.
     let resolve_dir = async |dir: &str| {
-        canonicalize(os, dir, mode, follow_links)
+        let resolved = canonicalize(os, dir, mode, follow_links)
             .await
-            .map_err(|e| format!("{}: {}", quote(dir), e))
+            .map_err(|e| format!("{}: {}", quote(dir), e))?;
+        if mode == Mode::Existing && !io::stat(os, &resolved).await.is_dir {
+            return Err(format!("{}: {}", quote(dir), CanonError::NotDir));
+        }
+        Ok::<_, String>(resolved)
     };
     let (to, base) = match (relative_to.as_deref(), relative_base.as_deref()) {
         (None, None) => (None, None),

@@ -130,6 +130,10 @@ pub(super) async fn canonicalize(
     let mut missing = 0usize;
     // Lookups by absolute path, so a link met again costs no kernel call.
     let mut lookups: HashMap<String, Lookup> = HashMap::new();
+    // Without following links, like GNU, the default mode needs a missing
+    // component to be a directory only when a `..`, a final `.` or the last
+    // component depends on it.
+    let lexical = !follow_links && mode == Mode::AllButLast;
 
     while let Some(comp) = pending.pop_front() {
         steps += 1;
@@ -143,6 +147,7 @@ pub(super) async fn canonicalize(
                 Mode::Missing => {}
                 // `-f` allows a missing last component even with a slash.
                 Mode::AllButLast if missing > 0 && comp == DIR_MARK => {}
+                _ if lexical && missing > 0 && !only_dots(&pending) => {}
                 _ => return Err(not_dir_or_missing(missing)),
             }
             continue;
@@ -158,7 +163,7 @@ pub(super) async fn canonicalize(
             missing = missing.saturating_sub(1);
             continue;
         }
-        if !is_dir && mode != Mode::Missing {
+        if !is_dir && mode != Mode::Missing && !(lexical && missing > 0) {
             // The previous component is a missing path or a non-directory.
             return Err(not_dir_or_missing(missing));
         }
@@ -197,10 +202,10 @@ pub(super) async fn canonicalize(
             }
         };
         if !st.exists {
-            let is_last = pending.iter().all(|c| c == "." || c == DIR_MARK);
+            let is_last = only_dots(&pending);
             match mode {
                 Mode::Missing => {}
-                Mode::AllButLast if is_last => {}
+                Mode::AllButLast if is_last || lexical => {}
                 _ => return Err(CanonError::NotFound),
             }
             resolved.push(comp);
@@ -239,6 +244,11 @@ pub(super) async fn canonicalize(
     }
 
     Ok(join(&[], &resolved.join("/")))
+}
+
+/// Whether nothing but `.` and trailing-slash markers is left to resolve.
+fn only_dots(pending: &VecDeque<String>) -> bool {
+    pending.iter().all(|c| c == "." || c == DIR_MARK)
 }
 
 /// The error for a component that cannot be a directory: missing when

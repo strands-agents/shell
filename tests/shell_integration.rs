@@ -5079,6 +5079,34 @@ realpath_case!(
     "realpath: loopa: Too many levels of symbolic links\n",
     1
 );
+realpath_case!(
+    realpath_s_missing_middle,
+    "-s no/x dang/x no/./x no/x/",
+    "/tmp/rc/no/x\n/tmp/rc/dang/x\n/tmp/rc/no/x\n/tmp/rc/no/x\n",
+    "",
+    0
+);
+realpath_case!(
+    realpath_s_missing_dotdot,
+    "-s no/x/.. no/.",
+    "",
+    "realpath: no/x/..: No such file or directory\nrealpath: no/.: No such file or directory\n",
+    1
+);
+realpath_case!(
+    realpath_s_file_as_dir,
+    "-s d/f/x",
+    "",
+    "realpath: d/f/x: Not a directory\n",
+    1
+);
+realpath_case!(
+    realpath_s_relative_to_missing,
+    "-s --relative-to=new/dir d",
+    "../../d\n",
+    "",
+    0
+);
 realpath_case!(realpath_sm_loop, "-sm loopa/x", "/tmp/rc/loopa/x\n", "", 0);
 realpath_case!(
     realpath_relative_to,
@@ -5114,6 +5142,13 @@ realpath_case!(
     "--relative-to=no/x l1",
     "",
     "strands-shell: realpath: no/x: No such file or directory\n",
+    1
+);
+realpath_case!(
+    realpath_e_relative_to_file,
+    "-e --relative-to=d/f d",
+    "",
+    "strands-shell: realpath: d/f: Not a directory\n",
     1
 );
 realpath_case!(
