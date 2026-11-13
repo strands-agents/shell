@@ -53,6 +53,10 @@ pub fn builtin_read<'a>(
                     }
                     line.push(byte[0] as char);
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    io::with_process(|p| p.restore_fd(0, reader.into_fd_kind()));
+                    return Err(e.into());
+                }
                 Err(_) => break,
             }
         }
