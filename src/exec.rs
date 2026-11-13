@@ -137,12 +137,19 @@ pub(crate) enum CommandLookup {
 /// Resolve `name` as `command -v` does: builtins and registered commands, then
 /// functions, then the hash table, then PATH. With `functions` false, shell
 /// functions are not consulted, as for `which`, which locates commands only.
+/// A name containing `/` is a path and is found only when it is executable.
 pub(crate) async fn lookup_command(
     os: &dyn Kernel,
     proc: &Process,
     name: &str,
     functions: bool,
 ) -> Option<CommandLookup> {
+    if name.contains('/') {
+        return os
+            .is_executable(proc, name)
+            .await
+            .then(|| CommandLookup::Path(name.to_string()));
+    }
     let function = functions && proc.get_function(name).is_some();
     if is_special(name)
         || crate::builtins::lookup(name).is_some()

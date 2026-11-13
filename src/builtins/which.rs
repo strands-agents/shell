@@ -12,7 +12,8 @@ const USAGE: &str = "usage: which [-a] name ...";
 /// `command -v` resolves it except that shell functions are not consulted.
 /// A builtin or registered command prints its bare name, as `command -v` does.
 /// `-a` also prints every further match in PATH. Missing names print nothing;
-/// the status is 0 when every name is found and 1 otherwise.
+/// a name containing `/` is checked as a path. The status is 0 when every
+/// name is found and 1 otherwise.
 pub fn builtin_which<'a>(
     os: &'a dyn Kernel,
     proc: &'a mut Process,
@@ -29,8 +30,16 @@ pub fn builtin_which<'a>(
             if arg.len() < 2 || !arg.starts_with('-') {
                 break;
             }
-            if let Some(bad) = arg[1..].chars().find(|&c| c != 'a') {
-                proc.err_msg(&format!("strands-shell: which: -{bad}: invalid option"));
+            let bad = if arg.starts_with("--") {
+                Some(arg.clone())
+            } else {
+                arg[1..]
+                    .chars()
+                    .find(|&c| c != 'a')
+                    .map(|c| format!("-{c}"))
+            };
+            if let Some(bad) = bad {
+                proc.err_msg(&format!("strands-shell: which: {bad}: invalid option"));
                 proc.err_msg(USAGE);
                 return Ok(2);
             }
@@ -51,7 +60,7 @@ pub fn builtin_which<'a>(
                 Some(CommandLookup::Path(path)) => printed.push(path),
                 Some(CommandLookup::Function) | None => {}
             }
-            if all {
+            if all && !name.contains('/') {
                 for path in find_all_in_path(os, proc, name, true).await {
                     if !printed.contains(&path) {
                         printed.push(path);

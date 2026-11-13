@@ -2772,6 +2772,21 @@ expect_output!(
     "usage: which [-a] name ...\n",
     1
 );
+expect_output!(
+    which_rejects_unknown_long_option,
+    "which --all ls",
+    "",
+    "strands-shell: which: --all: invalid option\nusage: which [-a] name ...\n",
+    2
+);
+expect_output!(
+    which_checks_a_name_with_a_slash_as_a_path,
+    "mkdir -p /tmp/b; printf '#!/bin/sh\\n' > /tmp/b/s; chmod +x /tmp/b/s; cd /tmp/b; \
+     which -a /bin/ls ./s; command -v ./s; cd /tmp; PATH=/tmp:$PATH which b/s ./missing; echo $?",
+    "/bin/ls\n./s\n./s\nb/s\n1\n",
+    "",
+    0
+);
 expect_output!(which_double_dash_ends_options, "which -- -a", "", "", 1);
 
 // ── builtin builtin ─────────────────────────────────────────────────
