@@ -1,3 +1,4 @@
+mod base64;
 mod basename;
 mod cat;
 mod chmod;
@@ -72,6 +73,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
     {
         // Static lookup table for WASM (inventory crate not available)
         let func: CommandFn = match name {
+            "base64" => |os, args| Box::pin(base64::cmd_base64(os, args)),
             "basename" => |os, args| Box::pin(basename::cmd_basename(os, args)),
             "cat" => |os, args| Box::pin(cat::cmd_cat(os, args)),
             "chmod" => |os, args| Box::pin(chmod::cmd_chmod(os, args)),
