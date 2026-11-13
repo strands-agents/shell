@@ -103,7 +103,12 @@ async fn cmd_tree(os: &dyn Kernel, args: &[String]) -> CommandResult {
         }
         match io::list_dir(os, dir).await {
             Ok(entries) => {
-                wprintln!(w, "{}", dir)?;
+                // With -f, tree drops a trailing slash from the root line.
+                let root = match dir.trim_end_matches('/') {
+                    trimmed if opts.full_path && !trimmed.is_empty() => trimmed,
+                    _ => dir.as_str(),
+                };
+                wprintln!(w, "{}", root)?;
                 list(os, &mut w, dir, entries, "", 1, &opts, &mut counts).await?;
             }
             Err(_) => wprintln!(w, "{} [error opening dir]", dir)?,
@@ -152,13 +157,10 @@ fn list<'a>(
                 continue;
             }
             let full = join(path, &entry.name);
-            let st = io::lstat(os, &full).await;
-            let (is_dir, target) = if st.is_symlink {
-                let target = io::read_link(os, &full).await.unwrap_or_default();
-                (io::stat(os, &full).await.is_dir, Some(target))
-            } else {
-                (st.is_dir, None)
-            };
+            // On a direct bind, lstat follows links (#254), so read_link is
+            // what tells a link apart.
+            let target = io::read_link(os, &full).await.ok();
+            let is_dir = io::stat(os, &full).await.is_dir;
             if opts.dirs_only && !is_dir {
                 continue;
             }

@@ -4468,7 +4468,32 @@ fn tree_level_ignore_full_path_and_noreport() {
     let out = tree_test("-f --noreport src/");
     assert_eq!(
         out.stdout,
-        "src/\n├── src/lib\n│\u{a0}\u{a0} └── src/lib/mod.rs\n└── src/main.rs\n"
+        "src\n├── src/lib\n│\u{a0}\u{a0} └── src/lib/mod.rs\n└── src/main.rs\n"
+    );
+    let out = tree_test("-f -L 1 ./ | head -2; tree -f -L 1 / | head -2");
+    assert_eq!(out.stdout, ".\n├── ./B\n/\n├── /bin\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn tree_does_not_follow_symlinks_on_a_direct_bind() {
+    let dir = ls_fixture("tree_symlink", &[("f", 1, LS_T0)]);
+    std::fs::create_dir(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/main.rs"), "").unwrap();
+    std::os::unix::fs::symlink("src", dir.join("linkdir")).unwrap();
+    std::os::unix::fs::symlink(".", dir.join("loop")).unwrap();
+    std::os::unix::fs::symlink("nope", dir.join("dangling")).unwrap();
+    let out = run_ls_fixture(&dir, "tree /fx");
+    assert_eq!(
+        out.stdout,
+        "/fx\n\
+         ├── dangling -> nope\n\
+         ├── f\n\
+         ├── linkdir -> src\n\
+         ├── loop -> .\n\
+         └── src\n    \
+             └── main.rs\n\
+         \n3 directories, 3 files\n"
     );
 }
 
