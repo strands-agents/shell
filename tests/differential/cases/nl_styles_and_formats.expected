@@ -1,0 +1,46 @@
+status: 0
+stderr: non-empty
+--- stdout
+     1	alpha
+       
+     2	beta
+     3	 
+     4	gamma
+     1	alpha
+     2	
+     3	beta
+     4	 
+     5	gamma
+       alpha
+       
+       beta
+        
+       gamma
+1     	alpha
+       
+2     	beta
+3     	 
+4     	gamma
+001: alpha
+     
+002: beta
+003:  
+004: gamma
+01.alpha
+02.
+03.beta
+04. 
+05.gamma
+06.alpha
+07.
+08.beta
+09. 
+10.gamma
+11.alpha
+12.
+13.beta
+14. 
+15.gamma
+10	j
+11	k
+status 1
