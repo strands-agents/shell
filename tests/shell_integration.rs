@@ -13608,3 +13608,65 @@ expect!(
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
 );
+
+// ── comm ────────────────────────────────────────────────────────────
+
+const COMM_FILES: &str = "printf 'a\\nb\\nd\\n' > /tmp/c1; printf 'b\\nc\\nd\\ne\\n' > /tmp/c2; ";
+
+shell_test!(
+    comm_three_columns,
+    &format!("{COMM_FILES}comm /tmp/c1 /tmp/c2"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "a\n\t\tb\n\tc\n\t\td\n\te\n");
+        assert_eq!(out.status, 0);
+    }
+);
+shell_test!(
+    comm_suppresses_columns,
+    &format!(
+        "{COMM_FILES}comm -12 /tmp/c1 /tmp/c2; echo -; comm -3 /tmp/c1 /tmp/c2; echo -; comm -1 /tmp/c1 /tmp/c2"
+    ),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "b\nd\n-\na\n\tc\n\te\n-\n\tb\nc\n\td\ne\n");
+        assert_eq!(out.status, 0);
+    }
+);
+shell_test!(
+    comm_output_delimiter_and_stdin,
+    &format!("{COMM_FILES}comm --output-delimiter=, - /tmp/c2 < /tmp/c1"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "a\n,,b\n,c\n,,d\n,e\n");
+        assert_eq!(out.status, 0);
+    }
+);
+shell_test!(
+    comm_warns_about_unsorted_input_and_fails,
+    &format!("{COMM_FILES}printf 'b\\na\\n' > /tmp/u1; comm /tmp/u1 /tmp/c2"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "\t\tb\na\n\tc\n\td\n\te\n");
+        assert_eq!(
+            out.stderr,
+            "comm: file 1 is not in sorted order\ncomm: input is not in sorted order\n"
+        );
+        assert_eq!(out.status, 1);
+    }
+);
+shell_test!(
+    comm_check_order_stops_at_the_first_unsorted_line,
+    &format!("{COMM_FILES}printf 'x\\nc\\n' > /tmp/u2; comm --check-order /tmp/c1 /tmp/u2"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "a\nb\nd\n\tx\n");
+        assert_eq!(out.stderr, "comm: file 2 is not in sorted order\n");
+        assert_eq!(out.status, 1);
+    }
+);
+shell_test!(
+    comm_nocheck_order_ignores_unsorted_input,
+    &format!("{COMM_FILES}printf 'b\\na\\n' > /tmp/u1; comm --nocheck-order /tmp/u1 /tmp/c2"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "\t\tb\na\n\tc\n\td\n\te\n");
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.status, 0);
+    }
+);
+expect_status!(comm_needs_two_files, "comm /tmp/c1", 1);
