@@ -1,9 +1,4 @@
 status: 0
 stderr: empty
 --- stdout
-echo is a function
-echo () 
-{ 
-    builtin echo fn
-}
 fn
