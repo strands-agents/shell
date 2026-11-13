@@ -96,9 +96,11 @@ pub fn builtin_lua<'a>(
         // Pre-read stdin for io.read() when script comes from file or -e
         let stdin_data = if (script_file.is_some() || eval_code.is_some()) && !stdin_is_outside {
             if let Ok(mut r) = sio::stdin() {
-                os::read_to_string_limited(&mut r, proc.max_output)
-                    .await
-                    .unwrap_or_default()
+                match os::read_to_string_limited(&mut r, proc.max_output).await {
+                    Ok(data) => data,
+                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(e.into()),
+                    Err(_) => String::new(),
+                }
             } else {
                 String::new()
             }

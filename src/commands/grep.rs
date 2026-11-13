@@ -701,8 +701,16 @@ async fn cmd_grep(os: &dyn Kernel, args: &[String]) -> CommandResult {
     if files.is_empty() {
         // Read from stdin
         let reader = io::stdin()?;
-        if grep_reader(reader, &re, &opts, "", "(standard input)", &mut w, &mut ew).await? {
-            any_match = true;
+        match grep_reader(reader, &re, &opts, "", "(standard input)", &mut w, &mut ew).await {
+            Ok(matched) => any_match = matched,
+            Err(e)
+                if e.downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::TimedOut) =>
+            {
+                wprintln!(ew, "strands-shell: grep: {e}")?;
+                return Ok(1);
+            }
+            Err(e) => return Err(e),
         }
     } else {
         for path in &files {

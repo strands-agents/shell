@@ -664,7 +664,12 @@ impl Process {
     /// Take the reader half out of an fd, removing it from the table.
     pub fn take_reader(&mut self, fd: Fd) -> io::Result<FdReader> {
         match self.fds.remove(&fd) {
-            Some(kind) => Ok(FdReader { kind, done: false }),
+            Some(kind) => Ok(FdReader {
+                kind,
+                done: false,
+                #[cfg(not(target_arch = "wasm32"))]
+                deadline: None,
+            }),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("bad fd {fd}"),
@@ -1028,6 +1033,9 @@ pub(crate) struct TakenFd {
 pub struct FdReader {
     kind: FdKind,
     done: bool,
+    /// When a channel read stops waiting and fails with a timeout.
+    #[cfg(not(target_arch = "wasm32"))]
+    deadline: Option<std::panic::AssertUnwindSafe<Pin<Box<tokio::time::Sleep>>>>,
 }
 
 impl FdReader {
@@ -1039,7 +1047,17 @@ impl FdReader {
                 buf: Vec::new(),
             },
             done: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            deadline: None,
         }
+    }
+
+    /// Make a channel read fail with a timeout once `deadline` passes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn until(mut self, deadline: Option<tokio::time::Instant>) -> Self {
+        self.deadline =
+            deadline.map(|at| std::panic::AssertUnwindSafe(Box::pin(tokio::time::sleep_until(at))));
+        self
     }
 
     /// Consume this reader and return the underlying FdKind.
@@ -1060,6 +1078,15 @@ impl AsyncRead for FdReader {
         }
         match &mut this.kind {
             FdKind::ChannelReader { rx, buf: remainder } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(deadline) = &mut this.deadline
+                    && deadline.as_mut().poll(cx).is_ready()
+                {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "execution timeout exceeded",
+                    )));
+                }
                 if !remainder.is_empty() {
                     let n = remainder.len().min(buf.remaining());
                     buf.put_slice(&remainder[..n]);
