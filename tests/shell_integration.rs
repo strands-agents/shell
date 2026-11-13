@@ -3339,6 +3339,69 @@ expect!(
     "b\nc\nd\ne\nf\ng\nh\ni\nj\nk"
 );
 
+// ── uname ───────────────────────────────────────────────────────────
+
+expect!(uname_default, "uname", "Linux");
+expect!(uname_s, "uname -s", "Linux");
+expect!(uname_n_default, "uname -n", "localhost");
+expect!(uname_n_follows_hostname, "HOSTNAME=box uname -n", "box");
+expect!(uname_n_empty_hostname, "HOSTNAME= uname -n", "localhost");
+expect!(uname_r, "uname -r", env!("CARGO_PKG_VERSION"));
+expect!(uname_v, "uname -v", "#1");
+expect!(uname_m, "uname -m", std::env::consts::ARCH);
+expect!(uname_o, "uname -o", "Linux");
+expect!(uname_p_i_unknown, "uname -p; uname -i", "unknown\nunknown");
+expect!(
+    uname_p_i_order,
+    "uname -iopm",
+    format!("{} unknown unknown Linux", std::env::consts::ARCH)
+);
+expect!(
+    uname_fixed_order,
+    "uname -m -s; uname --machine --nodename",
+    format!("Linux {0}\nlocalhost {0}", std::env::consts::ARCH)
+);
+expect!(
+    uname_a,
+    "uname -a; uname -a -p -i; uname -snrvmpio",
+    format!(
+        "Linux localhost {0} #1 {1} Linux\nLinux localhost {0} #1 {1} Linux\nLinux localhost {0} #1 {1} Linux",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH
+    )
+);
+expect!(
+    uname_help,
+    "uname --help | head -1",
+    "Usage: uname [OPTION]..."
+);
+shell_test!(
+    uname_extra_operand,
+    "uname x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("uname: unexpected argument \"x\""),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    uname_bad_option,
+    "uname -z",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("uname: invalid option"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+
 // ── basename/dirname ────────────────────────────────────────────────
 
 expect!(basename_basic, "basename /usr/local/bin/foo", "foo");
