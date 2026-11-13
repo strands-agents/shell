@@ -4475,7 +4475,7 @@ shell_test!(
         assert_eq!(out.stdout, "1\n");
         assert_eq!(
             out.stderr,
-            "stat: ‘%5’: invalid directive\nstat: ‘%-’: invalid directive\n"
+            "stat: '%5': invalid directive\nstat: '%-': invalid directive\n"
         );
         assert_eq!(out.status, 1);
     }

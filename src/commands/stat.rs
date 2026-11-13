@@ -345,7 +345,7 @@ fn expand(
         }
         let Some(conv) = chars.next() else {
             if directive.len() > 1 {
-                return Err(format!("‘{directive}’: invalid directive"));
+                return Err(format!("'{directive}': invalid directive"));
             }
             out.push(b'%');
             break;
