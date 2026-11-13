@@ -5122,6 +5122,53 @@ fn timeout_in_substitution_stops_the_command_and_its_redirect() {
     }
 }
 
+// A command substitution that uses up the deadline reports the timeout once,
+// and the commands after it do not run.
+#[test]
+fn timeout_in_substitution_reports_once_and_stops_the_list() {
+    for command in [
+        "echo $(sleep 5); touch /tmp/after",
+        "false $(sleep 5); touch /tmp/after",
+        "echo $(sleep 5) || touch /tmp/after",
+        "if echo $(sleep 5); then :; else touch /tmp/after; fi",
+        "until echo $(sleep 5); do touch /tmp/after; done",
+        "echo $(sleep 5)\ntouch /tmp/after",
+        "! echo $(sleep 5); touch /tmp/after",
+        "{ :; } | echo $(sleep 5); touch /tmp/after",
+        "x=$(echo $(sleep 5); touch /tmp/after); touch /tmp/after",
+    ] {
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert_eq!(out.status, 1, "{command}: stderr={:?}", out.stderr);
+            assert_eq!(out.stdout, "", "{command}: the command ran");
+            let lines: Vec<&str> = out.stderr.lines().collect();
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| line.ends_with("execution timeout exceeded")),
+                "{command}: stderr={:?}",
+                out.stderr
+            );
+            assert_eq!(
+                lines
+                    .iter()
+                    .filter(|line| **line == "strands-shell: execution timeout exceeded")
+                    .count(),
+                1,
+                "{command}: stderr={:?}",
+                out.stderr
+            );
+            let after = shell.run("test ! -e /tmp/after").await;
+            assert_eq!(after.status, 0, "{command}: a later command ran");
+        }));
+    }
+}
+
 // A command substitution that ends in time still lets its command run.
 #[test]
 fn substitution_within_timeout_runs_the_command() {
