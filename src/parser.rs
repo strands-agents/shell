@@ -1436,6 +1436,19 @@ fn parse_function_keyword(tokens: &[Token]) -> Result<(Item, &[Token]), String> 
 /// The function that stands for a compound command piped from a pipeline.
 pub(crate) const COMPOUND_STAGE: &str = "_strands_compound";
 
+/// The word that calls [`COMPOUND_STAGE`], split in two so that no script can write it.
+fn compound_stage_word() -> Word {
+    vec![
+        WordPart::Literal(String::new()),
+        WordPart::Literal(COMPOUND_STAGE.into()),
+    ]
+}
+
+/// Whether `cmd` is the call to [`COMPOUND_STAGE`] that the parser built, not one a script wrote.
+pub(crate) fn is_compound_stage_call(cmd: &Command) -> bool {
+    cmd.args.first() == Some(&compound_stage_word())
+}
+
 /// Parse `head | compound [redirects] [| tail]`, with the compound at `tokens[*i]`.
 ///
 /// The compound becomes the body of a function that the pipeline calls as one stage, in a subshell.
@@ -1465,7 +1478,7 @@ fn parse_pipeline_into_compound<'a>(
     stages.push(Command {
         env: Vec::new(),
         args: vec![
-            vec![WordPart::Literal(COMPOUND_STAGE.into())],
+            compound_stage_word(),
             vec![WordPart::DoubleQuoted(vec![WordPart::Var("@".into())])],
         ],
         redirects,
@@ -1506,7 +1519,7 @@ fn resolve_compound_stage_heredocs(
     };
     let call = stages
         .iter()
-        .position(|cmd| cmd.args.first() == Some(&vec![WordPart::Literal(COMPOUND_STAGE.into())]))
+        .position(is_compound_stage_call)
         .unwrap_or(stages.len());
     for cmd in &mut stages[..call] {
         resolve_command_heredocs(cmd, read_line)?;
@@ -2312,7 +2325,7 @@ mod tests {
         Command {
             env: Vec::new(),
             args: vec![
-                vec![lit(COMPOUND_STAGE)],
+                compound_stage_word(),
                 vec![WordPart::DoubleQuoted(vec![WordPart::Var("@".into())])],
             ],
             redirects,

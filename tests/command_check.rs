@@ -828,3 +828,88 @@ fn a_kernel_without_check_fallback_runs_fallback_stages_as_before() {
         assert_eq!(shell.run("test -d /tmp/made").await.status, 0);
     });
 }
+
+#[test]
+fn a_loop_fed_by_a_pipeline_presents_only_the_commands_the_script_wrote() {
+    block_on(async {
+        for (script, stdout, checks) in [
+            (
+                "printf 'x\\n' | while read x; do echo $x; done",
+                "x\n",
+                vec![
+                    check("printf", &["x\\n"]),
+                    check("read", &["x"]),
+                    check("echo", &["x"]),
+                    check("read", &["x"]),
+                ],
+            ),
+            (
+                "printf 'x\\n' | { read x; echo $x; } | cat",
+                "x\n",
+                vec![
+                    check("printf", &["x\\n"]),
+                    check("cat", &[]),
+                    check("read", &["x"]),
+                    check("echo", &["x"]),
+                ],
+            ),
+        ] {
+            let (mut shell, events) = checking_shell();
+            let out = shell.run(script).await;
+            assert_eq!(out.stdout, stdout, "{script}: {}", out.stderr);
+            assert_eq!(out.status, 0, "{script}");
+            let events = events.lock().unwrap().clone();
+            let checked: Vec<Event> = events
+                .iter()
+                .filter(|event| matches!(event, Event::Check(..)))
+                .cloned()
+                .collect();
+            assert_eq!(checked, checks, "{script}");
+            let reported = events
+                .iter()
+                .filter(|event| matches!(event, Event::Finished(..) | Event::Dropped(..)))
+                .count();
+            assert_eq!(reported, checks.len(), "{script}: {events:?}");
+        }
+    });
+}
+
+#[test]
+fn a_kernel_that_refuses_the_internal_stage_name_still_runs_a_piped_loop() {
+    block_on(async {
+        let (mut shell, events) = shell_with(&["_strands_compound"], false);
+        let out = shell
+            .run("printf 'x\\n' | while read x; do echo $x; done")
+            .await;
+        assert_eq!(out.stdout, "x\n", "{}", out.stderr);
+        assert_eq!(out.status, 0);
+        assert!(!checked_programs(&events).contains(&"_strands_compound".to_string()));
+    });
+}
+
+#[test]
+fn a_function_the_script_names_strands_compound_is_checked() {
+    block_on(async {
+        for script in [
+            "_strands_compound() { echo ran; }; _strands_compound a",
+            "_strands_compound() { echo ran; }; true | _strands_compound a",
+            "( _strands_compound() { echo ran; }; true | _strands_compound a )",
+        ] {
+            let (mut shell, events) = checking_shell();
+            let out = shell.run(script).await;
+            assert_eq!(out.stdout, "ran\n", "{script}: {}", out.stderr);
+            assert!(
+                events
+                    .lock()
+                    .unwrap()
+                    .contains(&check("_strands_compound", &["a"])),
+                "{script}: {events:?}"
+            );
+
+            let (mut shell, _) = shell_with(&["_strands_compound"], false);
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 126, "{script}");
+            assert_eq!(out.stdout, "", "{script}");
+        }
+    });
+}
