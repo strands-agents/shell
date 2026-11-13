@@ -119,6 +119,19 @@ fn mcp_shell_echo() {
 fn mcp_shell_exit_code() {
     let r = mcp_tool("shell", json!({"command": "false"}));
     assert_eq!(r["result"]["metadata"]["exit_code"], 1);
+    // The exit code is also in the text, for clients that drop metadata.
+    assert_eq!(r["result"]["content"][2]["text"], "exit code: 1");
+}
+
+#[test]
+fn mcp_shell_exit_code_text_on_success() {
+    let r = mcp_tool("shell", json!({"command": "echo hi"}));
+    let content = r["result"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 3, "content: {content:?}");
+    assert_eq!(content[0]["text"], "hi\n");
+    assert_eq!(content[1]["text"], "");
+    assert_eq!(content[2]["text"], "exit code: 0");
+    assert_eq!(r["result"]["metadata"]["exit_code"], 0);
 }
 
 #[test]
@@ -179,6 +192,7 @@ fn mcp_shell_timeout() {
         "strands-shell: sleep: execution timeout exceeded\nstrands-shell: execution timeout exceeded\n"
     );
     assert_eq!(timed_out["result"]["metadata"]["exit_code"], 1);
+    assert_eq!(timed_out["result"]["content"][2]["text"], "exit code: 1");
 
     let recovered = &responses[2];
     assert_eq!(recovered["id"], 3);
