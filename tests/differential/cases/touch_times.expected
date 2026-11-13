@@ -1,0 +1,10 @@
+status: 0
+stderr: empty
+--- stdout
+-d sets the time
+-r copies the time
+-t sets the time
+-a keeps the modification time
+-c creates nothing
+kept
+a new file takes the date
