@@ -3576,7 +3576,7 @@ expect_output!(
     "grep: conflicting matchers specified\n",
     2
 );
-expect!(egrep_is_in_bin, "command -v egrep", "egrep");
+expect_status!(egrep_is_in_bin, "test -L /bin/egrep", 0);
 
 // ── grep binary / non-UTF-8 input ───────────────────────────────────
 
