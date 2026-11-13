@@ -229,7 +229,7 @@ pub struct Process {
     /// Host writes that the shell waits for once their writers close.
     host_writes: HostWrites,
     /// The owner that aborts this process's background jobs, shared with its forks.
-    background_owner: std::sync::Weak<TaskList>,
+    pub(crate) background_owner: std::sync::Weak<TaskList>,
     /// Set in a background job, whose pipeline stages abort with it.
     pub(crate) in_background_job: bool,
 }
