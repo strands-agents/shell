@@ -1,4 +1,6 @@
 use crate::prelude::*;
+use jaq_core::box_iter::box_once;
+use jaq_core::load::{Arena, File, Loader};
 
 const HELP: &str = "Usage: jq [OPTIONS] FILTER [FILE]
 JSON processor.
@@ -10,10 +12,13 @@ Options:
   -c, --compact       Compact output
   -e, --exit-status   Exit with non-zero if last output is false/null
   -n, --null-input    Use null as input
-  -j, --join-output   No newline after each output";
+  -j, --join-output   No newline after each output
+      --arg NAME VALUE      Bind $NAME to the string VALUE
+      --argjson NAME JSON   Bind $NAME to the parsed JSON value";
 
 /// Run jq filter on input, returning formatted output lines or an error.
 /// All jaq types (Val, Rc) are confined to this non-async function.
+#[allow(clippy::too_many_arguments)]
 fn run_filter(
     filter_str: &str,
     input_str: &str,
@@ -22,9 +27,8 @@ fn run_filter(
     slurp: bool,
     raw_output: bool,
     compact: bool,
+    named_args: &[(String, serde_json::Value)],
 ) -> Result<Vec<String>, String> {
-    use jaq_core::load::{Arena, File, Loader};
-
     let loader = Loader::new(jaq_std::defs().chain(jaq_json::defs()));
     let arena = Arena::default();
     let program = File {
@@ -43,7 +47,6 @@ fn run_filter(
     // We replace them with safe stubs that return errors.
     const BLOCKED: &[&str] = &["env", "halt", "halt_error"];
 
-    use jaq_core::box_iter::box_once;
     let safe_funs = jaq_std::funs()
         .chain(jaq_json::funs())
         .filter(|(name, _, _)| !BLOCKED.contains(name));
@@ -70,8 +73,23 @@ fn run_filter(
         ),
     );
 
+    // Named args become global variables, plus `$ARGS` like real jq.
+    let named: serde_json::Map<String, serde_json::Value> = named_args.iter().cloned().collect();
+    let args_obj = serde_json::json!({ "positional": [], "named": named });
+    let var_names: Vec<String> = named_args
+        .iter()
+        .map(|(n, _)| format!("${n}"))
+        .chain(["$ARGS".to_string()])
+        .collect();
+    let var_vals: Vec<jaq_json::Val> = named_args
+        .iter()
+        .map(|(_, v)| jaq_json::Val::from(v.clone()))
+        .chain([jaq_json::Val::from(args_obj)])
+        .collect();
+
     let filter = jaq_core::Compiler::default()
         .with_funs(safe_funs.chain([halt_error_stub, env_stub]))
+        .with_global_vars(var_names.iter().map(String::as_str))
         .compile(modules)
         .map_err(|errs| format!("jq: compile error: {:?}", errs.first()))?;
 
@@ -114,7 +132,10 @@ fn run_filter(
     for input_json in inputs {
         let input = jaq_json::Val::from(input_json);
         let iter_inputs = jaq_core::RcIter::new(core::iter::empty());
-        let out = filter.run((jaq_core::Ctx::new([], &iter_inputs), input));
+        let out = filter.run((
+            jaq_core::Ctx::new(var_vals.iter().cloned(), &iter_inputs),
+            input,
+        ));
 
         for result in out {
             match result {
@@ -166,6 +187,7 @@ async fn cmd_jq(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut join_output = false;
     let mut filter_str: Option<String> = None;
     let mut files: Vec<String> = Vec::new();
+    let mut named_args: Vec<(String, serde_json::Value)> = Vec::new();
 
     while let Some(arg) = parser.next()? {
         match arg {
@@ -176,6 +198,38 @@ async fn cmd_jq(os: &dyn Kernel, args: &[String]) -> CommandResult {
             Short('e') | Long("exit-status") => exit_status = true,
             Short('n') | Long("null-input") => null_input = true,
             Short('j') | Long("join-output") => join_output = true,
+            Long(opt @ ("arg" | "argjson")) => {
+                let is_json = opt == "argjson";
+                let (Ok(name), Ok(text)) = (parser.value(), parser.value()) else {
+                    let what = if is_json { "argjson" } else { "arg" };
+                    let example = if is_json { "text" } else { "value" };
+                    let mut w = io::stderr()?;
+                    wprintln!(
+                        w,
+                        "jq: --{what} takes two parameters (e.g. --{what} varname {example})"
+                    )?;
+                    return Ok(2);
+                };
+                let name = name.string()?;
+                let text = text.string()?;
+                // Like jq, the first binding wins without parsing later JSON.
+                if named_args.iter().any(|(n, _)| *n == name) {
+                    continue;
+                }
+                let value = if is_json {
+                    match serde_json::from_str(&text) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let mut w = io::stderr()?;
+                            wprintln!(w, "jq: invalid JSON text passed to --argjson")?;
+                            return Ok(2);
+                        }
+                    }
+                } else {
+                    serde_json::Value::String(text)
+                };
+                named_args.push((name, value));
+            }
             Short('h') | Long("help") => {
                 let mut w = io::stdout()?;
                 wprintln!(w, "{}", HELP)?;
@@ -228,6 +282,7 @@ async fn cmd_jq(os: &dyn Kernel, args: &[String]) -> CommandResult {
         slurp,
         raw_output,
         compact,
+        &named_args,
     );
 
     match result {

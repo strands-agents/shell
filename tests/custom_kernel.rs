@@ -28,7 +28,9 @@ struct Tree {
     dirs: BTreeSet<String>,
 }
 
-/// An in-memory backend. Paths under `/ro` refuse writes.
+/// An in-memory backend. Paths under `/ro` refuse writes. Paths under
+/// `/work/sealed` refuse lookups and writes, and paths under `/work/blind`
+/// refuse lookups only.
 struct MemKernel {
     tree: Arc<Mutex<Tree>>,
 }
@@ -86,6 +88,18 @@ fn parent(path: &str) -> &str {
 
 fn not_found() -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "no such file or directory")
+}
+
+fn under(path: &str, root: &str) -> bool {
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn lookup_refused(path: &str) -> bool {
+    under(path, "/work/sealed") || under(path, "/work/blind")
+}
+
+fn refused(path: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, format!("refused '{path}'"))
 }
 
 fn refuse_read_only(path: &str) -> io::Result<()> {
@@ -186,7 +200,9 @@ impl Kernel for MemKernel {
     async fn stat(&self, proc: &Process, path: &str) -> FileStat {
         let abs = resolve(proc, path);
         let tree = self.tree.lock().unwrap();
-        if let Some(data) = tree.files.get(&abs) {
+        if lookup_refused(&abs) {
+            FileStat::default()
+        } else if let Some(data) = tree.files.get(&abs) {
             FileStat {
                 exists: true,
                 is_file: true,
@@ -216,7 +232,9 @@ impl Kernel for MemKernel {
 
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf> {
         let abs = resolve(proc, path);
-        if self.stat(proc, &abs).await.exists {
+        if lookup_refused(&abs) {
+            Err(refused(&abs))
+        } else if self.stat(proc, &abs).await.exists {
             Ok(PathBuf::from(abs))
         } else {
             Err(not_found())
@@ -256,6 +274,9 @@ impl Kernel for MemKernel {
     async fn create_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
         let abs = resolve(proc, path);
         refuse_read_only(&abs)?;
+        if under(&abs, "/work/sealed") {
+            return Err(refused(&abs));
+        }
         let mut tree = self.tree.lock().unwrap();
         if !tree.dirs.contains(parent(&abs)) {
             return Err(not_found());
@@ -291,6 +312,132 @@ impl Kernel for MemKernel {
 
     fn now(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    }
+}
+
+/// A `MemKernel` that records each path lookup, and answers [`Kernel::try_stat`]
+/// with one lookup.
+struct CountingKernel {
+    inner: Arc<MemKernel>,
+    lookups: Mutex<Vec<String>>,
+}
+
+impl CountingKernel {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemKernel::new(),
+            lookups: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn record(&self, proc: &Process, path: &str) {
+        self.lookups.lock().unwrap().push(resolve(proc, path));
+    }
+
+    fn lookups_of(&self, path: &str) -> usize {
+        self.lookups
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == path)
+            .count()
+    }
+}
+
+#[async_trait]
+impl Kernel for CountingKernel {
+    fn new_process(&self) -> Process {
+        self.inner.new_process()
+    }
+
+    async fn open(&self, proc: &mut Process, path: &str, flags: OpenFlags) -> io::Result<Fd> {
+        self.inner.open(proc, path, flags).await
+    }
+
+    async fn list_dir(&self, proc: &Process, path: &str) -> io::Result<Vec<DirEntry>> {
+        self.inner.list_dir(proc, path).await
+    }
+
+    async fn change_dir(&self, proc: &mut Process, path: &str) -> io::Result<()> {
+        self.inner.change_dir(proc, path).await
+    }
+
+    async fn stat(&self, proc: &Process, path: &str) -> FileStat {
+        self.record(proc, path);
+        self.inner.stat(proc, path).await
+    }
+
+    async fn lstat(&self, proc: &Process, path: &str) -> FileStat {
+        self.record(proc, path);
+        self.inner.lstat(proc, path).await
+    }
+
+    async fn access(&self, proc: &Process, path: &str, mode: i32) -> bool {
+        self.record(proc, path);
+        self.inner.access(proc, path, mode).await
+    }
+
+    async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf> {
+        self.record(proc, path);
+        self.inner.canonicalize(proc, path).await
+    }
+
+    async fn try_stat(&self, proc: &Process, path: &str) -> io::Result<FileStat> {
+        self.record(proc, path);
+        let abs = resolve(proc, path);
+        if lookup_refused(&abs) {
+            return Err(refused(&abs));
+        }
+        let stat = self.inner.stat(proc, &abs).await;
+        if stat.exists {
+            Ok(stat)
+        } else {
+            Err(not_found())
+        }
+    }
+
+    async fn is_executable(&self, proc: &Process, path: &str) -> bool {
+        self.inner.is_executable(proc, path).await
+    }
+
+    async fn glob(&self, proc: &Process, pattern: &str) -> Vec<String> {
+        self.inner.glob(proc, pattern).await
+    }
+
+    fn isatty(&self, fd: i32) -> bool {
+        self.inner.isatty(fd)
+    }
+
+    async fn remove_file(&self, proc: &Process, path: &str) -> io::Result<()> {
+        self.inner.remove_file(proc, path).await
+    }
+
+    async fn remove_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
+        self.inner.remove_dir(proc, path).await
+    }
+
+    async fn create_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
+        self.inner.create_dir(proc, path).await
+    }
+
+    async fn rename(&self, proc: &Process, from: &str, to: &str) -> io::Result<()> {
+        self.inner.rename(proc, from, to).await
+    }
+
+    async fn symlink(&self, proc: &Process, target: &str, link: &str) -> io::Result<()> {
+        self.inner.symlink(proc, target, link).await
+    }
+
+    async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String> {
+        self.inner.read_link(proc, path).await
+    }
+
+    async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()> {
+        self.inner.set_permissions(proc, path, mode).await
+    }
+
+    fn now(&self) -> SystemTime {
+        self.inner.now()
     }
 }
 
@@ -377,6 +524,100 @@ fn redirects_and_directory_changes_reach_the_backend() {
             Some(b"one\ntwo\n".to_vec())
         );
     });
+}
+
+#[test]
+fn mkdir_p_below_a_refused_ancestor_names_the_target() {
+    let kernel = MemKernel::new();
+    let mut shell = shell_over(&kernel);
+    block_on(async {
+        let out = shell.run("mkdir -p /work/sealed/x").await;
+        assert_ne!(out.status, 0);
+        assert!(out.stderr.contains("'/work/sealed/x'"), "{}", out.stderr);
+        assert!(!out.stderr.contains("'/work/sealed'"), "{}", out.stderr);
+        assert!(!kernel.has_dir("/work/sealed"));
+        assert!(!kernel.has_dir("/work/sealed/x"));
+    });
+}
+
+#[test]
+fn mkdir_p_does_not_create_an_ancestor_it_cannot_look_up() {
+    let kernel = MemKernel::new();
+    let mut shell = shell_over(&kernel);
+    block_on(async {
+        let out = shell.run("mkdir -p /work/blind/x/y").await;
+        assert_ne!(out.status, 0);
+        assert!(!kernel.has_dir("/work/blind"));
+        assert!(!kernel.has_dir("/work/blind/x"));
+        assert!(!kernel.has_dir("/work/blind/x/y"));
+    });
+}
+
+#[test]
+fn mkdir_p_without_refusals_is_unchanged() {
+    let kernel = MemKernel::new();
+    let mut shell = shell_over(&kernel);
+    block_on(async {
+        let out = shell.run("mkdir -p /work/a/b/c rel/one/").await;
+        assert_eq!((out.status, out.stderr.as_str()), (0, ""));
+        for dir in [
+            "/work/a",
+            "/work/a/b",
+            "/work/a/b/c",
+            "/work/rel",
+            "/work/rel/one",
+        ] {
+            assert!(kernel.has_dir(dir), "{dir}");
+        }
+
+        let out = shell.run("mkdir -p /work /work/a/b").await;
+        assert_eq!((out.status, out.stderr.as_str()), (0, ""));
+
+        let out = shell.run("mkdir -p /work/notes.txt/x/y").await;
+        assert_eq!(out.status, 1);
+        assert!(!kernel.has_dir("/work/notes.txt/x"));
+        assert_eq!(
+            kernel.file("/work/notes.txt"),
+            Some(b"alpha\nbeta\n".to_vec())
+        );
+
+        let out = shell.run("mkdir -p /ro/new").await;
+        assert_eq!(out.status, 1);
+        assert!(
+            out.stderr.contains("read-only backend path"),
+            "{}",
+            out.stderr
+        );
+        assert!(!kernel.has_dir("/ro/new"));
+    });
+}
+
+#[test]
+fn mkdir_p_looks_up_each_ancestor_once() {
+    let kernel = CountingKernel::new();
+    let dyn_kernel: Arc<dyn Kernel> = kernel.clone();
+    let mut shell = Shell::with_kernel(dyn_kernel);
+    block_on(async {
+        let out = shell.run("mkdir -p /work/a/b/c").await;
+        assert_eq!((out.status, out.stderr.as_str()), (0, ""));
+        assert!(kernel.inner.has_dir("/work/a/b/c"));
+
+        let out = shell.run("mkdir -p /work/blind/x/y").await;
+        assert_ne!(out.status, 0);
+        assert!(!kernel.inner.has_dir("/work/blind"));
+        assert!(!kernel.inner.has_dir("/work/blind/x"));
+    });
+    for (path, kind) in [
+        ("/work/a", "missing"),
+        ("/work/a/b", "missing"),
+        ("/work/a/b/c", "target"),
+        ("/work/blind", "refused"),
+        ("/work/blind/x", "refused"),
+        ("/work/blind/x/y", "target"),
+    ] {
+        assert_eq!(kernel.lookups_of(path), 1, "{kind} {path}");
+    }
+    assert_eq!(kernel.lookups_of("/work"), 2, "existing /work");
 }
 
 #[test]

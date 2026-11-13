@@ -63,6 +63,9 @@ pub fn builtin_lua<'a>(
             return run_repl(os, proc).await;
         }
 
+        // Input fed from outside the shell can stay open, so it reads as empty here.
+        let stdin_is_outside = sio::with_process(|p| p.reads_outside_input(os::STDIN));
+
         // Read script source through the kernel
         let code = if let Some(ref code) = eval_code {
             code.clone()
@@ -78,6 +81,8 @@ pub fn builtin_lua<'a>(
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                     format!("lua: {path}: {e}").into()
                 })?
+        } else if stdin_is_outside {
+            String::new()
         } else {
             // Read from stdin
             let mut reader = sio::stdin()?;
@@ -89,7 +94,7 @@ pub fn builtin_lua<'a>(
         };
 
         // Pre-read stdin for io.read() when script comes from file or -e
-        let stdin_data = if script_file.is_some() || eval_code.is_some() {
+        let stdin_data = if (script_file.is_some() || eval_code.is_some()) && !stdin_is_outside {
             if let Ok(mut r) = sio::stdin() {
                 os::read_to_string_limited(&mut r, proc.max_output)
                     .await
@@ -653,12 +658,15 @@ fn setup_sandbox(
     let popen_max_bg = proc.max_bg_jobs;
     let popen_max_pipe = proc.max_pipeline;
     let popen_max_input = proc.max_input;
+    let popen_owner = proc.background_owner.clone();
+    let popen_in_background = proc.in_background_job;
     io_table.set(
         "popen",
         lua.create_async_function(move |lua, (cmd, mode): (LuaString, Option<LuaString>)| {
             let k = k.clone();
             let cwd = cwd.clone();
             let env = env.clone();
+            let owner = popen_owner.clone();
             async move {
                 let cmd_s = lua_str(&cmd);
                 let mode_s = mode.as_ref().map(lua_str);
@@ -677,6 +685,8 @@ fn setup_sandbox(
                 sub_proc.max_bg_jobs = popen_max_bg;
                 sub_proc.max_pipeline = popen_max_pipe;
                 sub_proc.max_input = popen_max_input;
+                sub_proc.background_owner = owner;
+                sub_proc.in_background_job = popen_in_background;
                 let (_exit, stdout, _stderr) =
                     exec::execute_capture(k, &mut sub_proc, &cmd_s).await;
 
@@ -802,6 +812,8 @@ fn setup_sandbox(
     let exec_max_bg = proc.max_bg_jobs;
     let exec_max_pipe = proc.max_pipeline;
     let exec_max_input = proc.max_input;
+    let exec_owner = proc.background_owner.clone();
+    let exec_in_background = proc.in_background_job;
     let out = stdout_buf.clone();
     let err = stderr_buf.clone();
     os_table.set(
@@ -810,6 +822,7 @@ fn setup_sandbox(
             let k = k.clone();
             let cwd = cwd.clone();
             let env = env.clone();
+            let owner = exec_owner.clone();
             let out = out.clone();
             let err = err.clone();
             async move {
@@ -833,6 +846,8 @@ fn setup_sandbox(
                 sub_proc.max_bg_jobs = exec_max_bg;
                 sub_proc.max_pipeline = exec_max_pipe;
                 sub_proc.max_input = exec_max_input;
+                sub_proc.background_owner = owner;
+                sub_proc.in_background_job = exec_in_background;
                 let (code, stdout, stderr) = exec::execute_capture(k, &mut sub_proc, &cmd_s).await;
                 if !stdout.is_empty() {
                     out.borrow_mut().extend_from_slice(stdout.as_bytes());
