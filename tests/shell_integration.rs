@@ -13631,11 +13631,7 @@ expect!(
     "uid=1000(agent) gid=1000(agent) groups=1000(agent)\nagent"
 );
 expect!(id_unset_user, "unset USER; id -un", "lash");
-expect!(
-    id_matches_whoami_user,
-    "[ \"$(id -un)\" = \"$USER\" ] && echo same",
-    "same"
-);
+expect!(id_empty_user, "USER= id -un", "lash");
 expect!(id_help, "id --help | head -1", "Usage: id [OPTION]...");
 shell_test!(
     id_n_alone,
@@ -13665,7 +13661,7 @@ shell_test!(
     |_shell: &mut Shell, out: strands_shell::Output| {
         assert_eq!(out.stdout, "");
         assert_ne!(out.status, 0);
-        assert!(out.stderr.contains("id"), "{}", out.stderr);
+        assert!(out.stderr.contains("id: invalid option"), "{}", out.stderr);
     }
 );
 shell_test!(
@@ -13674,6 +13670,10 @@ shell_test!(
     |_shell: &mut Shell, out: strands_shell::Output| {
         assert_eq!(out.stdout, "");
         assert_ne!(out.status, 0);
-        assert!(out.stderr.contains("id"), "{}", out.stderr);
+        assert!(
+            out.stderr.contains("id: unexpected argument \"someone\""),
+            "{}",
+            out.stderr
+        );
     }
 );
