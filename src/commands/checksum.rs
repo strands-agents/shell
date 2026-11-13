@@ -30,8 +30,8 @@ pub async fn run(os: &dyn Kernel, args: &[String], algo: &Algorithm) -> CommandR
             Short('b') | Long("binary") => binary = Some(true),
             Short('t') | Long("text") => binary = Some(false),
             Short('c') | Long("check") => check = true,
-            Long("quiet") => quiet = true,
-            Long("status") => status = true,
+            Long("quiet") => (quiet, status) = (true, false),
+            Long("status") => (quiet, status) = (false, true),
             Short('h') | Long("help") => {
                 let mut w = io::stdout()?;
                 wprintln!(w, "{}", help(algo))?;
