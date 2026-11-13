@@ -14,13 +14,31 @@ Print the target of a symbolic link, or a canonical file name.
 
 /// How strictly `canonicalize` requires path components to exist.
 #[derive(Clone, Copy, PartialEq)]
-enum Mode {
+pub(super) enum Mode {
     /// `-f`: every component but the last must exist.
     AllButLast,
     /// `-e`: every component must exist.
     Existing,
     /// `-m`: no component needs to exist.
     Missing,
+}
+
+/// Why `canonicalize` failed, worded like the matching `errno` message.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum CanonError {
+    NotFound,
+    NotDir,
+    Loop,
+}
+
+impl std::fmt::Display for CanonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CanonError::NotFound => "No such file or directory",
+            CanonError::NotDir => "Not a directory",
+            CanonError::Loop => "Too many levels of symbolic links",
+        })
+    }
 }
 
 /// Safety nets that bound the work for one path; hitting any is an error in
@@ -60,9 +78,9 @@ async fn cmd_readlink(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let target = match mode {
         None => io::read_link(os, &path).await?,
         // Like GNU readlink without -v, a failed canonicalization is silent.
-        Some(mode) => match canonicalize(os, &path, mode).await {
-            Some(target) => target,
-            None => return Ok(1),
+        Some(mode) => match canonicalize(os, &path, mode, true).await {
+            Ok(target) => target,
+            Err(_) => return Ok(1),
         },
     };
     let mut w = io::stdout()?;
@@ -76,11 +94,20 @@ async fn cmd_readlink(os: &dyn Kernel, args: &[String]) -> CommandResult {
 
 /// Resolve `path` to an absolute path with no `.`, `..` or symlink
 /// components, walking it one component at a time through the kernel.
-/// Returns `None` when `mode` requires a component that is missing, a
-/// non-directory is used as a directory, or symlinks loop.
-async fn canonicalize(os: &dyn Kernel, path: &str, mode: Mode) -> Option<String> {
+/// Fails when `mode` requires a component that is missing, a non-directory
+/// is used as a directory, or symlinks loop.
+///
+/// With `follow_links` false, symlinks are kept as they are, but each one
+/// is still checked through its target, like `stat`, to see whether it
+/// exists and is a directory.
+pub(super) async fn canonicalize(
+    os: &dyn Kernel,
+    path: &str,
+    mode: Mode,
+    follow_links: bool,
+) -> Result<String, CanonError> {
     if path.is_empty() {
-        return None;
+        return Err(CanonError::NotFound);
     }
     let mut pending: VecDeque<String> = VecDeque::new();
     if !path.starts_with('/') {
@@ -103,11 +130,15 @@ async fn canonicalize(os: &dyn Kernel, path: &str, mode: Mode) -> Option<String>
     let mut missing = 0usize;
     // Lookups by absolute path, so a link met again costs no kernel call.
     let mut lookups: HashMap<String, Lookup> = HashMap::new();
+    // Without following links, like GNU, the default mode needs a missing
+    // component to be a directory only when a `..`, a final `.` or the last
+    // component depends on it.
+    let lexical = !follow_links && mode == Mode::AllButLast;
 
     while let Some(comp) = pending.pop_front() {
         steps += 1;
         if steps > MAX_STEPS {
-            return None;
+            return Err(CanonError::Loop);
         }
         // Like a trailing slash, `.` needs the path so far to be a directory.
         if comp == "." || comp == DIR_MARK {
@@ -116,13 +147,14 @@ async fn canonicalize(os: &dyn Kernel, path: &str, mode: Mode) -> Option<String>
                 Mode::Missing => {}
                 // `-f` allows a missing last component even with a slash.
                 Mode::AllButLast if missing > 0 && comp == DIR_MARK => {}
-                _ => return None,
+                _ if lexical && missing > 0 && !only_dots(&pending) => {}
+                _ => return Err(not_dir_or_missing(missing)),
             }
             continue;
         }
         if comp == ".." {
             if !is_dir && mode != Mode::Missing {
-                return None;
+                return Err(not_dir_or_missing(missing));
             }
             resolved.pop();
             // Every earlier component was checked to be a directory (or, in
@@ -131,9 +163,9 @@ async fn canonicalize(os: &dyn Kernel, path: &str, mode: Mode) -> Option<String>
             missing = missing.saturating_sub(1);
             continue;
         }
-        if !is_dir && mode != Mode::Missing {
+        if !is_dir && mode != Mode::Missing && !(lexical && missing > 0) {
             // The previous component is a missing path or a non-directory.
-            return None;
+            return Err(not_dir_or_missing(missing));
         }
         if missing > 0 {
             resolved.push(comp);
@@ -144,17 +176,37 @@ async fn canonicalize(os: &dyn Kernel, path: &str, mode: Mode) -> Option<String>
         let st = match lookups.get(&candidate) {
             Some(st) => st.clone(),
             None => {
-                let st = lookup(os, &candidate).await;
+                let mut st = lookup(os, &candidate).await;
+                if st.is_symlink && !follow_links {
+                    st = match Box::pin(canonicalize(os, &candidate, Mode::Existing, true)).await {
+                        Ok(target) => Lookup {
+                            exists: true,
+                            is_dir: io::stat(os, &target).await.is_dir,
+                            is_symlink: false,
+                            link_target: None,
+                        },
+                        Err(e) if e != CanonError::NotFound && mode != Mode::Missing => {
+                            return Err(e);
+                        }
+                        // A dangling link counts as a missing component.
+                        Err(_) => Lookup {
+                            exists: false,
+                            is_dir: false,
+                            is_symlink: false,
+                            link_target: None,
+                        },
+                    };
+                }
                 lookups.insert(candidate.clone(), st.clone());
                 st
             }
         };
         if !st.exists {
-            let is_last = pending.iter().all(|c| c == "." || c == DIR_MARK);
+            let is_last = only_dots(&pending);
             match mode {
                 Mode::Missing => {}
-                Mode::AllButLast if is_last => {}
-                _ => return None,
+                Mode::AllButLast if is_last || lexical => {}
+                _ => return Err(CanonError::NotFound),
             }
             resolved.push(comp);
             missing = 1;
@@ -164,7 +216,7 @@ async fn canonicalize(os: &dyn Kernel, path: &str, mode: Mode) -> Option<String>
         if st.is_symlink {
             followed += 1;
             if followed > MAX_SYMLINKS || pending.len() > MAX_PENDING {
-                return None;
+                return Err(CanonError::Loop);
             }
             let mut hasher = DefaultHasher::new();
             pending.hash(&mut hasher);
@@ -175,9 +227,9 @@ async fn canonicalize(os: &dyn Kernel, path: &str, mode: Mode) -> Option<String>
                     missing = 1;
                     continue;
                 }
-                return None;
+                return Err(CanonError::Loop);
             }
-            let target = st.link_target?;
+            let target = st.link_target.ok_or(CanonError::NotFound)?;
             if target.starts_with('/') {
                 resolved.clear();
             }
@@ -191,7 +243,22 @@ async fn canonicalize(os: &dyn Kernel, path: &str, mode: Mode) -> Option<String>
         is_dir = st.is_dir;
     }
 
-    Some(join(&[], &resolved.join("/")))
+    Ok(join(&[], &resolved.join("/")))
+}
+
+/// Whether nothing but `.` and trailing-slash markers is left to resolve.
+fn only_dots(pending: &VecDeque<String>) -> bool {
+    pending.iter().all(|c| c == "." || c == DIR_MARK)
+}
+
+/// The error for a component that cannot be a directory: missing when
+/// some earlier component is missing, otherwise not a directory.
+fn not_dir_or_missing(missing: usize) -> CanonError {
+    if missing > 0 {
+        CanonError::NotFound
+    } else {
+        CanonError::NotDir
+    }
 }
 
 /// What `canonicalize` needs to know about one path.
