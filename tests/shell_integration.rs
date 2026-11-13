@@ -3354,6 +3354,7 @@ expect!(
 expect!(whoami_default, "whoami", "lash");
 expect!(whoami_follows_user, "USER=agent whoami", "agent");
 expect!(whoami_unset_user, "unset USER; whoami", "lash");
+expect!(whoami_empty_user, "USER= whoami", "lash");
 expect!(whoami_help, "whoami --help | head -1", "Usage: whoami");
 shell_test!(
     whoami_extra_operand,
@@ -3361,7 +3362,11 @@ shell_test!(
     |_shell: &mut Shell, out: strands_shell::Output| {
         assert_eq!(out.stdout, "");
         assert_ne!(out.status, 0);
-        assert!(out.stderr.contains("whoami"), "{}", out.stderr);
+        assert!(
+            out.stderr.contains("whoami: unexpected argument \"x\""),
+            "{}",
+            out.stderr
+        );
     }
 );
 shell_test!(
@@ -3370,7 +3375,11 @@ shell_test!(
     |_shell: &mut Shell, out: strands_shell::Output| {
         assert_eq!(out.stdout, "");
         assert_ne!(out.status, 0);
-        assert!(out.stderr.contains("whoami"), "{}", out.stderr);
+        assert!(
+            out.stderr.contains("whoami: invalid option"),
+            "{}",
+            out.stderr
+        );
     }
 );
 
