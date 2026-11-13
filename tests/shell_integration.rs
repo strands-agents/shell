@@ -4455,6 +4455,8 @@ fn stat_precision_and_alternate_form() {
         "1577836800.000|1577836800.000000000|1577836800|1577836800.000000000000|\
          0644|0644|644|/fx/f|0x81a4|0|000005|0644    |\n"
     );
+    let out = run_ls_fixture(&dir, "stat -c '%+s|% s|%+a|%+06s|% 06s|%+-5s|%+f' /fx/f");
+    assert_eq!(out.stdout, "+5| 5|644|+00005| 00005|+5   |81a4\n");
 }
 
 shell_test!(

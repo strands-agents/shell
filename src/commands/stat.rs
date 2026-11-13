@@ -294,6 +294,19 @@ fn conversion(conv: char, f: &File, precision: Option<Option<usize>>, alt: bool)
     (text, true)
 }
 
+/// Like GNU, `+` or a space puts a sign in front of a decimal number.
+fn sign(conv: char, flags: &str, text: String) -> String {
+    if matches!(conv, 'a' | 'D' | 'f' | 't' | 'T') {
+        text
+    } else if flags.contains('+') {
+        format!("+{text}")
+    } else if flags.contains(' ') {
+        format!(" {text}")
+    } else {
+        text
+    }
+}
+
 /// Expand `fmt` for one file, in a single pass so expanded text is never
 /// re-scanned. With `escapes`, backslash sequences are interpreted too, and
 /// each one GNU would warn about adds to `warnings`. A directive cut short by
@@ -342,11 +355,19 @@ fn expand(
             continue;
         }
         let (text, numeric) = conversion(conv, f, precision, flags.contains('#'));
+        let text = if numeric {
+            sign(conv, &flags, text)
+        } else {
+            text
+        };
         let pad = width.saturating_sub(text.chars().count());
         let padded = if flags.contains('-') {
             format!("{}{}", text, " ".repeat(pad))
         } else if flags.contains('0') && numeric {
-            format!("{}{}", "0".repeat(pad), text)
+            // Zeros go after a sign, as in `+0005`.
+            let digits = text.trim_start_matches(['+', ' ']);
+            let sign = &text[..text.len() - digits.len()];
+            format!("{}{}{}", sign, "0".repeat(pad), digits)
         } else {
             format!("{}{}", " ".repeat(pad), text)
         };
