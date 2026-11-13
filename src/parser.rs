@@ -78,7 +78,8 @@ pub enum Connector {
 pub enum Item {
     Pipeline(Pipeline, bool), // (pipeline, negated)
     /// A compound command (group, subshell, if, while, for, case) piped into
-    /// a trailing pipeline: `for i in ...; do ...; done | sort | head`
+    /// a trailing pipeline: `for i in ...; do ...; done | sort | head`.
+    /// The tail is empty for a compound that `!` inverts and no pipe follows: `! { ...; }`
     CompoundPipeline {
         compound: Box<Item>,
         tail: Pipeline,
@@ -1132,7 +1133,8 @@ fn is_stop(tok: &Token, stop: &[&str], at_command_start: bool) -> bool {
 }
 
 /// If the next token after a compound command is `|`, collect the trailing
-/// pipeline commands and wrap everything in a `CompoundPipeline`.
+/// pipeline commands and wrap everything in a `CompoundPipeline`. A negated
+/// compound with no pipe becomes a `CompoundPipeline` with an empty tail.
 fn collect_compound_pipe(
     tokens: &[Token],
     i: &mut usize,
@@ -1226,6 +1228,13 @@ fn collect_compound_pipe(
         Ok(Item::CompoundPipeline {
             compound: Box::new(inner),
             tail,
+            negated,
+        })
+    } else if negated {
+        // `! compound` is a compound pipeline with no tail.
+        Ok(Item::CompoundPipeline {
+            compound: Box::new(item),
+            tail: Vec::new(),
             negated,
         })
     } else {

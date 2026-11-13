@@ -167,6 +167,8 @@ pub struct Process {
     pub opt_xtrace: bool,
     /// `set -o pipefail`: a pipeline fails with its rightmost failing stage.
     pub opt_pipefail: bool,
+    /// How many commands inverted by `!` enclose the current command, which `set -e` ignores.
+    pub(crate) errexit_ignored: u32,
     /// Set when a nounset error occurs during expansion.
     pub nounset_error: bool,
     /// Set when `exit` ran inside a function called by a single-command pipeline.
@@ -359,6 +361,7 @@ impl Process {
             opt_nounset: false,
             opt_xtrace: false,
             opt_pipefail: false,
+            errexit_ignored: 0,
             nounset_error: false,
             pending_exit: false,
             refused_array: false,
@@ -408,6 +411,7 @@ impl Process {
             opt_nounset: false,
             opt_xtrace: false,
             opt_pipefail: false,
+            errexit_ignored: 0,
             nounset_error: false,
             pending_exit: false,
             refused_array: false,
@@ -517,6 +521,7 @@ impl Process {
             opt_nounset: self.opt_nounset,
             opt_xtrace: self.opt_xtrace,
             opt_pipefail: self.opt_pipefail,
+            errexit_ignored: self.errexit_ignored,
             nounset_error: false,
             pending_exit: false,
             refused_array: false,

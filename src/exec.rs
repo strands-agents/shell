@@ -2060,6 +2060,26 @@ async fn run_capturing_status(
                     compound,
                     tail,
                     negated,
+                } if tail.is_empty() => {
+                    let compound_cl = vec![(*compound.clone(), None)];
+                    let ignored = u32::from(*negated);
+                    proc.errexit_ignored += ignored;
+                    let (s, result) =
+                        Box::pin(run_capturing_status(os.clone(), proc, &compound_cl)).await;
+                    proc.errexit_ignored -= ignored;
+                    match result {
+                        Ok(exit) if *negated => (i32::from(exit == 0), s),
+                        Ok(exit) => (exit, s),
+                        Err(control) => {
+                            flow = Some(control);
+                            (proc.last_exit, s)
+                        }
+                    }
+                }
+                Item::CompoundPipeline {
+                    compound,
+                    tail,
+                    negated,
                 } => {
                     let compound_cl = vec![(*compound.clone(), None)];
                     let (captured, result) =
@@ -2238,8 +2258,12 @@ async fn execute_command_line_inner(
             }
 
             // Determine if this item is in a "tested" context (suppresses errexit).
-            // Tested = followed by && or ||.
-            let tested = matches!(connector, Some(Connector::And) | Some(Connector::Or));
+            // Tested = followed by && or ||, or inverted by `!`.
+            let tested = matches!(connector, Some(Connector::And) | Some(Connector::Or))
+                || matches!(
+                    item,
+                    Item::Pipeline(_, true) | Item::CompoundPipeline { negated: true, .. }
+                );
 
             last_exit = execute_item(os.clone(), proc, item).await?;
             proc.last_exit = last_exit;
@@ -2251,7 +2275,7 @@ async fn execute_command_line_inner(
             }
 
             // errexit: if set -e is active and command failed and not in tested context
-            if proc.opt_errexit && last_exit != 0 && !tested {
+            if proc.opt_errexit && proc.errexit_ignored == 0 && last_exit != 0 && !tested {
                 return Err(ControlFlow::Exit(last_exit));
             }
         }
@@ -2270,11 +2294,27 @@ async fn execute_item(
     }
     match item {
         Item::Pipeline(pipeline, negated) => {
-            let mut exit = execute_pipeline_checked(os, proc, pipeline).await?;
+            let ignored = u32::from(*negated);
+            proc.errexit_ignored += ignored;
+            let result = execute_pipeline_checked(os, proc, pipeline).await;
+            proc.errexit_ignored -= ignored;
+            let mut exit = result?;
             if *negated {
                 exit = if exit == 0 { 1 } else { 0 };
             }
             Ok(exit)
+        }
+        Item::CompoundPipeline {
+            compound,
+            tail,
+            negated,
+        } if tail.is_empty() => {
+            let ignored = u32::from(*negated);
+            proc.errexit_ignored += ignored;
+            let result = Box::pin(execute_item(os, proc, compound)).await;
+            proc.errexit_ignored -= ignored;
+            let exit = result?;
+            Ok(if *negated { i32::from(exit == 0) } else { exit })
         }
         Item::Group(cl) => Box::pin(execute_command_line_inner(os, proc, cl)).await,
         Item::Subshell(cl) => {

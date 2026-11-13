@@ -13173,3 +13173,118 @@ fn cancelling_wait_stops_a_background_pipeline() {
         assert_eq!(shell.run("echo ready").await.stdout, "ready\n");
     }));
 }
+
+// ── Status of a redirected group ────────────────────────────────────
+
+expect!(
+    a_redirected_group_keeps_its_status,
+    "{ false; } > /tmp/rgs1; echo $?; { true; } > /tmp/rgs2; echo $?",
+    "1\n0"
+);
+expect!(
+    a_redirected_group_keeps_its_last_command_status,
+    "{ echo out; (exit 7); } > /tmp/rgs3; echo $?; cat /tmp/rgs3",
+    "7\nout"
+);
+expect!(
+    a_condition_on_a_redirected_group_takes_the_failure_branch,
+    "if { false; } > /tmp/rgs4; then echo then; else echo else; fi",
+    "else"
+);
+expect_status!(
+    a_redirected_group_is_the_calls_status,
+    "{ false; } 2> /tmp/rgs5",
+    1
+);
+
+// ── `!` before a compound command ───────────────────────────────────
+
+expect!(
+    negation_inverts_a_group,
+    "! { false; }; echo $?; ! { true; }; echo $?",
+    "0\n1"
+);
+expect!(
+    negation_inverts_a_subshell,
+    "! (false); echo $?; ! (true); echo $?",
+    "0\n1"
+);
+expect!(
+    negation_inverts_each_compound_command,
+    "! if true; then true; fi; echo $?; ! while false; do :; done; echo $?; \
+     ! for i in 1; do false; done; echo $?; ! case a in a) false;; esac; echo $?",
+    "1\n1\n0\n0"
+);
+expect!(
+    negation_inverts_a_redirected_compound,
+    "! { false; } > /tmp/neg1; echo $?; ! { true; } 2> /tmp/neg2; echo $?; \
+     if ! (false) > /dev/null 2>&1; then echo then; else echo else; fi",
+    "0\n1\nthen"
+);
+expect!(
+    negation_inverts_a_compound_inside_a_substitution,
+    "out=$(! { false; } && echo ran; ! ( true ); echo $?); echo \"$out\"",
+    "ran\n1"
+);
+expect!(
+    a_negated_group_runs_in_the_current_shell,
+    "! { x=1; }; echo $x",
+    "1"
+);
+expect_status!(a_negated_group_is_the_calls_status, "! { true; }", 1);
+
+// ── `set -e` and `!` ────────────────────────────────────────────────
+
+expect!(
+    errexit_ignores_a_negated_command,
+    "set -e; ! true; ! (true); ! { true; }; ! { true; } > /tmp/neg3; echo after",
+    "after"
+);
+expect!(
+    errexit_ignores_a_failure_inside_a_negated_command,
+    "set -e; ! { false; echo in; }; ! ( false; echo sub ); f() { false; echo fn; }; ! f; echo after",
+    "in\nsub\nfn\nafter"
+);
+expect!(
+    errexit_stays_ignored_inside_a_negated_group_that_sets_it,
+    "set -e; ! { set -e; false; echo inner; }; echo after",
+    "inner\nafter"
+);
+shell_test!(
+    errexit_applies_again_after_a_negated_command,
+    "set -e; ! { true; }; false; echo after",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+    }
+);
+shell_test!(
+    errexit_set_inside_a_negated_group_applies_after_it,
+    "set +e; ! { set -e; true; }; false; echo after",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+    }
+);
+expect!(
+    errexit_cleared_inside_a_negated_group_stays_cleared,
+    "set -e; ! { set +e; true; }; false; echo after",
+    "after"
+);
+
+#[test]
+fn a_call_cancelled_inside_a_negated_group_leaves_errexit_for_the_next_call() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            shell.run("set -e; ! { sleep 1; }; echo before"),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the first call must be cancelled");
+        let out = shell.run("set -e; false; echo after").await;
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+    }));
+}
