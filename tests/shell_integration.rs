@@ -5616,6 +5616,74 @@ fn a_substitution_cut_short_by_the_deadline_does_not_run_the_command_it_feeds() 
 }
 
 #[test]
+fn timed_out_redirect_preserves_host_files() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "{ echo new; } > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "(echo new) > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "x=$(exit > \"/out/$(printf keep; sleep 5; printf suffix)\")",
+            "eval : > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "x=$(eval : > \"/out/$(printf keep; sleep 5; printf suffix)\")",
+            "source /out/code > \"/out/$(printf keep; sleep 5; printf suffix)\"",
+            "x=$(source /out/code > \"/out/$(printf keep; sleep 5; printf suffix)\")",
+        ] {
+            let dir = TestDir::new("timed_out_compound_redirect");
+            for name in ["keep", "keepsuffix"] {
+                std::fs::write(dir.join(name), name).unwrap();
+            }
+            std::fs::write(dir.join("code"), ":\n").unwrap();
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            for name in ["keep", "keepsuffix"] {
+                assert_eq!(
+                    std::fs::read(dir.join(name)).unwrap(),
+                    name.as_bytes(),
+                    "{script}: {name}"
+                );
+            }
+        }
+    }));
+}
+
+#[test]
+fn timed_out_captured_compound_redirect_does_not_create_host_files() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "x=$({ :; } <> \"/out/$(printf new; sleep 5; printf suffix)\")",
+            "x=$( (: ) <> \"/out/$(printf new; sleep 5; printf suffix)\")",
+        ] {
+            let dir = TestDir::new("timed_out_captured_compound_redirect");
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            assert!(!dir.join("new").exists(), "{script}");
+            assert!(!dir.join("newsuffix").exists(), "{script}");
+        }
+    }));
+}
+
+#[test]
 fn sleep_within_timeout_succeeds() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {

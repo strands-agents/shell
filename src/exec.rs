@@ -1786,6 +1786,10 @@ async fn execute_captured_control_flow(
     if proc.nounset_error {
         return Ok(2);
     }
+    if let Some(msg) = proc.check_limits() {
+        proc.err_msg(msg);
+        return Err(ControlFlow::Exit(1));
+    }
     if redirects.is_empty() {
         return result;
     }
@@ -2092,6 +2096,10 @@ async fn run_capturing_status(
                         };
                         expanded.push((redir.clone(), target));
                     }
+                    if let Some(msg) = proc.check_limits() {
+                        proc.err_msg(msg);
+                        return (output, Err(ControlFlow::Exit(1)));
+                    }
                     // Separate stdin vs stdout redirects
                     let mut stdin_redir = Vec::new();
                     let mut stdout_redir = Vec::new();
@@ -2362,6 +2370,10 @@ async fn execute_item(
                     Redirect::HereDoc(..) => String::new(),
                 };
                 expanded.push((redir.clone(), target));
+            }
+            if let Some(msg) = proc.check_limits() {
+                proc.err_msg(msg);
+                return Err(ControlFlow::Exit(1));
             }
             // For stdin redirects, apply to proc so inner commands can read
             let mut stdin_expanded = Vec::new();
@@ -2782,9 +2794,6 @@ async fn run_special_redirected(
     special: Special,
     args: Vec<String>,
 ) -> Result<i32, ControlFlow> {
-    if command.redirects.is_empty() {
-        return run_special(os, proc, special, args).await;
-    }
     let mut redirects = Vec::new();
     for redir in &command.redirects {
         let target = match redir {
@@ -2798,6 +2807,13 @@ async fn run_special_redirected(
             Redirect::HereDoc(..) => String::new(),
         };
         redirects.push((redir.clone(), target));
+    }
+    if let Some(msg) = proc.check_limits() {
+        proc.err_msg(msg);
+        return Err(ControlFlow::Exit(1));
+    }
+    if redirects.is_empty() {
+        return run_special(os, proc, special, args).await;
     }
     if proc.nounset_error {
         proc.nounset_error = false;
