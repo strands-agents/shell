@@ -2759,6 +2759,69 @@ shell_test!(
     }
 );
 
+// ── help builtin ────────────────────────────────────────────────────
+
+expect!(help_short, "help -s cd", "cd: cd [DIR]");
+expect!(
+    help_short_alias_name,
+    "help -s [",
+    "[: test EXPR  or  [ EXPR ]"
+);
+expect!(
+    help_details,
+    "help cd",
+    "cd: cd [DIR]\n    Change the current directory to DIR, or to $HOME with no DIR.\n    `cd -` changes to $OLDPWD."
+);
+expect!(
+    help_covers_every_builtin,
+    "for b in : . [ alias break builtin cd command continue echo eval exec exit export \
+     false find getopts hash help local lua printf pwd read readonly return set shift \
+     shopt source test trap true type umask unalias unset wait xargs; do \
+     help -s \"$b\" >/dev/null || echo \"$b\"; done",
+    ""
+);
+expect!(
+    help_lists_builtins_and_commands,
+    "help | grep -c -e '^  cd \\[DIR\\]$' -e '^  .* grep .*$'",
+    "2"
+);
+expect!(
+    help_runs_command_help,
+    "help cut | head -n 1",
+    "Usage: cut OPTION [FILE]..."
+);
+expect!(
+    help_command_skips_function,
+    "cut() { echo shadowed; }; help cut | head -n 1",
+    "Usage: cut OPTION [FILE]..."
+);
+
+shell_test!(
+    help_rejects_unknown,
+    "help nosuch_xyz",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert_eq!(out.stdout, "");
+        assert_eq!(
+            out.stderr.trim(),
+            "strands-shell: help: no help topics match 'nosuch_xyz'"
+        );
+    }
+);
+
+shell_test!(
+    help_reports_unknown_among_known,
+    "help -s cd nosuch_xyz",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert_eq!(out.stdout.trim(), "cd: cd [DIR]");
+        assert_eq!(
+            out.stderr.trim(),
+            "strands-shell: help: no help topics match 'nosuch_xyz'"
+        );
+    }
+);
+
 // ── Redirections: read-write, dup, close ────────────────────────────
 
 expect!(
