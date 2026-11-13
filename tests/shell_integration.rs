@@ -3559,6 +3559,25 @@ expect!(
     "/tmp/gi.txt:yes"
 );
 
+// ── egrep ───────────────────────────────────────────────────────────
+
+expect_output!(
+    egrep_matches_extended_regex,
+    "printf 'foo\\nbar\\nfoobar\\nbaz\\n' > /tmp/eg.txt; egrep -n '^(foo|ba(r|z))$' /tmp/eg.txt",
+    "1:foo\n2:bar\n4:baz\n",
+    "",
+    0
+);
+expect_status!(egrep_no_match_exits_1, "echo foo | egrep 'x+'", 1);
+expect_output!(
+    egrep_rejects_perl,
+    "echo a | egrep -P a",
+    "",
+    "grep: conflicting matchers specified\n",
+    2
+);
+expect!(egrep_is_in_bin, "command -v egrep", "egrep");
+
 // ── grep binary / non-UTF-8 input ───────────────────────────────────
 
 /// Runs `cmd` in a shell with a host dir of raw-byte fixtures bound at /g.

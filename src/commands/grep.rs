@@ -742,3 +742,12 @@ async fn cmd_grep(os: &dyn Kernel, args: &[String]) -> CommandResult {
 
     Ok(if any_match { 0 } else { 1 })
 }
+
+/// `egrep` is `grep -E`, like GNU's `egrep` wrapper script.
+#[command("egrep")]
+async fn cmd_egrep(os: &dyn Kernel, args: &[String]) -> CommandResult {
+    let grep_args: Vec<String> = std::iter::once("-E".to_string())
+        .chain(args.iter().cloned())
+        .collect();
+    cmd_grep(os, &grep_args).await
+}
