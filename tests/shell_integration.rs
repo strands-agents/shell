@@ -4124,6 +4124,59 @@ fn mktemp_template() {
     }));
 }
 
+// ── sha256sum coverage ──────────────────────────────────────────────
+
+const SHA256_OF_EVERY_BYTE: &str =
+    "40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880";
+
+#[test]
+fn sha256sum_hashes_non_utf8_bytes_from_a_file_and_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let data: Vec<u8> = (0..=255).collect();
+        shell.write_file("/tmp/bin", &data).await.unwrap();
+        let out = shell.run("sha256sum /tmp/bin; sha256sum < /tmp/bin").await;
+        assert_eq!(out.status, 0);
+        assert_eq!(
+            out.stdout,
+            format!("{SHA256_OF_EVERY_BYTE}  /tmp/bin\n{SHA256_OF_EVERY_BYTE}  -\n")
+        );
+    }));
+}
+
+#[test]
+fn sha256sum_check_notices_a_changed_byte() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let mut data: Vec<u8> = (0..=255).collect();
+        shell.write_file("/tmp/bin", &data).await.unwrap();
+        let out = shell.run("sha256sum -b /tmp/bin > /tmp/sums").await;
+        assert_eq!(out.status, 0);
+        let out = shell.run("sha256sum -c /tmp/sums").await;
+        assert_eq!((out.status, out.stdout.as_str()), (0, "/tmp/bin: OK\n"));
+        data[200] ^= 1;
+        shell.write_file("/tmp/bin", &data).await.unwrap();
+        let out = shell.run("sha256sum -c /tmp/sums").await;
+        assert_eq!((out.status, out.stdout.as_str()), (1, "/tmp/bin: FAILED\n"));
+        assert!(out.stderr.contains("1 computed checksum did NOT match"));
+    }));
+}
+
+shell_test!(
+    sha256sum_rejects_status_without_check,
+    "echo hi | sha256sum --status",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert!(
+            out.stderr.contains("only when verifying checksums"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+
 // ── test builtin coverage ───────────────────────────────────────────
 
 expect!(
