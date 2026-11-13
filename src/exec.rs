@@ -1,7 +1,9 @@
 use std::cell::RefCell;
+use std::io::Write;
 use std::sync::Arc;
 
-use tokio::io::AsyncWriteExt;
+use bytes::Bytes;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::builtins;
 use crate::command_fallback;
@@ -134,7 +136,6 @@ async fn resolve_executable(
     let fd = os.open(&mut child, &found, OpenFlags::read()).await.ok()?;
     let mut reader = child.take_reader(fd).ok()?;
     let mut buf = [0u8; 256];
-    use tokio::io::AsyncReadExt;
     let n = reader.read(&mut buf).await.ok()?;
     if n >= 2 && buf[0] == b'#' && buf[1] == b'!' {
         let line_end = buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
@@ -2049,7 +2050,6 @@ async fn run_capturing_status(
                     let (tx, rx) = os::pipe(64);
                     let mut tasks = ForegroundTasks::new(os.as_ref());
                     let handle = tokio::task::spawn_local(async move {
-                        use bytes::Bytes;
                         if !captured.is_empty() {
                             let _ = tx.send(Bytes::from(captured.into_bytes())).await;
                         }
@@ -2304,11 +2304,13 @@ async fn execute_item(
             let handle = tokio::task::spawn_local(async move {
                 let (output, result) =
                     Box::pin(run_capturing_status(os2, &mut sub, &compound_cl)).await;
-                use bytes::Bytes;
                 if !output.is_empty() {
                     let _ = tx.send(Bytes::from(output.into_bytes())).await;
                 }
-                captured_status(result, sub.last_exit)
+                (
+                    captured_status(result, sub.last_exit),
+                    std::mem::take(&mut sub.captured_stderr),
+                )
             });
             tasks.own(&handle);
 
@@ -2317,7 +2319,22 @@ async fn execute_item(
             let mut exit = execute_pipeline(os, proc, tail).await;
             // The tail is a pipeline stage, so `exit` in it ends only that stage.
             proc.pending_exit = false;
-            let compound_exit = handle.await.unwrap_or(0);
+            let (compound_exit, mut stderr) = handle.await.unwrap_or_default();
+            // The compound's stderr is not piped; pass it on without dropping any,
+            // except a limit message that this process will report itself.
+            if let Some(msg) = proc.check_limits()
+                && stderr.ends_with(&format!("{msg}\n"))
+            {
+                stderr.truncate(stderr.len() - msg.len() - 1);
+            }
+            if !stderr.is_empty() {
+                if let Some(tx) = proc.take_err_tx() {
+                    let _ = tx.send(bytes::Bytes::from(stderr)).await;
+                    proc.set_err_tx(tx);
+                } else {
+                    proc.write_stderr(&stderr);
+                }
+            }
             proc.close(0);
             if proc.opt_pipefail && exit == 0 {
                 exit = compound_exit;
@@ -2889,7 +2906,6 @@ where
                 proc.captured_output.push_str(&to_stdout);
             }
         } else {
-            use std::io::Write;
             let mut out = std::io::stdout();
             let _ = out.write_all(to_stdout.as_bytes());
             let _ = out.flush();
@@ -3405,7 +3421,6 @@ async fn run_pipeline(
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
-                        use tokio::io::AsyncReadExt;
                         let mut buf = Vec::new();
                         let _ = reader.read_to_end(&mut buf).await;
                         let _ = std::io::Write::write_all(&mut std::io::stdout(), &buf);
@@ -3428,7 +3443,6 @@ async fn run_pipeline(
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
-                        use tokio::io::AsyncReadExt;
                         let mut buf = Vec::new();
                         let _ = reader.read_to_end(&mut buf).await;
                         let _ = std::io::Write::write_all(&mut std::io::stderr(), &buf);
@@ -3783,7 +3797,6 @@ async fn run_pipeline(
             }
             #[cfg(target_arch = "wasm32")]
             {
-                use tokio::io::AsyncReadExt;
                 let mut buf = Vec::new();
                 let _ = reader.read_to_end(&mut buf).await;
                 let _ = std::io::Write::write_all(&mut std::io::stdout(), &buf);
@@ -3821,7 +3834,6 @@ async fn run_pipeline(
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
-                    use tokio::io::AsyncReadExt;
                     let mut buf = Vec::new();
                     let _ = reader.read_to_end(&mut buf).await;
                     let _ = std::io::Write::write_all(&mut std::io::stderr(), &buf);
