@@ -26,6 +26,8 @@ mod xargs;
 use crate::commands::CommandResult;
 use crate::os::{Kernel, Process};
 
+pub(crate) use find::glob_match;
+
 /// Builtin function signature: operates directly on the shell process.
 pub type BuiltinFn =
     for<'a> fn(

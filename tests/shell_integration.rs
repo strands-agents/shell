@@ -4402,6 +4402,115 @@ expect!(
     "/tmp/lsrecursive:\na\nb\n\n/tmp/lsrecursive/a:\nbig\nsmall\n\n/tmp/lsrecursive/b:"
 );
 
+// ── tree ────────────────────────────────────────────────────────────
+
+/// `/tmp/tr` holds `B/c`, `Z.md`, `a.txt`, `.dot`, `src/lib/mod.rs`,
+/// `src/main.rs`, a link to a file, a link to a directory and a dangling link.
+const TREE_FIXTURE: &str = "mkdir -p /tmp/tr/src/lib /tmp/tr/B; cd /tmp/tr; \
+                            touch B/c Z.md a.txt .dot src/lib/mod.rs src/main.rs; \
+                            ln -s a.txt link; ln -s src dirlink; ln -s missing broken";
+
+fn tree_test(args: &str) -> strands_shell::Output {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell.run(&format!("{TREE_FIXTURE}; tree {args}")).await
+    }))
+}
+
+// Expected output is from tree 1.8, which pads the vertical bar with no-break
+// spaces in a UTF-8 locale.
+#[test]
+fn tree_default_output() {
+    let out = tree_test("");
+    assert_eq!(
+        out.stdout,
+        ".\n\
+         ├── B\n\
+         │\u{a0}\u{a0} └── c\n\
+         ├── Z.md\n\
+         ├── a.txt\n\
+         ├── broken -> missing\n\
+         ├── dirlink -> src\n\
+         ├── link -> a.txt\n\
+         └── src\n    \
+             ├── lib\n    \
+             │\u{a0}\u{a0} └── mod.rs\n    \
+             └── main.rs\n\
+         \n\
+         4 directories, 7 files\n"
+    );
+    assert_eq!(out.stderr, "");
+    assert_eq!(out.status, 0);
+}
+
+#[test]
+fn tree_all_and_dirs_only() {
+    let out = tree_test("-a -L 1");
+    assert!(out.stdout.starts_with(".\n├── .dot\n├── B\n"));
+    assert!(out.stdout.ends_with("\n3 directories, 5 files\n"));
+    let out = tree_test("-d");
+    assert_eq!(
+        out.stdout,
+        ".\n├── B\n├── dirlink -> src\n└── src\n    └── lib\n\n4 directories\n"
+    );
+}
+
+#[test]
+fn tree_level_ignore_full_path_and_noreport() {
+    let out = tree_test("-L 1 -I 'B|*.txt' -I 'Z*' src .");
+    assert_eq!(
+        out.stdout,
+        "src\n├── lib\n└── main.rs\n\
+         .\n├── broken -> missing\n├── dirlink -> src\n├── link -> a.txt\n└── src\n\
+         \n3 directories, 3 files\n"
+    );
+    let out = tree_test("-f --noreport src/");
+    assert_eq!(
+        out.stdout,
+        "src\n├── src/lib\n│\u{a0}\u{a0} └── src/lib/mod.rs\n└── src/main.rs\n"
+    );
+    let out = tree_test("-f -L 1 ./ | head -2; tree -f -L 1 / | head -2");
+    assert_eq!(out.stdout, ".\n├── ./B\n/\n├── /bin\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn tree_does_not_follow_symlinks_on_a_direct_bind() {
+    let dir = ls_fixture("tree_symlink", &[("f", 1, LS_T0)]);
+    std::fs::create_dir(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/main.rs"), "").unwrap();
+    std::os::unix::fs::symlink("src", dir.join("linkdir")).unwrap();
+    std::os::unix::fs::symlink(".", dir.join("loop")).unwrap();
+    std::os::unix::fs::symlink("nope", dir.join("dangling")).unwrap();
+    let out = run_ls_fixture(&dir, "tree /fx");
+    assert_eq!(
+        out.stdout,
+        "/fx\n\
+         ├── dangling -> nope\n\
+         ├── f\n\
+         ├── linkdir -> src\n\
+         ├── loop -> .\n\
+         └── src\n    \
+             └── main.rs\n\
+         \n3 directories, 3 files\n"
+    );
+}
+
+#[test]
+fn tree_reports_a_non_directory_and_bad_level() {
+    let out = tree_test("a.txt nope");
+    assert_eq!(
+        out.stdout,
+        "a.txt [error opening dir]\nnope [error opening dir]\n\n0 directories, 0 files\n"
+    );
+    assert_eq!(out.status, 0);
+    let out = tree_test("-L 0");
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.stderr, "tree: Invalid level, must be greater than 0.\n");
+    assert_eq!(out.status, 1);
+}
+
 // ── tail coverage ───────────────────────────────────────────────────
 
 expect!(

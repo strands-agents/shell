@@ -14,7 +14,7 @@ fn exec_fork(proc: &mut Process) -> Process {
     sub
 }
 
-fn glob_match(pat: &[u8], val: &[u8]) -> bool {
+pub(crate) fn glob_match(pat: &[u8], val: &[u8]) -> bool {
     let (mut pi, mut vi) = (0, 0);
     let (mut star_p, mut star_v) = (usize::MAX, 0);
     while vi < val.len() {
