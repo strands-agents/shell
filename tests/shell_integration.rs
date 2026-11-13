@@ -4988,6 +4988,142 @@ expect!(
     "/tmp/proj/bin"
 );
 
+// ── realpath ────────────────────────────────────────────────────────
+macro_rules! realpath_case {
+    ($name:ident, $args:expr, $stdout:expr, $stderr:expr, $status:expr) => {
+        expect_output!(
+            $name,
+            &format!("{READLINK_TREE}realpath {}", $args),
+            $stdout,
+            $stderr,
+            $status
+        );
+    };
+}
+
+realpath_case!(realpath_symlink_chain, "l2", "/tmp/rc/d/f\n", "", 0);
+realpath_case!(realpath_missing_last, "nofile", "/tmp/rc/nofile\n", "", 0);
+realpath_case!(realpath_dangling_link, "dang", "/tmp/rc/missing\n", "", 0);
+realpath_case!(
+    realpath_missing_middle,
+    "no/x",
+    "",
+    "realpath: no/x: No such file or directory\n",
+    1
+);
+realpath_case!(
+    realpath_file_as_dir,
+    "d/f/x",
+    "",
+    "realpath: d/f/x: Not a directory\n",
+    1
+);
+realpath_case!(
+    realpath_loop,
+    "loopa",
+    "",
+    "realpath: loopa: Too many levels of symbolic links\n",
+    1
+);
+realpath_case!(
+    realpath_empty,
+    "''",
+    "",
+    "realpath: '': No such file or directory\n",
+    1
+);
+realpath_case!(
+    realpath_keeps_going,
+    "l2 no/x ld/sub",
+    "/tmp/rc/d/f\n/tmp/rc/d/sub\n",
+    "realpath: no/x: No such file or directory\n",
+    1
+);
+realpath_case!(realpath_quiet, "-q no/x l1", "/tmp/rc/d/f\n", "", 1);
+realpath_case!(
+    realpath_e_missing_last,
+    "-e nofile",
+    "",
+    "realpath: nofile: No such file or directory\n",
+    1
+);
+realpath_case!(realpath_m_missing, "-m no/x/../y", "/tmp/rc/no/y\n", "", 0);
+realpath_case!(realpath_z, "-z l1 ld", "/tmp/rc/d/f\0/tmp/rc/d\0", "", 0);
+realpath_case!(realpath_s_link, "-s l2", "/tmp/rc/l2\n", "", 0);
+realpath_case!(
+    realpath_s_dir_link,
+    "--strip ld/sub",
+    "/tmp/rc/ld/sub\n",
+    "",
+    0
+);
+realpath_case!(
+    realpath_s_dotdot,
+    "--no-symlinks ld/../l1",
+    "/tmp/rc/l1\n",
+    "",
+    0
+);
+realpath_case!(realpath_s_dangling_last, "-s dang", "/tmp/rc/dang\n", "", 0);
+realpath_case!(
+    realpath_es_dangling,
+    "-es dang",
+    "",
+    "realpath: dang: No such file or directory\n",
+    1
+);
+realpath_case!(
+    realpath_s_loop,
+    "-s loopa",
+    "",
+    "realpath: loopa: Too many levels of symbolic links\n",
+    1
+);
+realpath_case!(realpath_sm_loop, "-sm loopa/x", "/tmp/rc/loopa/x\n", "", 0);
+realpath_case!(
+    realpath_relative_to,
+    "--relative-to=d/sub l2 /",
+    "../f\n../../../..\n",
+    "",
+    0
+);
+realpath_case!(realpath_relative_to_self, "--relative-to d d", ".\n", "", 0);
+realpath_case!(
+    realpath_relative_base,
+    "--relative-base=d d/f l2 . /",
+    "f\nf\n/tmp/rc\n/\n",
+    "",
+    0
+);
+realpath_case!(
+    realpath_relative_to_under_base,
+    "--relative-base=d --relative-to=d/sub d/f .",
+    "../f\n/tmp/rc\n",
+    "",
+    0
+);
+realpath_case!(
+    realpath_relative_to_outside_base,
+    "--relative-base=d/sub --relative-to=d d/f",
+    "/tmp/rc/d/f\n",
+    "",
+    0
+);
+realpath_case!(
+    realpath_relative_to_missing,
+    "--relative-to=no/x l1",
+    "",
+    "strands-shell: realpath: no/x: No such file or directory\n",
+    1
+);
+realpath_case!(
+    realpath_no_operand,
+    "-q",
+    "",
+    "strands-shell: realpath: missing operand\n",
+    1
+);
+
 // ── type builtin extended ───────────────────────────────────────────
 shell_test!(
     type_function,
