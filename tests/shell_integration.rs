@@ -13669,3 +13669,19 @@ shell_test!(
         assert_eq!(out.status, 1);
     }
 );
+expect_output!(
+    nl_second_dash_reads_nothing,
+    "printf 'x\\n' > /tmp/n1; printf 'a\\nb\\n' | nl - - /tmp/n1",
+    "     1\ta\n     2\tb\n     3\tx\n",
+    "",
+    0
+);
+shell_test!(
+    nl_rejects_a_width_too_large_to_format,
+    "echo a | nl -w 65536; echo $?; echo a | nl -w 100000000000; echo $?",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\n1\n");
+        assert_eq!(out.stderr.lines().count(), 2, "stderr={:?}", out.stderr);
+    }
+);
+expect_status!(nl_short_h_is_not_help, "echo a | nl -h a", 1);

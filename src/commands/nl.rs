@@ -123,10 +123,11 @@ async fn cmd_nl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 opts.width = value
                     .parse()
                     .ok()
-                    .filter(|&w| w > 0)
+                    // Rust caps format widths at u16::MAX.
+                    .filter(|w| (1..=usize::from(u16::MAX)).contains(w))
                     .ok_or_else(|| format!("invalid line number field width: '{value}'"))?;
             }
-            Short('h') | Long("help") => {
+            Long("help") => {
                 let mut w = io::stdout()?;
                 wprintln!(w, "{}", HELP)?;
                 return Ok(0);
@@ -143,9 +144,15 @@ async fn cmd_nl(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut status = 0;
     // Stderr is taken once, on the first error, so later errors are reported too.
     let mut stderr = None;
+    let mut stdin_taken = false;
     for path in &files {
         let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if path == "-" {
-            Box::new(io::stdin()?)
+            // A second `-` finds standard input already read to the end.
+            if std::mem::replace(&mut stdin_taken, true) {
+                Box::new(tokio::io::empty())
+            } else {
+                Box::new(io::stdin()?)
+            }
         } else {
             match io::open(os, path, OpenFlags::read()).await {
                 Ok(fd) => Box::new(io::take_reader(fd)?),
