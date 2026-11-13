@@ -6,6 +6,7 @@ mod curl;
 mod cut;
 mod date;
 mod dirname;
+mod du;
 mod echo;
 mod env;
 mod r#false;
@@ -80,6 +81,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "cut" => |os, args| Box::pin(cut::cmd_cut(os, args)),
             "date" => |os, args| Box::pin(date::cmd_date(os, args)),
             "dirname" => |os, args| Box::pin(dirname::cmd_dirname(os, args)),
+            "du" => |os, args| Box::pin(du::cmd_du(os, args)),
             "echo" => |os, args| Box::pin(echo::cmd_echo(os, args)),
             "env" => |os, args| Box::pin(env::cmd_env(os, args)),
             "false" => |os, args| Box::pin(r#false::cmd_false(os, args)),
