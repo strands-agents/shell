@@ -369,8 +369,8 @@ impl Vfs {
         let (parent_ino, name) = self.resolve_parent(link_path)?;
         let inode = Inode::new(InodeData::Symlink(target.to_string()), 0o120777, uid, gid);
         let ino = inode.ino;
-        self.inodes.insert(ino, inode);
         self.dir_insert(parent_ino, &name, ino)?;
+        self.inodes.insert(ino, inode);
         Ok(ino)
     }
 
