@@ -5577,6 +5577,45 @@ fn captured_timeout_stops_following_commands_before_host_writes() {
 }
 
 #[test]
+fn a_substitution_cut_short_by_the_deadline_does_not_run_the_command_it_feeds() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "rm -rf \"/out/$(sleep 5; echo sub)\"",
+            "rm -rf \"/out/$(sleep 5 && echo sub)\"",
+            "rm -rf \"/out/$(sleep 5)\"",
+            "d=$(sleep 5; echo sub); rm -rf \"/out/$d\"",
+            "echo ran > \"/out/marker$(sleep 5)\"",
+        ] {
+            let dir = TestDir::new("substitution_timeout_host_write");
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+            std::fs::create_dir_all(dir.join("keep")).unwrap();
+            std::fs::write(dir.join("keep/important"), b"keep").unwrap();
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let within = shell.run("rm -rf \"/out/$(echo sub)\"").await;
+            assert_eq!(within.status, 0, "{script}: {}", within.stderr);
+            assert!(!dir.join("sub").exists(), "{script}");
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            assert!(dir.join("keep/important").exists(), "{script}");
+            assert!(dir.join("sub").exists(), "{script}");
+            assert!(!dir.join("marker").exists(), "{script}");
+        }
+    }));
+}
+
+#[test]
 fn sleep_within_timeout_succeeds() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {

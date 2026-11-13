@@ -3266,6 +3266,12 @@ async fn run_pipeline(
         return (2, String::new());
     }
 
+    // A command substitution can run past the deadline, so do not run the command it fed.
+    if let Some(msg) = shell_proc.check_limits() {
+        shell_proc.err_msg(msg);
+        return (1, String::new());
+    }
+
     // xtrace: print expanded commands to stderr
     if shell_proc.opt_xtrace {
         for i in 0..len {
