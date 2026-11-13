@@ -106,6 +106,35 @@ fn mcp_tools_list() {
     assert_eq!(names.len(), 4);
 }
 
+#[test]
+fn mcp_shell_description_names_dialect_commands_and_state() {
+    let r = mcp_method(2, "tools/list", json!({}));
+    let tools = r["result"]["tools"].as_array().expect("tools array");
+    let shell = tools.iter().find(|t| t["name"] == "shell").unwrap();
+    let desc = shell["description"].as_str().unwrap();
+
+    assert!(desc.contains("POSIX sh, not bash"), "{desc}");
+    for bashism in ["`[[ ]]`", "arrays", "`<(...)`", "`{a,b}`", "`<<<`"] {
+        assert!(desc.contains(bashism), "missing {bashism}: {desc}");
+    }
+    // If one of these starts working, the description is stale.
+    for cmd in ["[[ a == a ]]", "arr=(a b)", "cat <(echo x)", "cat <<< x"] {
+        let r = mcp_tool("shell", json!({"command": cmd}));
+        assert_ne!(
+            r["result"]["metadata"]["exit_code"], 0,
+            "{cmd} now works; update the description"
+        );
+    }
+    let commands = strands_shell::commands::names();
+    assert!(!commands.is_empty());
+    assert!(
+        desc.contains(&format!("Commands: {};", commands.join(", "))),
+        "{desc}"
+    );
+    assert!(desc.contains("State carries over between calls"), "{desc}");
+    assert!(desc.contains("metadata.exit_code"), "{desc}");
+}
+
 // ── shell tool ──────────────────────────────────────────────────────
 
 #[test]
@@ -229,6 +258,33 @@ fn mcp_shell_state_persists_across_calls() {
         .as_str()
         .unwrap();
     assert!(func.contains("hello world"), "function output: {func}");
+}
+
+#[test]
+fn mcp_shell_aliases_and_options_persist_across_calls() {
+    let responses = mcp_session(&[
+        init_msg(1),
+        initialized_msg(),
+        tool_call(
+            2,
+            "shell",
+            json!({"command": "alias hi='echo hi' && set -u"}),
+        ),
+        tool_call(3, "shell", json!({"command": "hi"})),
+        tool_call(4, "shell", json!({"command": "echo $UNSET_VAR"})),
+    ]);
+    assert_eq!(responses.len(), 4);
+
+    let alias = responses[2]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert_eq!(alias, "hi\n");
+
+    assert_ne!(responses[3]["result"]["metadata"]["exit_code"], 0);
+    let stderr = responses[3]["result"]["content"][1]["text"]
+        .as_str()
+        .unwrap();
+    assert!(stderr.contains("UNSET_VAR"), "stderr: {stderr}");
 }
 
 #[test]

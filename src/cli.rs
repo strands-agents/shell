@@ -74,12 +74,7 @@ where
     if let Some(subcmd) = &cli.subcmd {
         match subcmd {
             Commands::ListCommands => {
-                let mut names: Vec<&str> = crate::commands::iter()
-                    .into_iter()
-                    .map(|c| c.name)
-                    .collect();
-                names.sort();
-                for name in names {
+                for name in crate::commands::names() {
                     println!("{name}");
                 }
                 return 0;
