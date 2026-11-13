@@ -3307,7 +3307,12 @@ async fn run_pipeline(
     let mut expanded_redirects: Vec<Vec<(Redirect, String)>> = Vec::with_capacity(len);
 
     shell_proc.last_subst_status = None;
-    for cmd in pipeline {
+    // A substitution in a later stage does not read the caller's stdin.
+    let mut held_stdin = None;
+    for (i, cmd) in pipeline.iter().enumerate() {
+        if i == 1 {
+            held_stdin = take_stdin(shell_proc);
+        }
         expanded_args.push(expand_words(os.clone(), shell_proc, &cmd.args).await);
         let mut env = Vec::new();
         for (k, v) in &cmd.env {
@@ -3334,6 +3339,7 @@ async fn run_pipeline(
         }
         expanded_redirects.push(redirs);
     }
+    give_stdin(shell_proc, held_stdin);
 
     // Abort if nounset error occurred during expansion
     if shell_proc.nounset_error {
@@ -3724,10 +3730,14 @@ async fn run_pipeline(
     // Use spawn_local so builtins (non-Send futures) can run in pipeline stages
     let mut handles = Vec::with_capacity(len);
     for (i, child) in procs.into_iter().enumerate() {
+        let back = if i == 0 { stdin_back.take() } else { None };
         if expanded_args[i].is_empty() {
+            if let Some(back) = back {
+                let mut child = child;
+                let _ = back.send(take_stdin(&mut child));
+            }
             continue;
         }
-        let back = if i == 0 { stdin_back.take() } else { None };
         let name = expanded_args[i][0].clone();
         let args: Vec<String> = expanded_args[i][1..].to_vec();
         let os = os.clone();

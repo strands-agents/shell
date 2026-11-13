@@ -9234,6 +9234,50 @@ fn stdin_is_read_once_and_what_is_left_reaches_the_next_reader() {
                 "hi\n",
             ),
             ("f() { true; }; printf hi | { f | cat; cat; echo; }", "hi\n"),
+            (
+                r#"printf 'a\nb\n' | { $x | cat; echo --; cat; }"#,
+                "--\na\nb\n",
+            ),
+        ])
+        .await;
+    }));
+}
+
+#[test]
+fn a_substitution_in_a_later_stage_leaves_the_callers_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = Shell::builder()
+            .build()
+            .unwrap()
+            .run(r#"printf 'x\ny\n' | { echo foo | echo "[$(cat)]"; cat; }"#)
+            .await;
+        assert!(
+            out.stdout.ends_with("]\nx\ny\n"),
+            "stdout: {:?}",
+            out.stdout
+        );
+        assert!(!out.stdout.contains("[x"), "stdout: {:?}", out.stdout);
+    }));
+}
+
+#[test]
+fn a_while_read_loop_runs_once_per_line_when_its_body_runs_a_command() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        assert_prints(&[
+            (
+                r#"printf 'a\nb\nc\n' > /tmp/list; while read f; do ls / >/dev/null; echo "l:$f"; done < /tmp/list"#,
+                "l:a\nl:b\nl:c\n",
+            ),
+            (
+                r#"printf 'a\nb\nc\n' | while read f; do echo "$f" | cat; done"#,
+                "a\nb\nc\n",
+            ),
+            (
+                r#"printf 'true\n' > /tmp/t.sh; printf 'a\nb\nc\n' > /tmp/list; while read f; do sh /tmp/t.sh "$f"; echo "s:$f"; done < /tmp/list"#,
+                "s:a\ns:b\ns:c\n",
+            ),
         ])
         .await;
     }));
