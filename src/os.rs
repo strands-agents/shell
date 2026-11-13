@@ -832,7 +832,8 @@ impl Process {
         }
     }
 
-    /// Set an environment variable (COW — clones map on first write if shared).
+    /// Set a shell variable (COW — clones map on first write if shared). It stays
+    /// unexported unless it already is; see [`Self::set_exported`].
     /// Returns false if the variable is readonly.
     pub fn set_env(&mut self, key: impl Into<String>, value: impl Into<String>) -> bool {
         let key = key.into();
@@ -871,8 +872,12 @@ impl Process {
     /// a program the shell runs receives.
     pub(crate) fn keep_exported_only(&mut self) {
         if self.env.keys().any(|key| !self.exported.contains(key)) {
-            let exported = &self.exported;
-            Arc::make_mut(&mut self.env).retain(|key, _| exported.contains(key));
+            // Clone only the exported entries, not the whole shared map.
+            let env = self
+                .env
+                .iter()
+                .filter(|(key, _)| self.exported.contains(*key));
+            self.env = Arc::new(env.map(|(k, v)| (k.clone(), v.clone())).collect());
         }
         if self.exported.len() != self.env.len() {
             let env = &self.env;
