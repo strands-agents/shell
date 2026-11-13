@@ -13608,3 +13608,58 @@ expect!(
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
 );
+
+// ── yes ─────────────────────────────────────────────────────────────
+
+expect_output!(
+    yes_stops_quietly_when_head_closes_the_pipe,
+    "yes | head -3",
+    "y\ny\ny\n",
+    "",
+    0
+);
+expect_output!(
+    yes_joins_its_arguments,
+    "yes ab cd | head -2; yes -- -n | head -1",
+    "ab cd\nab cd\n-n\n",
+    "",
+    0
+);
+expect_output!(
+    yes_ends_a_while_read_loop_that_breaks,
+    "yes go | while read l; do echo $l; break; done; echo done",
+    "go\ndone\n",
+    "",
+    0
+);
+expect_status!(yes_rejects_an_option, "yes -n", 1);
+
+#[test]
+fn yes_stops_at_the_deadline() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let out = shell.run("yes > /dev/null").await;
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("timeout"), "stderr={:?}", out.stderr);
+    }));
+}
+
+#[test]
+fn yes_stops_at_the_output_limit() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_max_output(100, "yes").await;
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stdout.len() <= 100,
+            "stdout has {} bytes",
+            out.stdout.len()
+        );
+        let out = run_with_max_output(100, "x=$(yes); echo ${#x}").await;
+        assert_eq!(out.stdout, "0\n");
+    }));
+}

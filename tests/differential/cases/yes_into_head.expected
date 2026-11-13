@@ -1,0 +1,15 @@
+status: 0
+stderr: empty
+--- stdout
+y
+y
+y
+hello world
+hello world
+
+
+-n
+y
+y
+y
+got no
