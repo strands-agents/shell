@@ -503,7 +503,6 @@ impl Process {
         }
         let fd = self.next_fd;
         self.next_fd += 1;
-        self.outside_fds.remove(&fd);
         self.fds.insert(fd, kind);
         Ok(fd)
     }

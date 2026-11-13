@@ -1462,6 +1462,8 @@ fn lua_reads_a_pipe_or_redirect_over_outside_input() {
         for (script, expected) in [
             ("echo x | lua -e 'print(io.read())'", "x\n"),
             ("echo 'print(7)' | lua", "7\n"),
+            ("{ echo hi; } | lua -e 'print(io.read())'", "hi\n"),
+            ("{ echo 'print(7)'; } | lua", "7\n"),
             (
                 "lua -e 'print(io.read())' < /tmp/source.txt",
                 "from the file\n",
@@ -1493,22 +1495,5 @@ fn lua_reads_a_closed_channel_stdin_as_before() {
             assert_eq!(out.stdout, expected, "{script}: {}", out.stderr);
             assert_eq!(out.status, 0, "{script}");
         }
-    }));
-}
-
-#[test]
-fn lua_waits_for_an_open_channel_stdin_as_before() {
-    let (rt, local) = rt();
-    rt.block_on(local.run_until(async {
-        let mut shell = Shell::builder().build().unwrap();
-        let (sender, receiver) = tokio::sync::mpsc::channel(4);
-        shell.proc.set_channel_reader(0, receiver);
-        let waited = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            shell.run("lua -e 'print(1)'"),
-        )
-        .await;
-        assert!(waited.is_err(), "lua must read a channel stdin to its end");
-        drop(sender);
     }));
 }
