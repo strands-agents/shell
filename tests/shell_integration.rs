@@ -13608,3 +13608,57 @@ expect!(
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
 );
+
+// ── fold ────────────────────────────────────────────────────────────
+
+expect_output!(
+    fold_wraps_at_the_width,
+    "printf 'abcdefghij\\n' | fold -w 4",
+    "abcd\nefgh\nij\n",
+    "",
+    0
+);
+expect_output!(
+    fold_breaks_at_spaces,
+    "printf 'the quick brown fox jumps\\n' | fold -s -w 10",
+    "the quick \nbrown fox \njumps\n",
+    "",
+    0
+);
+expect_output!(
+    fold_counts_tab_stops_unless_counting_bytes,
+    "printf 'a\\tbcdefghijkl\\n' | fold -w 10; printf 'a\\tbcdefghijkl\\n' | fold -b -w 5",
+    "a\tbc\ndefghijkl\na\tbcd\nefghi\njkl\n",
+    "",
+    0
+);
+expect_output!(
+    fold_accepts_the_obsolete_width_option,
+    "printf 'abcdef\\n' | fold -2; printf 'a b c d e\\n' | fold -s5",
+    "ab\ncd\nef\na b \nc d e\n",
+    "",
+    0
+);
+expect_output!(
+    fold_counts_characters_not_bytes,
+    "printf '\\303\\251\\303\\251\\303\\251\\303\\251\\303\\251\\n' | fold -w 3",
+    "ééé\néé\n",
+    "",
+    0
+);
+expect_output!(
+    fold_keeps_an_unterminated_line_unterminated,
+    "printf 'abcdefgh' | fold -w 3",
+    "abc\ndef\ngh",
+    "",
+    0
+);
+shell_test!(
+    fold_rejects_a_zero_width,
+    "echo abc | fold -w 0",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert!(!out.stderr.is_empty());
+        assert_eq!(out.status, 1);
+    }
+);
