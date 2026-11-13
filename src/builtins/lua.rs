@@ -193,10 +193,13 @@ pub fn setup_lua_vm(
     }
 
     let kernel = sio::kernel();
+    // Lua runs as a program of its own, so it sees only the exported variables.
+    let mut child = proc.fork();
+    child.keep_exported_only();
     setup_sandbox(
         &lua,
         kernel,
-        proc,
+        &mut child,
         script_args,
         stdin_data,
         stdout_buf,
