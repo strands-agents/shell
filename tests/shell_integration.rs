@@ -13288,3 +13288,14 @@ fn a_call_cancelled_inside_a_negated_group_leaves_errexit_for_the_next_call() {
         assert_eq!(out.status, 1);
     }));
 }
+
+expect!(
+    a_double_negation_cancels_out,
+    "! ! { false; }; echo $?; ! ! ( exit 3 ); echo $?; ! ! false; echo $?; ! ! ! false; echo $?",
+    "1\n3\n1\n0"
+);
+expect!(
+    errexit_ignores_a_negated_pipeline_into_a_compound,
+    "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
+    "in\nafter"
+);

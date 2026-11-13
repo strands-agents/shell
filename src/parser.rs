@@ -1268,7 +1268,7 @@ fn parse_command_line<'a>(
 
         // Pipeline negation: `! pipeline`
         if at_start && matches!(&tokens[i], Token::Word(w) if w == "!") {
-            negated = true;
+            negated = !negated;
             i += 1;
             continue;
         }
@@ -1493,7 +1493,7 @@ fn parse_pipeline_into_compound<'a>(
         redirects,
     });
     stages.extend(tail);
-    Ok(Item::Subshell(vec![
+    let item = Item::Subshell(vec![
         (
             Item::Function {
                 name: COMPOUND_STAGE.into(),
@@ -1501,8 +1501,16 @@ fn parse_pipeline_into_compound<'a>(
             },
             Some(Connector::Semi),
         ),
-        (Item::Pipeline(stages, negated), None),
-    ]))
+        (Item::Pipeline(stages, false), None),
+    ]);
+    if !negated {
+        return Ok(item);
+    }
+    Ok(Item::CompoundPipeline {
+        compound: Box::new(item),
+        tail: Vec::new(),
+        negated,
+    })
 }
 
 /// Whether `cl` is the subshell body that [`parse_pipeline_into_compound`] builds.
@@ -2380,11 +2388,22 @@ mod tests {
     fn a_piped_group_gives_its_body_to_the_stage_and_keeps_redirects_and_tail() {
         let cl = p("! a | { b; } 2>e | c && d").unwrap();
         let [
-            (Item::Subshell(inner), Some(Connector::And)),
+            (
+                Item::CompoundPipeline {
+                    compound,
+                    tail,
+                    negated: true,
+                },
+                Some(Connector::And),
+            ),
             (Item::Pipeline(..), None),
         ] = cl.as_slice()
         else {
             panic!("{cl:?}");
+        };
+        assert!(tail.is_empty());
+        let Item::Subshell(inner) = compound.as_ref() else {
+            panic!("{compound:?}");
         };
         let expected = vec![
             (
@@ -2404,7 +2423,7 @@ mod tests {
                         compound_call(vec![Redirect::Write(2, vec![lit("e")])]),
                         simple(&["c"]),
                     ],
-                    true,
+                    false,
                 ),
                 None,
             ),
