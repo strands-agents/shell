@@ -101,7 +101,7 @@ fn format_size(len: u64, human: bool) -> String {
     }
 }
 
-fn format_mode(mode: u32) -> String {
+pub(super) fn format_mode(mode: u32) -> String {
     let mut s = String::with_capacity(10);
     s.push(match mode & 0o170000 {
         0o120000 => 'l',

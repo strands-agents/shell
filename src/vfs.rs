@@ -828,7 +828,7 @@ pub fn create_bin_links(vfs: &mut Vfs) -> io::Result<()> {
         let cmds = [
             "basename", "cat", "chmod", "cp", "cut", "date", "dirname", "echo", "env", "false",
             "grep", "head", "jq", "ln", "ls", "mkdir", "mktemp", "mv", "pwd", "readlink", "rm",
-            "rmdir", "sed", "sort", "tail", "tee", "touch", "tr", "true", "uniq", "wc",
+            "rmdir", "sed", "sort", "stat", "tail", "tee", "touch", "tr", "true", "uniq", "wc",
         ];
         for name in cmds {
             let path = format!("/bin/{name}");
