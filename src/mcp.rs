@@ -132,9 +132,11 @@ fn shell_tool_description() -> String {
         "Runs a command in Strands Shell, an in-process virtual shell. \
          The dialect is POSIX sh, not bash: there is no `[[ ]]`, arrays, \
          process substitution `<(...)`, brace expansion `{{a,b}}`, here-strings `<<<`, \
-         `(( ))`, or `$'...'`; use `[ ]`, `$(( ))`, and `case` instead. \
-         Commands: {commands}; plus sh builtins such as cd, export, set, read, printf, \
-         test, find, xargs, and lua. The host may provide more; check with `command -v NAME`. \
+         `(( ))`, `$'...'`, `PIPESTATUS`, or `$RANDOM`; use `[ ]`, `$(( ))`, `case`, and \
+         `set -o pipefail` instead. \
+         Commands: {commands}; also find, xargs, and lua; plus the usual sh builtins \
+         (cd, export, set, read, printf, test, ...) but no `kill` or job control. \
+         Other commands may be available; check with `command -v NAME`. \
          State carries over between calls: working directory, environment and exported \
          variables, shell options (`set`), functions, and aliases. \
          Returns two text content blocks: content[0].text is stdout, content[1].text is \
