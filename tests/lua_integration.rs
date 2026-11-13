@@ -1416,3 +1416,84 @@ fn dropping_the_shell_stops_a_lua_background_job() {
         }));
     }
 }
+
+/// Run `script` with `input` on an outside stdin channel that stays open.
+async fn run_with_open_outside_stdin(script: &str, input: &'static [u8]) -> (String, i32) {
+    let mut shell = Shell::builder().build().unwrap();
+    shell.run("echo 'from the file' > /tmp/source.txt").await;
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    sender.send(bytes::Bytes::from_static(input)).await.unwrap();
+    shell.proc.set_outside_reader(0, receiver);
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), shell.run(script))
+        .await
+        .unwrap_or_else(|_| panic!("{script}: lua waited for stdin that stays open"));
+    drop(sender);
+    (format!("{}{}", out.stdout, out.stderr), out.status)
+}
+
+#[test]
+fn lua_reads_open_outside_input_as_empty() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            ("lua -e 'print(1)'", "1\n"),
+            ("lua -e 'print(\"[\" .. io.read(\"*a\") .. \"]\")'", "[]\n"),
+            ("lua; echo after", "after\n"),
+            (
+                "(lua -e 'print(\"[\" .. io.read(\"*a\") .. \"]\")')",
+                "[]\n",
+            ),
+            (
+                "read line; lua -e 'print(\"[\" .. io.read(\"*a\") .. \"]\")'",
+                "[]\n",
+            ),
+        ] {
+            let (output, status) = run_with_open_outside_stdin(script, b"print('OUTSIDE')\n").await;
+            assert_eq!(output, expected, "{script}");
+            assert_eq!(status, 0, "{script}");
+        }
+    }));
+}
+
+#[test]
+fn lua_reads_a_pipe_or_redirect_over_outside_input() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            ("echo x | lua -e 'print(io.read())'", "x\n"),
+            ("echo 'print(7)' | lua", "7\n"),
+            ("{ echo hi; } | lua -e 'print(io.read())'", "hi\n"),
+            ("{ echo 'print(7)'; } | lua", "7\n"),
+            (
+                "lua -e 'print(io.read())' < /tmp/source.txt",
+                "from the file\n",
+            ),
+        ] {
+            let (output, status) = run_with_open_outside_stdin(script, b"print('OUTSIDE')\n").await;
+            assert_eq!(output, expected, "{script}");
+            assert_eq!(status, 0, "{script}");
+        }
+    }));
+}
+
+#[test]
+fn lua_reads_a_closed_channel_stdin_as_before() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, input, expected) in [
+            ("lua -e 'print(io.read())'", &b"x\n"[..], "x\n"),
+            ("lua", &b"print(7)\n"[..], "7\n"),
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let (sender, receiver) = tokio::sync::mpsc::channel(4);
+            sender.send(bytes::Bytes::from(input)).await.unwrap();
+            drop(sender);
+            shell.proc.set_channel_reader(0, receiver);
+            let out = tokio::time::timeout(std::time::Duration::from_secs(5), shell.run(script))
+                .await
+                .expect("a closed stdin ends");
+            assert_eq!(out.stdout, expected, "{script}: {}", out.stderr);
+            assert_eq!(out.status, 0, "{script}");
+        }
+    }));
+}
