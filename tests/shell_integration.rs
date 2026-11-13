@@ -9175,6 +9175,20 @@ expect_output!(
     "sh: -c: option requires an argument\n",
     2
 );
+expect_output!(
+    lash_long_option_is_not_a_script,
+    "lash --help",
+    "",
+    "lash: --help: invalid option\n",
+    2
+);
+expect_output!(
+    sh_short_option_is_not_a_script,
+    "sh -x a",
+    "",
+    "sh: -x: invalid option\n",
+    2
+);
 
 #[test]
 fn script_args_and_isolation_unchanged() {
