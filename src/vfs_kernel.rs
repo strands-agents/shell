@@ -289,6 +289,7 @@ impl Kernel for VfsKernel {
         env.insert("PWD".into(), "/home/lash".into());
         env.insert("PATH".into(), "/usr/bin:/bin".into());
         env.insert("USER".into(), "lash".into());
+        env.insert("SHELL".into(), "/bin/sh".into());
         Process::new(cwd, env)
     }
 

@@ -768,6 +768,28 @@ fn builder_env() {
     }));
 }
 
+#[test]
+fn shell_var_runs_this_shell() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("env | grep '^SHELL='; \"$SHELL\" -c 'echo from $0'")
+            .await;
+        assert_eq!(out.stdout, "SHELL=/bin/sh\nfrom sh\n");
+    }));
+}
+
+#[test]
+fn builder_env_overrides_shell_var() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().env("SHELL", "/bin/lash").build().unwrap();
+        let out = shell.run("echo $SHELL").await;
+        assert_eq!(out.stdout.trim(), "/bin/lash");
+    }));
+}
+
 // ── Multiline scripts via source ────────────────────────────────────
 
 #[test]
