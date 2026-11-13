@@ -3367,11 +3367,16 @@ async fn run_pipeline(
 
     // Ask the kernel about each command, before any stage starts.
     let mut requests: Vec<Option<CheckedCommand>> = Vec::with_capacity(len);
-    for words in &expanded_args {
+    for (cmd, words) in pipeline.iter().zip(&expanded_args) {
         let Some((mut program, mut args)) = words.split_first() else {
             requests.push(None);
             continue;
         };
+        // The commands inside the compound are checked when they run.
+        if parser::is_compound_stage_call(cmd) {
+            requests.push(None);
+            continue;
+        }
         // `builtin NAME` runs the builtin NAME, so the kernel decides NAME.
         while program == "builtin"
             && let Some((inner, rest)) = args.split_first()
