@@ -10,7 +10,7 @@ use crate::command_fallback;
 use crate::commands;
 use crate::io::{CURRENT_KERNEL, CURRENT_PROCESS};
 use crate::os::{
-    self, CommandRequest, FdReader, Kernel, OpenFlags, Process, STDERR, STDIN, STDOUT,
+    self, CommandRequest, FdReader, Kernel, OpenFlags, Process, STDERR, STDIN, STDOUT, TakenFd,
 };
 use crate::parser::{self, Connector, Item, Redirect, Word, WordPart};
 
@@ -1756,6 +1756,7 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
         proc.captured_stderr.push_str(&sub.captured_stderr);
     }
     proc.last_subst_status = Some(captured_status(result, sub.last_exit));
+    proc.deadline_stop |= sub.deadline_stop;
     output
 }
 
@@ -2062,6 +2063,26 @@ async fn run_capturing_status(
                     compound,
                     tail,
                     negated,
+                } if tail.is_empty() => {
+                    let compound_cl = vec![(*compound.clone(), None)];
+                    let ignored = u32::from(*negated);
+                    proc.errexit_ignored += ignored;
+                    let (s, result) =
+                        Box::pin(run_capturing_status(os.clone(), proc, &compound_cl)).await;
+                    proc.errexit_ignored -= ignored;
+                    match result {
+                        Ok(exit) if *negated => (i32::from(exit == 0), s),
+                        Ok(exit) => (exit, s),
+                        Err(control) => {
+                            flow = Some(control);
+                            (proc.last_exit, s)
+                        }
+                    }
+                }
+                Item::CompoundPipeline {
+                    compound,
+                    tail,
+                    negated,
                 } => {
                     let compound_cl = vec![(*compound.clone(), None)];
                     let (captured, result) =
@@ -2085,6 +2106,10 @@ async fn run_capturing_status(
                     let _ = handle.await;
                     proc.close(STDIN);
                     give_stdin(proc, saved_stdin);
+                    if let Err(flow) = stop_at_deadline(proc) {
+                        output.push_str(&out);
+                        return (output, Err(flow));
+                    }
                     if proc.opt_pipefail && exit == 0 {
                         exit = compound_exit;
                     }
@@ -2242,8 +2267,12 @@ async fn execute_command_line_inner(
             }
 
             // Determine if this item is in a "tested" context (suppresses errexit).
-            // Tested = followed by && or ||.
-            let tested = matches!(connector, Some(Connector::And) | Some(Connector::Or));
+            // Tested = followed by && or ||, or inverted by `!`.
+            let tested = matches!(connector, Some(Connector::And) | Some(Connector::Or))
+                || matches!(
+                    item,
+                    Item::Pipeline(_, true) | Item::CompoundPipeline { negated: true, .. }
+                );
 
             last_exit = execute_item(os.clone(), proc, item).await?;
             proc.last_exit = last_exit;
@@ -2255,7 +2284,7 @@ async fn execute_command_line_inner(
             }
 
             // errexit: if set -e is active and command failed and not in tested context
-            if proc.opt_errexit && last_exit != 0 && !tested {
+            if proc.opt_errexit && proc.errexit_ignored == 0 && last_exit != 0 && !tested {
                 return Err(ControlFlow::Exit(last_exit));
             }
         }
@@ -2274,11 +2303,27 @@ async fn execute_item(
     }
     match item {
         Item::Pipeline(pipeline, negated) => {
-            let mut exit = execute_pipeline_checked(os, proc, pipeline).await?;
+            let ignored = u32::from(*negated);
+            proc.errexit_ignored += ignored;
+            let result = execute_pipeline_checked(os, proc, pipeline).await;
+            proc.errexit_ignored -= ignored;
+            let mut exit = result?;
             if *negated {
                 exit = if exit == 0 { 1 } else { 0 };
             }
             Ok(exit)
+        }
+        Item::CompoundPipeline {
+            compound,
+            tail,
+            negated,
+        } if tail.is_empty() => {
+            let ignored = u32::from(*negated);
+            proc.errexit_ignored += ignored;
+            let result = Box::pin(execute_item(os, proc, compound)).await;
+            proc.errexit_ignored -= ignored;
+            let exit = result?;
+            Ok(if *negated { i32::from(exit == 0) } else { exit })
         }
         Item::Group(cl) => Box::pin(execute_command_line_inner(os, proc, cl)).await,
         Item::Subshell(cl) => {
@@ -2368,6 +2413,7 @@ async fn execute_item(
             }
             proc.close(STDIN);
             give_stdin(proc, unread);
+            stop_at_deadline(proc)?;
             if proc.opt_pipefail && exit == 0 {
                 exit = compound_exit;
             }
@@ -3119,6 +3165,7 @@ async fn execute_pipeline_checked(
                     };
                     let exit = execute_pipeline(os, proc, &[fake_cmd]).await;
                     proc.pending_exit = false;
+                    stop_at_deadline(proc)?;
                     return Ok(exit);
                 }
                 _ => {}
@@ -3128,11 +3175,20 @@ async fn execute_pipeline_checked(
     let exit = execute_pipeline(os, proc, pipeline).await;
     // nounset errors and `exit` inside a function are fatal — abort the shell
     let function_exited = std::mem::take(&mut proc.pending_exit);
+    stop_at_deadline(proc)?;
     if proc.nounset_error || function_exited {
         proc.nounset_error = false;
         return Err(ControlFlow::Exit(exit));
     }
     Ok(exit)
+}
+
+/// Stop the command list when a pipeline already reported the deadline.
+fn stop_at_deadline(proc: &Process) -> Result<(), ControlFlow> {
+    if proc.deadline_stop {
+        return Err(ControlFlow::Exit(1));
+    }
+    Ok(())
 }
 
 /// Get the optional numeric argument for break/continue (default 1).
@@ -3260,20 +3316,20 @@ fn replaces_stdin(redirects: &[(Redirect, String)]) -> bool {
 }
 
 /// Take stdin out of `proc`, to give back with [`give_stdin`].
-fn take_stdin(proc: &mut Process) -> Option<FdReader> {
-    proc.take_reader(STDIN).ok()
+fn take_stdin(proc: &mut Process) -> Option<TakenFd> {
+    proc.take_fd(STDIN)
 }
 
 /// Give `stdin` back to `proc`, if there is one.
-fn give_stdin(proc: &mut Process, stdin: Option<FdReader>) {
+fn give_stdin(proc: &mut Process, stdin: Option<TakenFd>) {
     if let Some(stdin) = stdin {
-        proc.restore_fd(STDIN, stdin.into_fd_kind());
+        proc.put_fd(STDIN, stdin);
     }
 }
 
 /// Run `body` as a pipeline stage on `child`, then send the stdin it left unread through `back`.
 fn run_stage(
-    back: Option<tokio::sync::oneshot::Sender<Option<FdReader>>>,
+    back: Option<tokio::sync::oneshot::Sender<Option<TakenFd>>>,
     child: Process,
     body: impl std::future::Future<Output = i32>,
 ) -> impl std::future::Future<Output = i32> {
@@ -3293,6 +3349,7 @@ async fn run_pipeline(
     pipeline: &[parser::Command],
     capture: bool,
 ) -> (i32, String) {
+    shell_proc.deadline_stop = false;
     let len = pipeline.len();
     let mut tasks = ForegroundTasks::new(os.as_ref(), shell_proc);
 
@@ -3340,6 +3397,15 @@ async fn run_pipeline(
         expanded_redirects.push(redirs);
     }
     give_stdin(shell_proc, held_stdin);
+
+    // A command substitution can use up the deadline before dispatch and redirection.
+    if let Some(msg) = shell_proc.check_limits() {
+        if !shell_proc.deadline_stop {
+            shell_proc.err_msg(msg);
+        }
+        shell_proc.deadline_stop = true;
+        return (1, String::new());
+    }
 
     // Abort if nounset error occurred during expansion
     if shell_proc.nounset_error {

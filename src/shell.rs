@@ -417,6 +417,8 @@ impl Shell {
     /// ```
     pub async fn run(&mut self, input: &str) -> Output {
         self.refresh_deadline();
+        // A call cancelled inside `!` must not leave `set -e` ignored for the next call.
+        self.proc.errexit_ignored = 0;
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.start_mcp().await;
@@ -450,6 +452,8 @@ impl Shell {
     /// ```
     pub async fn execute(&mut self, input: &str) -> i32 {
         self.refresh_deadline();
+        // A call cancelled inside `!` must not leave `set -e` ignored for the next call.
+        self.proc.errexit_ignored = 0;
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.start_mcp().await;

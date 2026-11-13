@@ -63,6 +63,9 @@ pub fn builtin_lua<'a>(
             return run_repl(os, proc).await;
         }
 
+        // Input fed from outside the shell can stay open, so it reads as empty here.
+        let stdin_is_outside = sio::with_process(|p| p.reads_outside_input(os::STDIN));
+
         // Read script source through the kernel
         let code = if let Some(ref code) = eval_code {
             code.clone()
@@ -78,6 +81,8 @@ pub fn builtin_lua<'a>(
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                     format!("lua: {path}: {e}").into()
                 })?
+        } else if stdin_is_outside {
+            String::new()
         } else {
             // Read from stdin
             let mut reader = sio::stdin()?;
@@ -89,7 +94,7 @@ pub fn builtin_lua<'a>(
         };
 
         // Pre-read stdin for io.read() when script comes from file or -e
-        let stdin_data = if script_file.is_some() || eval_code.is_some() {
+        let stdin_data = if (script_file.is_some() || eval_code.is_some()) && !stdin_is_outside {
             if let Ok(mut r) = sio::stdin() {
                 os::read_to_string_limited(&mut r, proc.max_output)
                     .await
