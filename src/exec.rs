@@ -1687,7 +1687,11 @@ async fn apply_redirects(
                 let content = if *quoted {
                     body.clone()
                 } else {
-                    expand_heredoc_body(os.clone(), proc, body).await
+                    let content = expand_heredoc_body(os.clone(), proc, body).await;
+                    if let Some(msg) = proc.check_limits() {
+                        return Err(msg.trim_start_matches("strands-shell: ").to_string());
+                    }
+                    content
                 };
                 let (tx, rx) = os::pipe(64);
                 let data = bytes::Bytes::from(content);
@@ -1787,6 +1791,10 @@ async fn execute_captured_control_flow(
     if proc.nounset_error {
         return Ok(2);
     }
+    if let Some(msg) = proc.check_limits() {
+        proc.err_msg(msg);
+        return Err(ControlFlow::Exit(1));
+    }
     if redirects.is_empty() {
         return result;
     }
@@ -1856,6 +1864,10 @@ async fn run_capturing_status(
             }
         }
         if !skip {
+            if let Some(msg) = proc.check_limits() {
+                proc.err_msg(msg);
+                return (output, Err(ControlFlow::Exit(1)));
+            }
             let (exit, out) = match item {
                 Item::Pipeline(pipeline, negated) if is_control_flow(pipeline) => {
                     match execute_captured_control_flow(os.clone(), proc, pipeline).await {
@@ -2092,6 +2104,10 @@ async fn run_capturing_status(
                             Redirect::HereDoc(..) => String::new(),
                         };
                         expanded.push((redir.clone(), target));
+                    }
+                    if let Some(msg) = proc.check_limits() {
+                        proc.err_msg(msg);
+                        return (output, Err(ControlFlow::Exit(1)));
                     }
                     // Separate stdin vs stdout redirects
                     let mut stdin_redir = Vec::new();
@@ -2364,6 +2380,10 @@ async fn execute_item(
                     Redirect::HereDoc(..) => String::new(),
                 };
                 expanded.push((redir.clone(), target));
+            }
+            if let Some(msg) = proc.check_limits() {
+                proc.err_msg(msg);
+                return Err(ControlFlow::Exit(1));
             }
             // For stdin redirects, apply to proc so inner commands can read
             let mut stdin_expanded = Vec::new();
@@ -2784,9 +2804,6 @@ async fn run_special_redirected(
     special: Special,
     args: Vec<String>,
 ) -> Result<i32, ControlFlow> {
-    if command.redirects.is_empty() {
-        return run_special(os, proc, special, args).await;
-    }
     let mut redirects = Vec::new();
     for redir in &command.redirects {
         let target = match redir {
@@ -2800,6 +2817,13 @@ async fn run_special_redirected(
             Redirect::HereDoc(..) => String::new(),
         };
         redirects.push((redir.clone(), target));
+    }
+    if let Some(msg) = proc.check_limits() {
+        proc.err_msg(msg);
+        return Err(ControlFlow::Exit(1));
+    }
+    if redirects.is_empty() {
+        return run_special(os, proc, special, args).await;
     }
     if proc.nounset_error {
         proc.nounset_error = false;
@@ -3286,6 +3310,12 @@ async fn run_pipeline(
     if shell_proc.nounset_error {
         shell_proc.last_exit = 2;
         return (2, String::new());
+    }
+
+    // A command substitution can run past the deadline, so do not run the command it fed.
+    if let Some(msg) = shell_proc.check_limits() {
+        shell_proc.err_msg(msg);
+        return (1, String::new());
     }
 
     // xtrace: print expanded commands to stderr

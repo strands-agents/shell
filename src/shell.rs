@@ -1014,7 +1014,7 @@ impl ShellBuilder {
     /// [`execute()`](Shell::execute) call, so idle time between
     /// commands does not consume the budget. A command that runs longer
     /// than `duration` is terminated and its `Output` carries
-    /// `status = 1` with `strands-shell: execution timeout exceeded` in stderr.
+    /// `status = 1` with an `execution timeout exceeded` message in stderr.
     ///
     /// A zero `duration` is rejected by [`build`](Self::build): there is no
     /// "unlimited" sentinel, so omit the timeout entirely for no limit.
