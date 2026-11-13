@@ -4124,6 +4124,59 @@ fn mktemp_template() {
     }));
 }
 
+// ── md5sum coverage ─────────────────────────────────────────────────
+
+const MD5_OF_EVERY_BYTE: &str = "e2c865db4162bed963bfaa9ef6ac18f0";
+
+#[test]
+fn md5sum_hashes_non_utf8_bytes_from_a_file_and_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let data: Vec<u8> = (0..=255).collect();
+        shell.write_file("/tmp/bin", &data).await.unwrap();
+        let out = shell.run("md5sum /tmp/bin; md5sum < /tmp/bin").await;
+        assert_eq!(out.status, 0);
+        assert_eq!(
+            out.stdout,
+            format!("{MD5_OF_EVERY_BYTE}  /tmp/bin\n{MD5_OF_EVERY_BYTE}  -\n")
+        );
+    }));
+}
+
+#[test]
+fn md5sum_check_notices_a_changed_byte() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let mut data: Vec<u8> = (0..=255).collect();
+        shell.write_file("/tmp/bin", &data).await.unwrap();
+        let out = shell.run("md5sum -b /tmp/bin > /tmp/sums").await;
+        assert_eq!(out.status, 0);
+        let out = shell.run("md5sum -c /tmp/sums").await;
+        assert_eq!((out.status, out.stdout.as_str()), (0, "/tmp/bin: OK\n"));
+        data[200] ^= 1;
+        shell.write_file("/tmp/bin", &data).await.unwrap();
+        let out = shell.run("md5sum -c /tmp/sums").await;
+        assert_eq!((out.status, out.stdout.as_str()), (1, "/tmp/bin: FAILED\n"));
+        assert!(out.stderr.contains("1 computed checksum did NOT match"));
+    }));
+}
+
+shell_test!(
+    md5sum_check_rejects_lines_of_another_digest_length,
+    "printf '%s  f\\n' 0123456789abcdef0123456789abcdef01234567 > /tmp/sums; md5sum -c /tmp/sums",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert!(
+            out.stderr
+                .contains("no properly formatted MD5 checksum lines"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+
 // ── test builtin coverage ───────────────────────────────────────────
 
 expect!(

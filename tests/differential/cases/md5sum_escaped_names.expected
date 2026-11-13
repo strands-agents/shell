@@ -1,0 +1,7 @@
+status: 0
+stderr: empty
+--- stdout
+\9dd4e461268c8034f5c8564e155c67a6  back\\slash
+\415290769594460e2e485922904f345d  new\nline
+back\slash: OK
+\new\nline: OK
