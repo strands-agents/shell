@@ -4402,6 +4402,158 @@ expect!(
     "/tmp/lsrecursive:\na\nb\n\n/tmp/lsrecursive/a:\nbig\nsmall\n\n/tmp/lsrecursive/b:"
 );
 
+// ── du ──────────────────────────────────────────────────────────────
+
+/// A tree of 2003 bytes: `a/big` (2000), `a/b/y` (1), `f` (1) and `l`, a
+/// symlink to `f` (1).
+const DU_TREE: &str = "mkdir -p /tmp/du/a/b; printf '%2000s' x > /tmp/du/a/big; \
+                       printf x > /tmp/du/a/b/y; printf x > /tmp/du/f; ln -s f /tmp/du/l; cd /tmp";
+
+shell_test!(
+    du_prints_directory_totals_in_kilobytes,
+    &format!("{DU_TREE}; du du; du --apparent-size -k du/a/b"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\tdu/a/b\n2\tdu/a\n2\tdu\n1\tdu/a/b\n");
+        assert_eq!(out.status, 0);
+    }
+);
+shell_test!(
+    du_all_lists_files_in_name_order,
+    &format!("{DU_TREE}; du -a du"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(
+            out.stdout,
+            "1\tdu/a/b/y\n1\tdu/a/b\n2\tdu/a/big\n2\tdu/a\n1\tdu/f\n1\tdu/l\n2\tdu\n"
+        );
+    }
+);
+shell_test!(
+    du_summarize_bytes_and_human_sizes,
+    &format!("{DU_TREE}; du -s du du/f; du -sb du; du -sh du; du --bytes du/a/b; du -h du/a/b/y"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(
+            out.stdout,
+            "2\tdu\n1\tdu/f\n2003\tdu\n2.0K\tdu\n1\tdu/a/b\n1\tdu/a/b/y\n"
+        );
+    }
+);
+shell_test!(
+    du_last_unit_option_wins,
+    &format!("{DU_TREE}; du -s -b -k du; du -s -h -b du; du -s -b -h du"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "2\tdu\n2003\tdu\n2.0K\tdu\n");
+    }
+);
+shell_test!(
+    du_total_and_max_depth,
+    &format!("{DU_TREE}; du -c du/a du/f; du -d 1 du; du -a --max-depth=1 du; du -d0 du"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(
+            out.stdout,
+            "1\tdu/a/b\n2\tdu/a\n1\tdu/f\n2\ttotal\n\
+             2\tdu/a\n2\tdu\n\
+             2\tdu/a\n1\tdu/f\n1\tdu/l\n2\tdu\n\
+             2\tdu\n"
+        );
+    }
+);
+shell_test!(
+    du_defaults_to_the_current_directory,
+    &format!("{DU_TREE}/du/a; du; du b/"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\t./b\n2\t.\n1\tb/\n");
+    }
+);
+shell_test!(
+    du_missing_file_fails_but_reports_the_rest,
+    &format!("{DU_TREE}; du -c /nope du/f"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\tdu/f\n1\ttotal\n");
+        assert_eq!(
+            out.stderr,
+            "du: cannot access '/nope': No such file or directory\n"
+        );
+        assert_eq!(out.status, 1);
+    }
+);
+shell_test!(
+    du_rejects_conflicting_options,
+    "du -sa /tmp; echo $?; du -s -d 1 /tmp; echo $?; du -d x /tmp; echo $?",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\n1\n1\n");
+        assert_eq!(
+            out.stderr,
+            "du: cannot both summarize and show all entries\n\
+             Try 'du --help' for more information.\n\
+             du: warning: summarizing conflicts with --max-depth=1\n\
+             Try 'du --help' for more information.\n\
+             du: invalid maximum depth 'x'\n\
+             Try 'du --help' for more information.\n"
+        );
+    }
+);
+shell_test!(
+    du_reports_unknown_options,
+    "du --foo; echo $?; du -x /tmp; du -d",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\n");
+        assert!(
+            out.stderr.contains("du: invalid option '--foo'"),
+            "{}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("du: invalid option '-x'"),
+            "{}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("du: missing argument for option '-d'"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    du_joins_children_under_trailing_slashes,
+    &format!("{DU_TREE}; du du/a//"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\tdu/a/b\n2\tdu/a//\n");
+    }
+);
+shell_test!(
+    du_follows_a_link_operand_with_a_trailing_slash,
+    &format!("{DU_TREE}; ln -s du/a al; du -b al al/ al/."),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(
+            out.stdout,
+            "4\tal\n1\tal/b\n2001\tal/\n1\tal/./b\n2001\tal/.\n"
+        );
+    }
+);
+
+// The kernel's lstat follows links on a direct bind (#254); du still counts
+// only the link, like GNU.
+#[cfg(unix)]
+#[test]
+fn du_does_not_follow_directory_symlinks_on_a_direct_bind() {
+    let dir = ls_fixture("du_symlink", &[]);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::os::unix::fs::symlink("..", dir.join("d/up")).unwrap();
+    let out = run_ls_fixture(&dir, "du -ab /fx");
+    assert!(out.stdout.contains("2\t/fx/d/up\n"), "{}", out.stdout);
+    assert!(!out.stdout.contains("/fx/d/up/"), "{}", out.stdout);
+}
+
+#[cfg(unix)]
+#[test]
+fn du_human_sizes_on_a_direct_bind() {
+    let dir = ls_fixture("du_human", &[("a", 1536, LS_T0), ("b", 5_000_000, LS_T0)]);
+    let out = run_ls_fixture(&dir, "du -ah /fx/a /fx/b; du -sk /fx/b");
+    assert_eq!(out.stdout, "1.5K\t/fx/a\n4.8M\t/fx/b\n4883\t/fx/b\n");
+    assert_eq!(out.status, 0);
+}
+
 // ── tail coverage ───────────────────────────────────────────────────
 
 expect!(
