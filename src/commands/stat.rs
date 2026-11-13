@@ -34,13 +34,15 @@ FORMAT sequences:
 
 The kernel reports only the modification time, so the access and change times
 repeat it and the birth time is unknown. The owner is always the shell user
-(1000/lash), blocks are the size rounded up to 512 bytes (none for a symlink), a directory has 2
-links and anything else 1, and device numbers are 0.";
+(1000/lash), blocks are the size rounded up to 512 bytes (none for a symlink),
+a directory has 2 links and anything else 1, and device numbers are 0. Files
+in a directory bound from the host have inode number 0.";
 
-const TERSE: &str = "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o\n";
+const TERSE: &str = "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o";
 const USER: &str = "lash";
 const BLOCK_SIZE: u64 = 512;
 const IO_BLOCK: u64 = 4096;
+const MAX_FIELD: usize = u16::MAX as usize;
 
 /// One operand and what the kernel said about it.
 struct File<'a> {
@@ -62,7 +64,7 @@ async fn cmd_stat(os: &dyn Kernel, args: &[String]) -> CommandResult {
         match arg {
             Short('L') | Long("dereference") => deref = true,
             Short('c') | Long("format") => {
-                format = Some(format!("{}\n", parser.value()?.string()?));
+                format = Some(parser.value()?.string()?);
                 escapes = false;
             }
             Long("printf") => {
@@ -109,13 +111,23 @@ async fn cmd_stat(os: &dyn Kernel, args: &[String]) -> CommandResult {
             target,
         };
         let mut warnings = Vec::new();
-        let out = match &format {
+        let expanded = match &format {
             Some(fmt) => expand(fmt, &file, escapes, &mut warnings),
             None if terse => expand(TERSE, &file, false, &mut warnings),
-            None => default_output(&file).into_bytes(),
+            None => Ok(default_output(&file).into_bytes()),
         };
         for warning in warnings {
             wprintln!(e, "stat: warning: {}", warning)?;
+        }
+        let mut out = match expanded {
+            Ok(out) => out,
+            Err(msg) => {
+                wprintln!(e, "stat: {}", msg)?;
+                return Ok(1);
+            }
+        };
+        if !escapes && (format.is_some() || terse) {
+            out.push(b'\n');
         }
         w.write_all(&out).await?;
     }
@@ -134,7 +146,7 @@ fn default_output(f: &File) -> String {
     } else {
         links(st).to_string()
     };
-    let (mtime, _) = mtime(st);
+    let (mtime, _, _) = mtime(st);
     format!(
         "  File: {name}\n  Size: {:<10}\tBlocks: {:<10} IO Block: {:<6} {}\n\
          Device: {:x}h/{}d\tInode: {:<10}  Links: {links}\n\
@@ -191,16 +203,18 @@ fn file_type(st: &FileStat) -> &'static str {
 }
 
 /// The modification time as GNU prints it (`2020-01-01 00:00:00.000000000
-/// +0000`) and as seconds since the epoch.
-fn mtime(st: &FileStat) -> (String, i64) {
+/// +0000`), and as seconds and nanoseconds since the epoch.
+fn mtime(st: &FileStat) -> (String, i64, u32) {
     let since = st
         .modified
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .unwrap_or_default();
     let secs = since.as_secs() as i64;
+    let nanos = since.subsec_nanos();
     (
-        format_date("%Y-%m-%d %H:%M:%S.%N %z", secs, since.subsec_nanos()),
+        format_date("%Y-%m-%d %H:%M:%S.%N %z", secs, nanos),
         secs,
+        nanos,
     )
 }
 
@@ -218,44 +232,78 @@ fn quote(s: &str) -> String {
 
 /// The text for one `%` conversion, and whether it is a number (which the
 /// `0` flag pads with zeros).
-fn conversion(conv: char, f: &File) -> (String, bool) {
+///
+/// Like GNU, a precision gives `%X`, `%Y` and `%Z` that many digits of
+/// fractional seconds (9 when it has no digits) and pads other numbers with
+/// leading zeros, and the `#` flag prefixes octal with `0` and hex with `0x`.
+fn conversion(conv: char, f: &File, precision: Option<Option<usize>>, alt: bool) -> (String, bool) {
     let st = f.st;
-    let num = |n: u64| (n.to_string(), true);
-    match conv {
+    let (text, numeric) = match conv {
         'a' => (format!("{:o}", st.mode & 0o7777), true),
         'A' => (format_mode(st.mode), false),
-        'b' => num(blocks(st)),
-        'B' => num(BLOCK_SIZE),
-        'd' => num(st.dev),
+        'b' => (blocks(st).to_string(), true),
+        'B' => (BLOCK_SIZE.to_string(), true),
+        'd' => (st.dev.to_string(), true),
         'D' => (format!("{:x}", st.dev), true),
         'f' => (format!("{:x}", st.mode), true),
         'F' => (file_type(st).to_string(), false),
-        'g' => num(LASH_GID as u64),
+        'g' => (LASH_GID.to_string(), true),
         'G' => (USER.to_string(), false),
-        'h' => num(links(st) as u64),
-        'i' => num(st.ino),
+        'h' => (links(st).to_string(), true),
+        'i' => (st.ino.to_string(), true),
         'n' => (f.name.to_string(), false),
         'N' => match &f.target {
             Some(target) => (format!("{} -> {}", quote(f.name), quote(target)), false),
             None => (quote(f.name), false),
         },
-        'o' => num(IO_BLOCK),
-        's' => num(st.len),
-        't' | 'T' => num(0),
-        'u' => num(LASH_UID as u64),
+        'o' => (IO_BLOCK.to_string(), true),
+        's' => (st.len.to_string(), true),
+        't' | 'T' => ("0".to_string(), true),
+        'u' => (LASH_UID.to_string(), true),
         'U' => (USER.to_string(), false),
         'w' => ("-".to_string(), false),
-        'W' => num(0),
+        'W' => ("0".to_string(), true),
         'x' | 'y' | 'z' => (mtime(st).0, false),
-        'X' | 'Y' | 'Z' => (mtime(st).1.to_string(), true),
-        _ => ("?".to_string(), false),
+        'X' | 'Y' | 'Z' => {
+            let (_, secs, nanos) = mtime(st);
+            let digits = match precision {
+                Some(p) => p.unwrap_or(9),
+                None => 0,
+            };
+            if digits == 0 {
+                return (secs.to_string(), true);
+            }
+            let mut frac = format!("{nanos:09}");
+            frac.truncate(digits);
+            return (format!("{secs}.{frac:0<digits$}"), true);
+        }
+        _ => return ("?".to_string(), false),
+    };
+    if !numeric {
+        return (text, false);
     }
+    let text = match precision {
+        Some(Some(p)) => format!("{text:0>p$}"),
+        _ => text,
+    };
+    let text = match conv {
+        'a' if alt && !text.starts_with('0') => format!("0{text}"),
+        'D' | 'f' | 't' | 'T' if alt && text != "0" => format!("0x{text}"),
+        _ => text,
+    };
+    (text, true)
 }
 
 /// Expand `fmt` for one file, in a single pass so expanded text is never
 /// re-scanned. With `escapes`, backslash sequences are interpreted too, and
-/// each one GNU would warn about adds to `warnings`.
-fn expand(fmt: &str, f: &File, escapes: bool, warnings: &mut Vec<String>) -> Vec<u8> {
+/// each one GNU would warn about adds to `warnings`. A directive cut short by
+/// the end of `fmt` is an error.
+fn expand(
+    fmt: &str,
+    f: &File,
+    escapes: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(fmt.len());
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
@@ -272,19 +320,20 @@ fn expand(fmt: &str, f: &File, escapes: bool, warnings: &mut Vec<String>) -> Vec
             flags.push(c);
             chars.next();
         }
-        let mut width = 0usize;
-        while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
-            width = width.saturating_mul(10).saturating_add(d as usize);
-            chars.next();
-        }
-        // A precision is accepted and ignored.
+        let mut directive = format!("%{flags}");
+        let width = number(&mut chars, &mut directive);
+        let mut precision = None;
         if chars.peek() == Some(&'.') {
             chars.next();
-            while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
-                chars.next();
-            }
+            directive.push('.');
+            let digits = directive.len();
+            let p = number(&mut chars, &mut directive);
+            precision = Some((directive.len() > digits).then_some(p));
         }
         let Some(conv) = chars.next() else {
+            if directive.len() > 1 {
+                return Err(format!("‘{directive}’: invalid directive"));
+            }
             out.push(b'%');
             break;
         };
@@ -292,7 +341,7 @@ fn expand(fmt: &str, f: &File, escapes: bool, warnings: &mut Vec<String>) -> Vec
             out.push(b'%');
             continue;
         }
-        let (text, numeric) = conversion(conv, f);
+        let (text, numeric) = conversion(conv, f, precision, flags.contains('#'));
         let pad = width.saturating_sub(text.chars().count());
         let padded = if flags.contains('-') {
             format!("{}{}", text, " ".repeat(pad))
@@ -303,7 +352,19 @@ fn expand(fmt: &str, f: &File, escapes: bool, warnings: &mut Vec<String>) -> Vec
         };
         out.extend_from_slice(padded.as_bytes());
     }
-    out
+    Ok(out)
+}
+
+/// Read the digits at the front of `chars` onto `directive` and return
+/// their value. Like `printf`, a field width or precision is capped at
+/// 65535 so a huge one can't exhaust memory.
+fn number(chars: &mut Peekable<Chars>, directive: &mut String) -> usize {
+    let mut n = 0usize;
+    while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
+        n = (n * 10 + d as usize).min(MAX_FIELD);
+        directive.push(chars.next().unwrap());
+    }
+    n
 }
 
 /// Interpret the backslash sequence after a `\`, like GNU `stat --printf`.

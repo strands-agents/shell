@@ -4443,6 +4443,51 @@ fn stat_format_specifiers() {
 
 #[cfg(unix)]
 #[test]
+fn stat_precision_and_alternate_form() {
+    let dir = ls_fixture("stat_precision", &[("f", 5, LS_T0)]);
+    let out = run_ls_fixture(
+        &dir,
+        "stat -c '%.3Y|%.Y|%.0Y|%.12X|%#a|%#.3a|%.3a|%.3n|%#f|%#t|%.6s|%-#8a|' /fx/f",
+    );
+    // GNU prints these for a file whose mtime has no fractional seconds.
+    assert_eq!(
+        out.stdout,
+        "1577836800.000|1577836800.000000000|1577836800|1577836800.000000000000|\
+         0644|0644|644|/fx/f|0x81a4|0|000005|0644    |\n"
+    );
+}
+
+shell_test!(
+    stat_format_ending_in_percent_keeps_the_newline,
+    "printf x > /tmp/spc; stat -c '100%' /tmp/spc /tmp/spc; stat -c '%s%' /tmp/spc",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "100%\n100%\n1%\n");
+        assert_eq!(out.status, 0);
+    }
+);
+
+shell_test!(
+    stat_rejects_a_cut_short_directive,
+    "printf x > /tmp/scd; stat -c '%5' /tmp/scd; echo $?; stat --printf '%-' /tmp/scd",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\n");
+        assert_eq!(
+            out.stderr,
+            "stat: ‘%5’: invalid directive\nstat: ‘%-’: invalid directive\n"
+        );
+        assert_eq!(out.status, 1);
+    }
+);
+
+expect!(
+    stat_caps_a_huge_field_width,
+    "printf x > /tmp/shw; stat -c '%99999999999s' /tmp/shw | wc -c | tr -d ' '; \
+     stat -c '%-99999999999999999999999s|' /tmp/shw | wc -c | tr -d ' '",
+    "65536\n65537"
+);
+
+#[cfg(unix)]
+#[test]
 fn stat_terse() {
     let dir = ls_fixture("stat_terse", &[("f", 1536, LS_T0)]);
     let out = run_ls_fixture(&dir, "stat -t /fx/f");
