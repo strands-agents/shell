@@ -294,9 +294,10 @@ fn conversion(conv: char, f: &File, precision: Option<Option<usize>>, alt: bool)
     (text, true)
 }
 
-/// Like GNU, `+` or a space puts a sign in front of a decimal number.
+/// Like GNU, `+` or a space puts a sign in front of a signed field: the size
+/// and the times in seconds.
 fn sign(conv: char, flags: &str, text: String) -> String {
-    if matches!(conv, 'a' | 'D' | 'f' | 't' | 'T') {
+    if !matches!(conv, 's' | 'W' | 'X' | 'Y' | 'Z') {
         text
     } else if flags.contains('+') {
         format!("+{text}")
