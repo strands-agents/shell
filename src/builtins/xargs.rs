@@ -24,6 +24,13 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// GNU xargs stops when the command exits 255 or could not be run (126/127).
+/// The in-process status can't tell "could not be run" apart from a command
+/// that itself exits 126/127, so both stop xargs.
+fn stops(exit: i32) -> bool {
+    matches!(exit, 126 | 127 | 255)
+}
+
 pub fn builtin_xargs<'a>(
     _os: &'a dyn Kernel,
     proc: &'a mut Process,
@@ -95,6 +102,7 @@ pub fn builtin_xargs<'a>(
         let mut w = io::stdout()?;
         let mut ew = io::stderr().ok();
         let mut status = 0;
+        let mut failed = false;
 
         if let Some(ref repl) = replace {
             for item in &items {
@@ -111,6 +119,10 @@ pub fn builtin_xargs<'a>(
                     ew.write_all(sub.captured_stderr.as_bytes()).await?;
                 }
                 status = exit;
+                if stops(status) {
+                    break;
+                }
+                failed |= status != 0;
             }
         } else {
             let chunks: Vec<&[&str]> = if max_args > 0 {
@@ -130,9 +142,29 @@ pub fn builtin_xargs<'a>(
                     ew.write_all(sub.captured_stderr.as_bytes()).await?;
                 }
                 status = exit;
+                if stops(status) {
+                    break;
+                }
+                failed |= status != 0;
             }
         }
 
-        Ok(status)
+        if proc.check_limits().is_some() {
+            return Ok(1);
+        }
+        // GNU: 124 after a 255, 126/127 if the command could not be run,
+        // otherwise 123 if any invocation failed.
+        Ok(match status {
+            255 => {
+                proc.err_msg(&format!(
+                    "xargs: {}: exited with status 255; aborting",
+                    cmd_args[0]
+                ));
+                124
+            }
+            126 | 127 => status,
+            _ if failed => 123,
+            _ => 0,
+        })
     })
 }
