@@ -78,6 +78,12 @@ async fn cmd_readlink(os: &dyn Kernel, args: &[String]) -> CommandResult {
 /// components, walking it one component at a time through the kernel.
 /// Returns `None` when `mode` requires a component that is missing, a
 /// non-directory is used as a directory, or symlinks loop.
+/// Resolves every symlink in `path`, all of whose components must exist, as
+/// `readlink -e` does.
+pub(super) async fn resolve(os: &dyn Kernel, path: &str) -> Option<String> {
+    canonicalize(os, path, Mode::Existing).await
+}
+
 async fn canonicalize(os: &dyn Kernel, path: &str, mode: Mode) -> Option<String> {
     if path.is_empty() {
         return None;

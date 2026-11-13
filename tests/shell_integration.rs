@@ -5114,10 +5114,18 @@ diff_case!(
 diff_case!(
     diff_new_file_treats_absent_as_empty,
     DIFF_FILES,
-    "diff -N nope a | head -1",
-    "0a1,9\n",
+    "diff -N nope a > out; echo $?; head -1 out",
+    "1\n0a1,9\n",
     "",
     0
+);
+diff_case!(
+    diff_recursive_stops_at_a_directory_loop,
+    DIFF_TREES,
+    "ln -s . x/sub/up && ln -s . y/sub/up && diff -r x/sub y/sub",
+    "diff -r x/sub/z y/sub/z\n1c1\n< a\n---\n> b\n",
+    "diff: x/sub/up: recursive directory loop\n",
+    2
 );
 diff_case!(
     diff_file_against_directory,
@@ -5173,6 +5181,36 @@ fn diff_unified_header_names_each_file_and_its_time() {
             assert_eq!(time.len(), 35, "{time:?}");
             assert!(time.ends_with(" +0000"), "{time:?}");
         }
+    }));
+}
+
+/// On a direct bind, host symlinks and missing paths come back from the
+/// host, not the in-memory VFS.
+#[cfg(unix)]
+#[test]
+fn diff_on_a_direct_bind_handles_loops_and_absent_files() {
+    let dir = TestDir::new("diff_direct_bind");
+    for side in ["x", "y"] {
+        std::fs::create_dir(dir.join(side)).unwrap();
+        std::fs::write(dir.join(side).join("f"), format!("{side}\n")).unwrap();
+        std::os::unix::fs::symlink(".", dir.join(side).join("self")).unwrap();
+    }
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/t")
+            .build()
+            .unwrap();
+        let out = shell.run("cd /t && diff -r x y").await;
+        assert_eq!(out.stdout, "diff -r x/f y/f\n1c1\n< x\n---\n> y\n");
+        assert_eq!(out.stderr, "diff: x/self: recursive directory loop\n");
+        assert_eq!(out.status, 2);
+        let out = shell.run("cd /t && diff -N x/f nope").await;
+        assert_eq!(out.stdout, "1d0\n< x\n");
+        assert_eq!(out.status, 1);
+        let out = shell.run("cd /t && diff x/f nope").await;
+        assert_eq!(out.stderr, "diff: nope: No such file or directory\n");
+        assert_eq!(out.status, 2);
     }));
 }
 

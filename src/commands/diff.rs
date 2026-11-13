@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use similar::{Algorithm, DiffOp, capture_diff_slices};
+use similar::{Algorithm, DiffOp, capture_diff_slices_deadline};
 
 use super::date::format_date;
+use super::readlink::resolve;
 use crate::os::{FdWriter, FileStat};
 use crate::prelude::*;
 
@@ -68,6 +69,9 @@ struct Diff<'a> {
     err: FdWriter,
     /// Standard input, read on first use so `diff - -` reads it once.
     stdin: Option<Vec<u8>>,
+    /// The resolved paths of the directories `-r` is inside, on each side,
+    /// so a symlink back to one of them is reported instead of followed.
+    walking: Vec<(Option<String>, Option<String>)>,
 }
 
 /// GNU's wording for the errors diff reports about a path.
@@ -78,6 +82,26 @@ fn describe(e: &std::io::Error) -> String {
         std::io::ErrorKind::IsADirectory => "Is a directory".to_string(),
         _ => e.to_string(),
     }
+}
+
+/// GNU's wording for a path that can't be looked up. A kernel reports a
+/// refused lookup as `PermissionDenied` and a missing path as any other error.
+fn describe_lookup(e: &std::io::Error) -> &'static str {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => "Permission denied",
+        _ => "No such file or directory",
+    }
+}
+
+/// The time after which the line matching settles for a quick diff that may
+/// be longer than the shortest one, so a huge comparison respects the
+/// process timeout.
+fn deadline() -> Option<std::time::Instant> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let deadline = io::with_process(|p| p.deadline.map(|d| d.into_std()));
+    #[cfg(target_arch = "wasm32")]
+    let deadline = io::with_process(|p| p.deadline);
+    deadline
 }
 
 fn join(dir: &str, name: &str) -> String {
@@ -95,7 +119,7 @@ fn basename(path: &str) -> &str {
 
 fn changes(old: &[&[u8]], new: &[&[u8]]) -> Vec<Change> {
     let mut out: Vec<Change> = Vec::new();
-    for op in capture_diff_slices(Algorithm::Myers, old, new) {
+    for op in capture_diff_slices_deadline(Algorithm::Myers, old, new, deadline()) {
         let (o, old_len, n, new_len) = match op {
             DiffOp::Equal { .. } => continue,
             DiffOp::Delete {
@@ -206,7 +230,8 @@ fn unified(out: &mut Vec<u8>, a: &Input, b: &Input, context: usize) {
         // Changes no more than two contexts apart share a hunk.
         let mut j = i;
         while j + 1 < changes.len()
-            && changes[j + 1].old - (changes[j].old + changes[j].old_len) <= 2 * context
+            && changes[j + 1].old - (changes[j].old + changes[j].old_len)
+                <= context.saturating_mul(2)
         {
             j += 1;
         }
@@ -262,7 +287,7 @@ impl Diff<'_> {
         match crate::io::try_stat(self.os, path).await {
             Ok(stat) => Ok(stat),
             Err(e) => {
-                wprintln!(self.err, "diff: {path}: {}", describe(&e))?;
+                wprintln!(self.err, "diff: {path}: {}", describe_lookup(&e))?;
                 Err(e)
             }
         }
@@ -372,7 +397,33 @@ impl Diff<'_> {
         }
     }
 
+    /// Compares two directories, refusing one that `-r` is already inside.
     async fn dirs(
+        &mut self,
+        a: &str,
+        b: &str,
+    ) -> Result<Status, Box<dyn std::error::Error + Send + Sync>> {
+        let ra = resolve(self.os, a).await;
+        let rb = resolve(self.os, b).await;
+        let looped = if ra.is_some() && self.walking.iter().any(|w| w.0 == ra) {
+            Some(a)
+        } else if rb.is_some() && self.walking.iter().any(|w| w.1 == rb) {
+            Some(b)
+        } else {
+            None
+        };
+        if let Some(path) = looped {
+            return self
+                .error(&format!("{path}: recursive directory loop"))
+                .await;
+        }
+        self.walking.push((ra, rb));
+        let status = self.entries(a, b).await;
+        self.walking.pop();
+        status
+    }
+
+    async fn entries(
         &mut self,
         a: &str,
         b: &str,
@@ -449,7 +500,7 @@ impl Diff<'_> {
         }
         let absent = |r: &std::io::Result<FileStat>| {
             r.as_ref()
-                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                .is_err_and(|e| e.kind() != std::io::ErrorKind::PermissionDenied)
         };
         let (ra, rb) = (self.operand(a).await, self.operand(b).await);
         // -N lets one absent operand stand for an empty file.
@@ -459,7 +510,7 @@ impl Diff<'_> {
             (ra, rb) => {
                 for (path, r) in [(a, ra), (b, rb)] {
                     if let Err(e) = r {
-                        wprintln!(self.err, "diff: {path}: {}", describe(&e))?;
+                        wprintln!(self.err, "diff: {path}: {}", describe_lookup(&e))?;
                     }
                 }
                 return Ok(Status::Trouble);
@@ -575,9 +626,17 @@ async fn cmd_diff(os: &dyn Kernel, args: &[String]) -> CommandResult {
         out: io::stdout()?,
         err,
         stdin: None,
+        walking: Vec::new(),
     };
     match diff.run(&operands[0], &operands[1]).await {
         Ok(status) => Ok(status as i32),
+        // A reader that went away stops diff quietly, as SIGPIPE does.
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe) =>
+        {
+            Err(e)
+        }
         Err(e) => {
             wprintln!(diff.err, "diff: {e}")?;
             Ok(2)
