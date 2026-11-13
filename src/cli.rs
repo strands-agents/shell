@@ -104,7 +104,7 @@ where
     rt.block_on(local.run_until(shell.start_mcp()));
 
     if let Some(cmd) = &cli.command {
-        let exit_code = rt.block_on(local.run_until(shell.execute(cmd)));
+        let exit_code = rt.block_on(local.run_until(Box::pin(shell.execute(cmd))));
         let _ = std::io::stdout().flush();
         std::process::exit(exit_code);
     }

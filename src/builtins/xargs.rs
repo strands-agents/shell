@@ -24,6 +24,13 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// GNU xargs stops when the command exits 255 or could not be run (126/127).
+/// The in-process status can't tell "could not be run" apart from a command
+/// that itself exits 126/127, so both stop xargs.
+fn stops(exit: i32) -> bool {
+    matches!(exit, 126 | 127 | 255)
+}
+
 pub fn builtin_xargs<'a>(
     _os: &'a dyn Kernel,
     proc: &'a mut Process,
@@ -34,33 +41,38 @@ pub fn builtin_xargs<'a>(
         let mut replace: Option<String> = None;
         let mut max_args: usize = 0;
         let mut delim: Option<char> = None;
-        let mut cmd_args = Vec::new();
         let mut i = 0;
         while i < args.len() {
-            match args[i].as_str() {
-                "-0" => null_delim = true,
-                "-I" => {
-                    i += 1;
-                    if i < args.len() {
-                        replace = Some(args[i].clone());
-                    }
+            let arg = args[i].as_str();
+            if arg == "--" {
+                i += 1;
+                break;
+            }
+            if arg == "-0" {
+                null_delim = true;
+                i += 1;
+                continue;
+            }
+            let opt = match arg.get(..2) {
+                Some(o @ ("-I" | "-n" | "-d")) => o,
+                _ => break,
+            };
+            let value = if arg.len() > 2 {
+                Some(arg[2..].to_string())
+            } else {
+                i += 1;
+                args.get(i).cloned()
+            };
+            if let Some(v) = value {
+                match opt {
+                    "-I" => replace = Some(v),
+                    "-n" => max_args = v.parse().unwrap_or(0),
+                    _ => delim = v.chars().next(),
                 }
-                "-n" => {
-                    i += 1;
-                    if i < args.len() {
-                        max_args = args[i].parse().unwrap_or(0);
-                    }
-                }
-                "-d" => {
-                    i += 1;
-                    if i < args.len() {
-                        delim = args[i].chars().next();
-                    }
-                }
-                _ => cmd_args.push(args[i].clone()),
             }
             i += 1;
         }
+        let mut cmd_args: Vec<String> = args[i.min(args.len())..].to_vec();
         if cmd_args.is_empty() {
             cmd_args.push("echo".to_string());
         }
@@ -88,7 +100,9 @@ pub fn builtin_xargs<'a>(
 
         let os_arc = io::kernel();
         let mut w = io::stdout()?;
+        let mut ew = io::stderr().ok();
         let mut status = 0;
+        let mut failed = false;
 
         if let Some(ref repl) = replace {
             for item in &items {
@@ -101,7 +115,14 @@ pub fn builtin_xargs<'a>(
                 let (exit, _) =
                     Box::pin(crate::exec::execute(os_arc.clone(), &mut sub, &line)).await;
                 w.write_all(sub.captured_output.as_bytes()).await?;
+                if let Some(ew) = ew.as_mut() {
+                    ew.write_all(sub.captured_stderr.as_bytes()).await?;
+                }
                 status = exit;
+                if stops(status) {
+                    break;
+                }
+                failed |= status != 0;
             }
         } else {
             let chunks: Vec<&[&str]> = if max_args > 0 {
@@ -117,10 +138,33 @@ pub fn builtin_xargs<'a>(
                 let (exit, _) =
                     Box::pin(crate::exec::execute(os_arc.clone(), &mut sub, &line)).await;
                 w.write_all(sub.captured_output.as_bytes()).await?;
+                if let Some(ew) = ew.as_mut() {
+                    ew.write_all(sub.captured_stderr.as_bytes()).await?;
+                }
                 status = exit;
+                if stops(status) {
+                    break;
+                }
+                failed |= status != 0;
             }
         }
 
-        Ok(status)
+        if proc.check_limits().is_some() {
+            return Ok(1);
+        }
+        // GNU: 124 after a 255, 126/127 if the command could not be run,
+        // otherwise 123 if any invocation failed.
+        Ok(match status {
+            255 => {
+                proc.err_msg(&format!(
+                    "xargs: {}: exited with status 255; aborting",
+                    cmd_args[0]
+                ));
+                124
+            }
+            126 | 127 => status,
+            _ if failed => 123,
+            _ => 0,
+        })
     })
 }

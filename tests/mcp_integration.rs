@@ -176,7 +176,7 @@ fn mcp_shell_timeout() {
     assert_eq!(timed_out["result"]["content"][0]["text"], "");
     assert_eq!(
         timed_out["result"]["content"][1]["text"],
-        "strands-shell: execution timeout exceeded\n"
+        "strands-shell: sleep: execution timeout exceeded\nstrands-shell: execution timeout exceeded\n"
     );
     assert_eq!(timed_out["result"]["metadata"]["exit_code"], 1);
 
@@ -229,6 +229,21 @@ fn mcp_shell_state_persists_across_calls() {
         .as_str()
         .unwrap();
     assert!(func.contains("hello world"), "function output: {func}");
+}
+
+#[test]
+fn mcp_shell_function_exit_does_not_leak_into_next_call() {
+    let responses = mcp_session(&[
+        init_msg(1),
+        initialized_msg(),
+        tool_call(2, "shell", json!({"command": "f() { exit 3; }; command f"})),
+        tool_call(3, "shell", json!({"command": "echo hi; echo more"})),
+    ]);
+    assert_eq!(responses.len(), 3);
+    let text = responses[2]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("hi\nmore"), "second call output: {text}");
 }
 
 // ── read_file tool ──────────────────────────────────────────────────

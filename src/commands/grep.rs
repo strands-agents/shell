@@ -16,6 +16,9 @@ Options:
   -x, --line-regexp         match whole lines only
   -F, --fixed-strings       interpret PATTERN as fixed string
   -E, --extended-regexp     interpret PATTERN as extended regex (default)
+  -P, --perl-regexp         interpret PATTERN as a Perl-compatible subset
+                            (Rust regex engine; no lookaround, backreferences,
+                            atomic groups, possessive quantifiers, \\K or (?x))
   -e, --regexp PATTERN      use PATTERN for matching
   -q, --quiet, --silent     suppress all output
   -H, --with-filename       print filename with matches
@@ -56,6 +59,8 @@ struct Opts {
     word_regexp: bool,
     line_regexp: bool,
     fixed: bool,
+    extended: bool,
+    perl: bool,
     quiet: bool,
     with_filename: Option<bool>,
     only_matching: bool,
@@ -82,6 +87,8 @@ fn parse_args(args: &[String]) -> Result<Option<Opts>, Box<dyn std::error::Error
         word_regexp: false,
         line_regexp: false,
         fixed: false,
+        extended: false,
+        perl: false,
         quiet: false,
         with_filename: None,
         only_matching: false,
@@ -106,7 +113,8 @@ fn parse_args(args: &[String]) -> Result<Option<Opts>, Box<dyn std::error::Error
             Short('w') | Long("word-regexp") => opts.word_regexp = true,
             Short('x') | Long("line-regexp") => opts.line_regexp = true,
             Short('F') | Long("fixed-strings") => opts.fixed = true,
-            Short('E') | Long("extended-regexp") => {}
+            Short('E') | Long("extended-regexp") => opts.extended = true,
+            Short('P') | Long("perl-regexp") => opts.perl = true,
             Short('e') | Long("regexp") => opts.patterns.push(parser.value()?.string()?),
             Short('q') | Long("quiet") | Long("silent") => opts.quiet = true,
             Short('H') | Long("with-filename") => opts.with_filename = Some(true),
@@ -178,6 +186,199 @@ fn build_regex(
         .case_insensitive(opts.ignore_case)
         .build()?;
     Ok(re)
+}
+
+/// Rewrites a PCRE pattern for the `regex` crate. Constructs the crate cannot honour are
+/// refused by name, including ones it would accept with a different meaning (possessive
+/// quantifiers parse as nested repetition, `--` in a class is set difference). PCRE literals the
+/// crate reads as syntax (`\<`, `\>`, a stray `{`, and `&`, `~`, `[` in a class) are made literal.
+fn perl_to_rust_regex(pat: &str) -> Result<String, &'static str> {
+    #[derive(PartialEq)]
+    enum Last {
+        Start,
+        Atom,
+        Quant,
+        Suffix,
+    }
+    let c: Vec<char> = pat.chars().collect();
+    let mut out = String::with_capacity(pat.len());
+    let mut i = 0;
+    let mut last = Last::Start;
+    while i < c.len() {
+        match c[i] {
+            '\\' => {
+                match c.get(i + 1) {
+                    Some('1'..='9') | Some('g') | Some('k') => return Err("backreference"),
+                    Some('K') => return Err("match reset \\K"),
+                    Some('x' | 'p' | 'P' | 'N' | 'o') if c.get(i + 2) == Some(&'{') => {
+                        while i < c.len() && c[i] != '}' {
+                            out.push(c[i]);
+                            i += 1;
+                        }
+                        if i < c.len() {
+                            out.push('}');
+                        }
+                    }
+                    Some(&ch) => {
+                        push_perl_escape(&mut out, ch);
+                        i += 1;
+                    }
+                    None => out.push('\\'),
+                }
+                last = Last::Atom;
+            }
+            '[' => {
+                out.push('[');
+                i += 1;
+                if c.get(i) == Some(&'^') {
+                    out.push('^');
+                    i += 1;
+                }
+                // A leading `]` is literal.
+                if c.get(i) == Some(&']') {
+                    out.push_str("\\]");
+                    i += 1;
+                }
+                while i < c.len() && c[i] != ']' {
+                    match c[i] {
+                        '\\' => match c.get(i + 1) {
+                            Some(&ch) => {
+                                push_perl_escape(&mut out, ch);
+                                i += 1;
+                            }
+                            None => out.push('\\'),
+                        },
+                        '[' if c.get(i + 1) == Some(&':') => {
+                            while i < c.len() && !(c[i] == ':' && c.get(i + 1) == Some(&']')) {
+                                out.push(c[i]);
+                                i += 1;
+                            }
+                            if i < c.len() {
+                                out.push_str(":]");
+                                i += 1;
+                            }
+                        }
+                        '-' if c.get(i + 1) == Some(&'-') => {
+                            return Err("'--' in a character class");
+                        }
+                        ch @ ('&' | '~' | '[') => {
+                            out.push('\\');
+                            out.push(ch);
+                        }
+                        ch => out.push(ch),
+                    }
+                    i += 1;
+                }
+                if i < c.len() {
+                    out.push(']');
+                }
+                last = Last::Atom;
+            }
+            '(' => {
+                out.push('(');
+                if c.get(i + 1) == Some(&'?') {
+                    let rest: String = c[i + 2..].iter().take(3).collect();
+                    if rest.starts_with('=') || rest.starts_with('!') {
+                        return Err("lookahead");
+                    }
+                    if rest.starts_with("<=") || rest.starts_with("<!") {
+                        return Err("lookbehind");
+                    }
+                    if rest.starts_with('>') {
+                        return Err("atomic group");
+                    }
+                    if rest.starts_with("P=") {
+                        return Err("backreference");
+                    }
+                    // Extended mode treats spaces and `#` in classes differently in each engine.
+                    let flags: String = c[i + 2..]
+                        .iter()
+                        .take_while(|ch| ch.is_ascii_alphabetic() || **ch == '-')
+                        .collect();
+                    let ends_flags =
+                        matches!(c.get(i + 2 + flags.chars().count()), Some(')' | ':'));
+                    if ends_flags && flags.contains('x') {
+                        return Err("(?x)");
+                    }
+                    out.push('?');
+                    i += 1;
+                }
+                last = Last::Start;
+            }
+            '|' => {
+                out.push('|');
+                last = Last::Start;
+            }
+            '*' | '+' | '?' if last == Last::Quant => {
+                if c[i] == '+' {
+                    return Err("possessive quantifier");
+                }
+                out.push(c[i]);
+                last = Last::Suffix;
+            }
+            ch @ ('*' | '+' | '?') => {
+                out.push(ch);
+                last = Last::Quant;
+            }
+            '{' => {
+                let close = c[i..].iter().position(|&ch| ch == '}');
+                let counted = close.is_some_and(|n| {
+                    let body: String = c[i + 1..i + n].iter().collect();
+                    let mut parts = body.splitn(2, ',');
+                    let lo = parts.next().unwrap_or("");
+                    let hi = parts.next().unwrap_or("");
+                    lo.chars().chain(hi.chars()).all(|d| d.is_ascii_digit())
+                        && (!lo.is_empty() || !hi.is_empty())
+                });
+                match close {
+                    Some(n) if counted => {
+                        out.extend(&c[i..=i + n]);
+                        i += n;
+                        last = Last::Quant;
+                    }
+                    _ => {
+                        // PCRE reads a `{` that starts no counted quantifier as a literal.
+                        out.push_str("\\{");
+                        last = Last::Atom;
+                    }
+                }
+            }
+            ch => {
+                out.push(ch);
+                last = Last::Atom;
+            }
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
+/// Writes the escape `\ch`; PCRE's `\<` and `\>` are literals, which the crate spells `<` and `>`.
+/// PCRE's `\v` includes every vertical whitespace character, not just VT.
+fn push_perl_escape(out: &mut String, ch: char) {
+    match ch {
+        '<' | '>' => out.push(ch),
+        'v' => out.push_str(r"[\x0A-\x0D\x{85}\x{2028}\x{2029}]"),
+        _ => {
+            out.push('\\');
+            out.push(ch);
+        }
+    }
+}
+
+/// Builds the -P regex, refusing PCRE constructs the `regex` crate would reject or mis-match.
+fn build_perl_regex(opts: &mut Opts) -> Result<regex::bytes::Regex, String> {
+    if opts.fixed || opts.extended {
+        return Err("conflicting matchers specified".into());
+    }
+    for p in &mut opts.patterns {
+        *p = perl_to_rust_regex(p).map_err(|name| {
+            format!(
+                "-P does not support {name} (Rust regex engine); for extraction, match surrounding text with -o and trim it with sed or cut"
+            )
+        })?;
+    }
+    build_regex(opts).map_err(|e| e.to_string())
 }
 
 fn glob_matches(pattern: &str, name: &str) -> bool {
@@ -446,7 +647,7 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
 
 #[command("grep")]
 async fn cmd_grep(os: &dyn Kernel, args: &[String]) -> CommandResult {
-    let opts = match parse_args(args) {
+    let mut opts = match parse_args(args) {
         Ok(Some(o)) => o,
         Ok(None) => {
             let mut w = io::stdout()?;
@@ -455,7 +656,19 @@ async fn cmd_grep(os: &dyn Kernel, args: &[String]) -> CommandResult {
         }
         Err(e) => return Err(e),
     };
-    let re = build_regex(&opts)?;
+    let re = if opts.perl {
+        match build_perl_regex(&mut opts) {
+            Ok(re) => re,
+            Err(msg) => {
+                // GNU exits 2 on a bad -P pattern; never fall back to matching something else.
+                let mut ew = io::stderr()?;
+                wprintln!(ew, "grep: {}", msg)?;
+                return Ok(2);
+            }
+        }
+    } else {
+        build_regex(&opts)?
+    };
 
     let mut files = opts.files.clone();
     if opts.recursive && files.is_empty() {
