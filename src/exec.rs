@@ -1687,7 +1687,11 @@ async fn apply_redirects(
                 let content = if *quoted {
                     body.clone()
                 } else {
-                    expand_heredoc_body(os.clone(), proc, body).await
+                    let content = expand_heredoc_body(os.clone(), proc, body).await;
+                    if let Some(msg) = proc.check_limits() {
+                        return Err(msg.trim_start_matches("strands-shell: ").to_string());
+                    }
+                    content
                 };
                 let (tx, rx) = os::pipe(64);
                 let data = bytes::Bytes::from(content);

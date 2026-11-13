@@ -5684,6 +5684,53 @@ fn timed_out_captured_compound_redirect_does_not_create_host_files() {
 }
 
 #[test]
+fn a_here_doc_cut_short_by_the_deadline_writes_no_partial_body() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            "cat > /out/important <<EOF\nkey=$(sleep 5; echo val)\nEOF",
+            "cat > /out/important <<EOF\nkey=$(sleep 5 && echo val)\nEOF",
+            "{ cat; } > /out/important <<EOF\nkey=$(sleep 5; echo val)\nEOF",
+        ] {
+            let dir = TestDir::new("heredoc_timeout_host_write");
+            std::fs::write(dir.join("important"), b"orig").unwrap();
+            let mut shell = Shell::builder()
+                .bind_direct(dir.to_str().unwrap(), "/out")
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let within = shell
+                .run("cat > /out/within <<EOF\nkey=$(echo val)\nEOF")
+                .await;
+            assert_eq!(within.status, 0, "{script}: {}", within.stderr);
+            assert_eq!(std::fs::read(dir.join("within")).unwrap(), b"key=val\n");
+
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{script}: {}",
+                out.stderr
+            );
+            let content = std::fs::read(dir.join("important")).unwrap();
+            assert!(!content.starts_with(b"key="), "{script}: {content:?}");
+        }
+    }));
+}
+
+#[test]
+fn a_here_doc_reads_its_target_after_the_target_is_truncated() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("echo old > /tmp/f; cat > /tmp/f <<EOF\n[$(cat /tmp/f)]\nEOF\ncat /tmp/f")
+            .await;
+        assert_eq!(out.stdout, "[]\n", "{}", out.stderr);
+    }));
+}
+
+#[test]
 fn sleep_within_timeout_succeeds() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
