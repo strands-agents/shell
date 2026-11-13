@@ -13608,3 +13608,80 @@ expect!(
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
 );
+
+// ── nl ──────────────────────────────────────────────────────────────
+
+expect_output!(
+    nl_numbers_nonempty_lines_by_default,
+    "printf 'a\\n\\nb\\n' | nl",
+    "     1\ta\n       \n     2\tb\n",
+    "",
+    0
+);
+expect_output!(
+    nl_numbers_all_or_no_lines,
+    "printf 'a\\n\\n' | nl -b a; printf 'a\\n' | nl -b n",
+    "     1\ta\n     2\t\n       a\n",
+    "",
+    0
+);
+expect_output!(
+    nl_number_formats,
+    "printf 'a\\n' | nl -n ln; printf 'a\\n' | nl -n rz; printf 'a\\n' | nl -n rn",
+    "1     \ta\n000001\ta\n     1\ta\n",
+    "",
+    0
+);
+expect_output!(
+    nl_width_and_separator,
+    "printf 'a\\n\\nb\\n' | nl -w 3 -s ': '",
+    "  1: a\n     \n  2: b\n",
+    "",
+    0
+);
+expect_output!(
+    nl_ends_an_unterminated_line_and_numbers_across_files,
+    "printf 'x\\n' > /tmp/n1; printf 'a\\nb' | nl /tmp/n1 - /tmp/n1",
+    "     1\tx\n     2\ta\n     3\tb\n     4\tx\n",
+    "",
+    0
+);
+shell_test!(
+    nl_rejects_an_unknown_style,
+    "echo a | nl -b x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert!(!out.stderr.is_empty());
+        assert_eq!(out.status, 1);
+    }
+);
+shell_test!(
+    nl_reports_each_missing_file_and_continues,
+    "printf 'x\\n' > /tmp/n1; nl /tmp/nope /tmp/nope2 /tmp/n1",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "     1\tx\n");
+        assert!(out.stderr.contains("/tmp/nope:"), "stderr={:?}", out.stderr);
+        assert!(
+            out.stderr.contains("/tmp/nope2:"),
+            "stderr={:?}",
+            out.stderr
+        );
+        assert_eq!(out.status, 1);
+    }
+);
+expect_output!(
+    nl_second_dash_reads_nothing,
+    "printf 'x\\n' > /tmp/n1; printf 'a\\nb\\n' | nl - - /tmp/n1",
+    "     1\ta\n     2\tb\n     3\tx\n",
+    "",
+    0
+);
+shell_test!(
+    nl_rejects_a_width_too_large_to_format,
+    "echo a | nl -w 65536; echo $?; echo a | nl -w 100000000000; echo $?",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\n1\n");
+        assert_eq!(out.stderr.lines().count(), 2, "stderr={:?}", out.stderr);
+    }
+);
+expect_status!(nl_short_h_is_not_help, "echo a | nl -h a", 1);
