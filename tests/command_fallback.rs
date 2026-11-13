@@ -28,12 +28,17 @@ type Handler = dyn for<'a> Fn(&'a mut CommandContext) -> HandlerFuture<'a> + Sen
 struct HostKernel {
     inner: Arc<dyn Kernel>,
     handler: Box<Handler>,
+    served: &'static [&'static str],
 }
 
 #[async_trait]
 impl CommandFallback for HostKernel {
     async fn run(&self, ctx: &mut CommandContext) -> io::Result<Option<i32>> {
         (self.handler)(ctx).await
+    }
+
+    fn serves(&self, name: &str) -> bool {
+        self.served.contains(&name)
     }
 }
 
@@ -136,10 +141,18 @@ fn host_shell<F>(handler: F) -> Shell
 where
     F: for<'a> Fn(&'a mut CommandContext) -> HandlerFuture<'a> + Send + Sync + 'static,
 {
+    serving_shell(&[], handler)
+}
+
+fn serving_shell<F>(served: &'static [&'static str], handler: F) -> Shell
+where
+    F: for<'a> Fn(&'a mut CommandContext) -> HandlerFuture<'a> + Send + Sync + 'static,
+{
     let inner = Shell::builder().build().unwrap().kernel().clone();
     Shell::with_kernel(Arc::new(HostKernel {
         inner,
         handler: Box::new(handler),
+        served,
     }))
 }
 
@@ -498,6 +511,156 @@ fn lookups_and_argument_errors_do_not_reach_the_handler() {
             assert_eq!(out.stderr, baseline.stderr, "{script}");
         }
         assert!(calls.lock().unwrap().is_empty());
+    });
+}
+
+/// A fallback that serves `python` and `python3`, and records each call.
+fn python_shell(calls: Arc<Mutex<Vec<Invocation>>>) -> Shell {
+    serving_shell(&["python", "python3"], move |ctx| {
+        calls.lock().unwrap().push(Invocation {
+            program: ctx.program().to_string(),
+            args: ctx.args().to_vec(),
+            cwd: ctx.cwd().to_string_lossy().into_owned(),
+            mode: None,
+        });
+        Box::pin(async move {
+            if !ctx.program().starts_with("python") {
+                return Ok(None);
+            }
+            let (_, stdout, _) = ctx.stdio();
+            stdout.unwrap().write_all(b"served\n").await?;
+            Ok(Some(0))
+        })
+    })
+}
+
+async fn plant_path_script(shell: &mut Shell, name: &str) {
+    shell.run("mkdir -p /tmp/bin").await;
+    shell
+        .write_file(&format!("/tmp/bin/{name}"), b"#!/bin/sh\necho shadow\n")
+        .await
+        .unwrap();
+    shell.run(&format!("chmod +x /tmp/bin/{name}")).await;
+}
+
+#[test]
+fn lookups_find_a_served_name() {
+    block_on(async {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut shell = python_shell(calls.clone());
+        let cases = [
+            ("command -v python3", "python3\n"),
+            ("command -v python", "python\n"),
+            ("command -V python3", "python3 is a shell builtin\n"),
+            ("type python3", "python3 is a shell builtin\n"),
+            ("hash python3; hash", ""),
+            (
+                "if command -v python3; then echo found; fi",
+                "python3\nfound\n",
+            ),
+        ];
+        for (script, stdout) in cases {
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 0, "{script}: {}", out.stderr);
+            assert_eq!(out.stdout, stdout, "{script}");
+            assert_eq!(out.stderr, "", "{script}");
+        }
+        assert!(calls.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn a_served_name_wins_over_a_path_script_of_the_same_name() {
+    block_on(async {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut shell = python_shell(calls.clone());
+        plant_path_script(&mut shell, "python3").await;
+        let cases = [
+            ("PATH=/tmp/bin; python3 --version", "served\n"),
+            ("PATH=/tmp/bin; command -v python3", "python3\n"),
+            (
+                "PATH=/tmp/bin; hash python3; type python3",
+                "python3 is a shell builtin\n",
+            ),
+            ("/tmp/bin/python3", "shadow\n"),
+            (
+                "python3() { echo function; }; python3; command -V python3; unset -f python3",
+                "function\npython3 is a shell function\n",
+            ),
+        ];
+        for (script, stdout) in cases {
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 0, "{script}: {}", out.stderr);
+            assert_eq!(out.stdout, stdout, "{script}");
+        }
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "python3");
+        assert_eq!(calls[0].args, ["--version"]);
+    });
+}
+
+#[test]
+fn type_reports_a_served_name_over_a_stale_hash_entry() {
+    block_on(async {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut shell = python_shell(calls.clone());
+        plant_path_script(&mut shell, "python3").await;
+        Arc::make_mut(&mut shell.proc.hash_table)
+            .insert("python3".into(), "/tmp/bin/python3".into());
+        let out = shell.run("type python3; python3").await;
+        assert_eq!(
+            out.stdout, "python3 is a shell builtin\nserved\n",
+            "{}",
+            out.stderr
+        );
+    });
+}
+
+#[test]
+fn a_fallback_that_serves_no_name_keeps_path_and_lookups() {
+    block_on(async {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut shell = recording_shell(calls.clone());
+        let mut plain = Shell::builder().build().unwrap();
+        plant_path_script(&mut shell, "python3").await;
+        plant_path_script(&mut plain, "python3").await;
+        assert_eq!(shell.run("command -v python3").await.status, 1);
+        for script in [
+            "command -v python3",
+            "type python3",
+            "hash python3",
+            "PATH=/tmp/bin; python3",
+            "PATH=/tmp/bin; command -v python3",
+        ] {
+            let baseline = plain.run(script).await;
+            let out = shell.run(script).await;
+            assert_eq!(out.status, baseline.status, "{script}");
+            assert_eq!(out.stdout, baseline.stdout, "{script}");
+            assert_eq!(out.stderr, baseline.stderr, "{script}");
+        }
+        assert_eq!(shell.run("python3").await.stdout, "shadow\n");
+        assert!(calls.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn a_name_the_fallback_does_not_serve_is_still_not_found() {
+    block_on(async {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut shell = python_shell(calls.clone());
+        let mut plain = Shell::builder().build().unwrap();
+        for script in ["command -v missing", "type missing", "hash missing"] {
+            let baseline = plain.run(script).await;
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 1, "{script}");
+            assert_eq!(out.stdout, baseline.stdout, "{script}");
+            assert_eq!(out.stderr, baseline.stderr, "{script}");
+        }
+        let out = shell.run("missing").await;
+        assert_eq!(out.status, 127);
+        assert_eq!(out.stderr, "strands-shell: missing: command not found\n");
+        assert_eq!(calls.lock().unwrap().len(), 1);
     });
 }
 
