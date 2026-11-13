@@ -4522,11 +4522,10 @@ shell_test!(
     }
 );
 
-// A directory symlink on a direct bind is followed because the kernel's
-// lstat follows links there (#254); GNU counts only the link.
+// The kernel's lstat follows links on a direct bind (#254); du still counts
+// only the link, like GNU.
 #[cfg(unix)]
 #[test]
-#[ignore = "lstat follows symlinks on direct binds (#254)"]
 fn du_does_not_follow_directory_symlinks_on_a_direct_bind() {
     let dir = ls_fixture("du_symlink", &[]);
     std::fs::create_dir(dir.join("d")).unwrap();

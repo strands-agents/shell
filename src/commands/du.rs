@@ -22,8 +22,7 @@ Summarize the space used by each FILE, recursively for directories.
 The virtual filesystem does not allocate blocks, so the space a file uses is
 its apparent size: the number of bytes in it. Like GNU du --apparent-size,
 totals add up bytes and are rounded up to whole 1K blocks only when printed.
-Symbolic links are not followed, except in a directory bound directly from
-the host, where the kernel reports a link as the file it points to.";
+Symbolic links are not followed.";
 
 #[derive(Clone, Copy)]
 enum Unit {
@@ -159,9 +158,16 @@ fn walk<'a>(
     out: &'a mut Out<'_>,
 ) -> Pin<Box<dyn Future<Output = std::io::Result<u64>> + Send + 'a>> {
     Box::pin(async move {
-        let st = io::lstat(os, path).await;
-        let mut size = st.len;
-        if st.is_dir {
+        // On a direct bind, lstat follows links (#254), so read_link is what
+        // tells a link apart. A link's size is the length of its target.
+        let (mut size, is_dir) = match io::read_link(os, path).await {
+            Ok(target) => (target.len() as u64, false),
+            Err(_) => {
+                let st = io::lstat(os, path).await;
+                (st.len, st.is_dir)
+            }
+        };
+        if is_dir {
             match io::list_dir(os, path).await {
                 Ok(mut entries) => {
                     entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -178,7 +184,7 @@ fn walk<'a>(
             }
         }
         let shown = opts.max_depth.is_none_or(|max| depth <= max);
-        if shown && (st.is_dir || opts.all || depth == 0) {
+        if shown && (is_dir || opts.all || depth == 0) {
             wprintln!(out.w, "{}\t{}", format_size(size, opts.unit), path)?;
         }
         Ok(size)
