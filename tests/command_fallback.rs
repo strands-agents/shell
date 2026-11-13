@@ -553,6 +553,7 @@ fn lookups_find_a_served_name() {
             ("command -v python", "python\n"),
             ("command -V python3", "python3 is a shell builtin\n"),
             ("type python3", "python3 is a shell builtin\n"),
+            ("which python3 python", "python3\npython\n"),
             ("hash python3; hash", ""),
             (
                 "if command -v python3; then echo found; fi",
@@ -578,6 +579,14 @@ fn a_served_name_wins_over_a_path_script_of_the_same_name() {
         let cases = [
             ("PATH=/tmp/bin; python3 --version", "served\n"),
             ("PATH=/tmp/bin; command -v python3", "python3\n"),
+            (
+                "PATH=/tmp/bin; which -a python3",
+                "python3\n/tmp/bin/python3\n",
+            ),
+            (
+                "python3() { :; }; which python3; unset -f python3",
+                "python3\n",
+            ),
             (
                 "PATH=/tmp/bin; hash python3; type python3",
                 "python3 is a shell builtin\n",
@@ -650,7 +659,12 @@ fn a_name_the_fallback_does_not_serve_is_still_not_found() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut shell = python_shell(calls.clone());
         let mut plain = Shell::builder().build().unwrap();
-        for script in ["command -v missing", "type missing", "hash missing"] {
+        for script in [
+            "command -v missing",
+            "type missing",
+            "hash missing",
+            "which missing",
+        ] {
             let baseline = plain.run(script).await;
             let out = shell.run(script).await;
             assert_eq!(out.status, 1, "{script}");

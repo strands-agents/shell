@@ -2712,6 +2712,68 @@ expect!(
     "1"
 );
 
+// ── which ───────────────────────────────────────────────────────────
+
+expect_output!(
+    which_agrees_with_command_v,
+    "for n in ls cd echo; do [ \"$(which $n)\" = \"$(command -v $n)\" ] || echo differ $n; done; which ls cd",
+    "ls\ncd\n",
+    "",
+    0
+);
+expect_output!(
+    which_missing_prints_nothing,
+    "which nonexistent_cmd_xyz",
+    "",
+    "",
+    1
+);
+expect_output!(
+    which_some_missing_exits_one,
+    "which ls nonexistent_cmd_xyz cat",
+    "ls\ncat\n",
+    "",
+    1
+);
+expect_output!(
+    which_finds_a_script_on_path,
+    "mkdir -p /tmp/bin; printf '#!/bin/sh\\n' > /tmp/bin/tool; chmod +x /tmp/bin/tool; \
+     PATH=/tmp/bin:$PATH; which tool; command -v tool",
+    "/tmp/bin/tool\n/tmp/bin/tool\n",
+    "",
+    0
+);
+expect_output!(
+    which_all_lists_every_path_match,
+    "mkdir -p /tmp/bin; printf '#!/bin/sh\\n' > /tmp/bin/ls; chmod +x /tmp/bin/ls; \
+     PATH=/tmp/bin:$PATH; which -a ls; which ls",
+    "ls\n/tmp/bin/ls\n/bin/ls\nls\n",
+    "",
+    0
+);
+expect_output!(
+    which_skips_functions,
+    "f() { :; }; which f; echo $?; command -v f",
+    "1\nf\n",
+    "",
+    0
+);
+expect_output!(
+    which_rejects_unknown_option,
+    "which -x ls",
+    "",
+    "strands-shell: which: -x: invalid option\nusage: which [-a] name ...\n",
+    2
+);
+expect_output!(
+    which_without_names_prints_usage,
+    "which",
+    "",
+    "usage: which [-a] name ...\n",
+    1
+);
+expect_output!(which_double_dash_ends_options, "which -- -a", "", "", 1);
+
 // ── builtin builtin ─────────────────────────────────────────────────
 
 expect!(builtin_runs_echo, "builtin echo hello", "hello");
