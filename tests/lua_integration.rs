@@ -1541,3 +1541,123 @@ fn a_substitution_reads_outside_input_with_cat() {
         assert_eq!(out.status, 0);
     }));
 }
+
+// ── pattern matching against the command deadline ────────────────────────
+
+/// Runs one `lua -e` script, with a command timeout of `timeout_secs` seconds or none.
+fn run_lua(timeout_secs: Option<u64>, script: &str) -> (i32, String, String, std::time::Duration) {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut builder = Shell::builder();
+        if let Some(seconds) = timeout_secs {
+            builder = builder.timeout(std::time::Duration::from_secs(seconds));
+        }
+        let mut shell = builder.build().unwrap();
+        let started = std::time::Instant::now();
+        let out = shell.run(&format!("lua -e '{script}'")).await;
+        (out.status, out.stdout, out.stderr, started.elapsed())
+    }))
+}
+
+#[test]
+fn a_backtracking_pattern_stops_at_the_command_deadline() {
+    let exponential = r#"("a"):rep(30), ("a?"):rep(30) .. ("a"):rep(30)"#;
+    let polynomial = r#"("a"):rep(3000), ".-.-.-x""#;
+    let cases = [
+        format!("string.find({exponential})"),
+        format!("string.match({exponential})"),
+        format!("string.gsub({exponential}, \"y\")"),
+        format!("for _ in string.gmatch({exponential}) do end"),
+        format!("string.find({polynomial})"),
+        format!("string.match({polynomial})"),
+        format!("string.gsub({polynomial}, \"y\")"),
+        format!("for _ in string.gmatch({polynomial}) do end"),
+        // As a method.
+        "(\"a\"):rep(30):find((\"a?\"):rep(30) .. (\"a\"):rep(30))".to_string(),
+        // The same searches with arguments spelled so that Lua still accepts them.
+        r#"string.find(("a"):rep(3000), ".-.-.-x", "1")"#.to_string(),
+        r#"string.find(("a"):rep(30), ("a?"):rep(30) .. ("a"):rep(30), 1, false)"#.to_string(),
+        r#"for _ in string.gmatch(("a"):rep(3000), ".-.-.-x", "1") do end"#.to_string(),
+        r#"string.gsub(("a"):rep(3000), ".-.-.-x", "y", "1000000")"#.to_string(),
+        // `%z` is Lua's old name for the NUL byte class.
+        r#"string.find(("\0"):rep(30), ("%z?"):rep(30) .. ("%z"):rep(30) .. "x")"#.to_string(),
+        r#"string.find(("\0"):rep(30), ("[%z]?"):rep(30) .. ("[%z]"):rep(30) .. "x")"#.to_string(),
+        // A plain-text search costs the subject length times the needle length.
+        r#"local s = ("a"):rep(3000000) local t = ("a"):rep(1500000) .. "b" string.find(s, t)"#.to_string(),
+        r#"local s = ("a"):rep(3000000) local t = ("a"):rep(1500000) .. "b" string.find(s, t, 1, true)"#.to_string(),
+    ];
+    for script in cases {
+        let (status, _, stderr, elapsed) = run_lua(Some(2), &script);
+        assert_ne!(status, 0, "{script}\nstderr: {stderr}");
+        assert!(stderr.contains("timeout"), "{script}\nstderr: {stderr}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "{script} ran {elapsed:?} against a 2s deadline"
+        );
+    }
+}
+
+#[test]
+fn a_pure_lua_loop_still_stops_at_the_command_deadline() {
+    let (status, _, stderr, elapsed) = run_lua(Some(1), "while true do end");
+    assert_ne!(status, 0);
+    assert!(stderr.contains("timeout"), "stderr: {stderr}");
+    assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+}
+
+#[test]
+fn pattern_functions_give_the_same_results_with_and_without_a_deadline() {
+    let scripts = [
+        r#"print(string.find("hello world", "o w"))"#,
+        r#"print(string.find("hello world", "(o)%s(w)"))"#,
+        r#"print(string.find("hello world", "l+", -3))"#,
+        r#"print(string.find("a.b", ".", 1, true))"#,
+        r#"print(string.find("abc", "b", "2"))"#,
+        r#"print(string.find("abc", "x"))"#,
+        r#"print(string.match("key = value", "^(%w+)%s*=%s*(%w+)$"))"#,
+        r#"print(string.match("  trim me  ", "^%s*(.-)%s*$"))"#,
+        r#"print(string.match("abc", "()b()"))"#,
+        r#"print(string.match("f(a(b)c)d", "%b()"))"#,
+        r#"print(string.match("THE (quick) fox", "%f[%a]%a+%f[%A]"))"#,
+        r#"print(string.match("abab", "(ab)%1"))"#,
+        r#"print(string.gsub("hello world", "o", "0"))"#,
+        r#"print(string.gsub("hello world", "(%w+)", "<%1>"))"#,
+        r#"print(string.gsub("hello world", "%w+", "%0 %0", 1))"#,
+        r#"print(string.gsub("abc", "", "-"))"#,
+        r#"print(string.gsub("$name is $age", "%$(%w+)", {name = "ann", age = "9"}))"#,
+        r#"print(string.gsub("1 2 3", "%d", function(d) return d * 2 end))"#,
+        r#"print(string.gsub("abc", "b", "x", "1"))"#,
+        r#"for w in string.gmatch("one two three", "%a+") do io.write(w, ",") end print()"#,
+        r#"for k, v in string.gmatch("a=1, b=2", "(%w+)=(%w+)") do io.write(k, v, ";") end print()"#,
+        r#"for p in string.gmatch("abc", "()") do io.write(p, " ") end print()"#,
+        r#"print(("hello"):find("l"), ("hello"):match("h(.)l"), ("x"):rep(3):gsub("x", "y"))"#,
+        r#"print(pcall(string.find, "a", "[a"))"#,
+        r#"print(pcall(string.find, "a", "%"))"#,
+        r#"print(pcall(string.match, "a", "(a"))"#,
+        r#"print(pcall(string.gsub, "a", "a", "%2"))"#,
+        r#"print(pcall(string.find, "a", "%f"))"#,
+        r#"print(pcall(string.rep))"#,
+        r#"print(pcall(string.gmatch, {}, "a"))"#,
+        r#"print(string.find(("a"):rep(5000), ("a"):rep(2500)))"#,
+        r#"print(#string.gsub(("ab "):rep(100000), "%s+", "_"))"#,
+    ];
+    for script in scripts {
+        let guarded = run_lua(Some(30), script);
+        let plain = run_lua(None, script);
+        assert_eq!(
+            (&guarded.0, &guarded.1, &guarded.2),
+            (&plain.0, &plain.1, &plain.2),
+            "{script}"
+        );
+    }
+}
+
+#[test]
+fn a_pattern_over_a_large_subject_finishes_under_a_deadline() {
+    let (status, stdout, stderr, _) = run_lua(
+        Some(30),
+        r#"local s = ("  word  "):rep(100000) print(#s:match("^%s*(.-)%s*$"), select(2, s:gsub("%s+", " ")))"#,
+    );
+    assert_eq!(status, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "799996\t100001");
+}
