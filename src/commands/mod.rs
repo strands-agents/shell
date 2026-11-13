@@ -24,6 +24,7 @@ mod rmdir;
 mod sed;
 mod sleep;
 mod sort;
+mod tac;
 mod tail;
 mod tee;
 mod touch;
@@ -98,6 +99,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "sed" => |os, args| Box::pin(sed::cmd_sed(os, args)),
             "sleep" => |os, args| Box::pin(sleep::cmd_sleep(os, args)),
             "sort" => |os, args| Box::pin(sort::cmd_sort(os, args)),
+            "tac" => |os, args| Box::pin(tac::cmd_tac(os, args)),
             "tail" => |os, args| Box::pin(tail::cmd_tail(os, args)),
             "tee" => |os, args| Box::pin(tee::cmd_tee(os, args)),
             "touch" => |os, args| Box::pin(touch::cmd_touch(os, args)),
