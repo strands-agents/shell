@@ -128,7 +128,7 @@ fn tool_list() -> Value {
     json!({"tools": [
         {
             "name": "shell",
-            "description": "Runs a command in the strands-shell virtual shell. Returns two text content blocks: content[0].text is stdout, content[1].text is stderr (both always present, empty string when a stream produced nothing). The exit code is in metadata.exit_code.",
+            "description": "Runs a command in the strands-shell virtual shell. Returns three text content blocks: content[0].text is stdout, content[1].text is stderr (both always present, empty string when a stream produced nothing), and content[2].text is the exit code as `exit code: N`. The exit code is also in metadata.exit_code.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -232,14 +232,18 @@ async fn exec_shell(kernel: &Arc<dyn Kernel>, proc: &mut Process, args: &Value) 
 
     let (exit_code, stdout, stderr) = exec::execute_capture(kernel.clone(), proc, command).await;
 
-    // Two-block result: content[0] is always stdout, content[1] is always
-    // stderr. Both blocks are always present (an empty stream is "text": "")
-    // so agents can reason about each stream independently without parsing a
-    // concatenated buffer. The exit code lives on metadata.exit_code.
+    // Three-block result: content[0] is always stdout, content[1] is always
+    // stderr, content[2] is always the exit code. The stream blocks are always
+    // present (an empty stream is "text": "") so agents can reason about each
+    // stream independently without parsing a concatenated buffer. The exit
+    // code gets its own trailing block, rather than a line appended to stderr,
+    // so the stream blocks stay byte-for-byte what the command wrote; it is
+    // in the text too because not every MCP client surfaces metadata.
     json!({
         "content": [
             {"type": "text", "text": stdout},
-            {"type": "text", "text": stderr}
+            {"type": "text", "text": stderr},
+            {"type": "text", "text": format!("exit code: {exit_code}")}
         ],
         "metadata": {"exit_code": exit_code}
     })
