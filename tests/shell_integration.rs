@@ -13670,3 +13670,19 @@ shell_test!(
     }
 );
 expect_status!(comm_needs_two_files, "comm /tmp/c1", 1);
+shell_test!(
+    comm_unsorted_but_fully_paired_input_is_silent,
+    "printf 'c\\nb\\na\\n' > /tmp/u3; comm /tmp/u3 /tmp/u3",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "\t\tc\n\t\tb\n\t\ta\n");
+        assert_eq!(out.stderr, "");
+        assert_eq!(out.status, 0);
+    }
+);
+shell_test!(
+    comm_empty_output_delimiter_is_nul,
+    &format!("{COMM_FILES}comm --output-delimiter= /tmp/c1 /tmp/c2"),
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "a\n\0\0b\n\0c\n\0\0d\n\0e\n");
+    }
+);
