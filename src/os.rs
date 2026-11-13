@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::task::{Context, Poll};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -238,6 +240,60 @@ pub struct Process {
     pub(crate) background_owner: std::sync::Weak<TaskList>,
     /// Set in a background job, whose pipeline stages abort with it.
     pub(crate) in_background_job: bool,
+    /// The generator behind `$RANDOM`, packed by [`RandomGen::pack`] so `$RANDOM` can expand
+    /// through a shared reference.
+    random: AtomicU64,
+}
+
+/// The generator behind `$RANDOM`, which gives bash's sequence for a given seed.
+#[derive(Clone, Copy)]
+struct RandomGen {
+    seed: u32,
+    /// The value last returned, which the next one never repeats.
+    last: u32,
+}
+
+impl RandomGen {
+    fn seeded(seed: u32) -> Self {
+        Self { seed, last: 0 }
+    }
+
+    fn pack(self) -> u64 {
+        u64::from(self.last) << 32 | u64::from(self.seed)
+    }
+
+    fn unpack(packed: u64) -> Self {
+        Self {
+            seed: packed as u32,
+            last: (packed >> 32) as u32,
+        }
+    }
+
+    /// A generator seeded from the clock and the host's hash keys, so unrelated shells differ.
+    fn fresh() -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        Self::seeded(RandomState::new().hash_one(nanos) as u32)
+    }
+
+    /// The next value, from 0 to 32767: bash's Park-Miller step, folded to 15 bits.
+    fn next(&mut self) -> u32 {
+        loop {
+            let last = if self.seed == 0 { 123459876 } else { self.seed };
+            let (h, l) = (i64::from(last / 127773), i64::from(last % 127773));
+            let mut t = 16807 * l - 2836 * h;
+            if t < 0 {
+                t += 0x7fff_ffff;
+            }
+            self.seed = t as u32;
+            let value = ((self.seed >> 16) ^ (self.seed & 0xffff)) & 0x7fff;
+            if value != self.last {
+                self.last = value;
+                return value;
+            }
+        }
+    }
 }
 
 /// A task that writes a host file after the last writer of its channel closes.
@@ -400,6 +456,7 @@ impl Process {
             host_writes: Default::default(),
             background_owner: std::sync::Weak::new(),
             in_background_job: false,
+            random: AtomicU64::new(RandomGen::fresh().pack()),
         }
     }
 
@@ -452,6 +509,7 @@ impl Process {
             host_writes: Default::default(),
             background_owner: std::sync::Weak::new(),
             in_background_job: false,
+            random: AtomicU64::new(RandomGen::fresh().pack()),
         }
     }
 
@@ -564,6 +622,8 @@ impl Process {
             host_writes: self.host_writes.clone(),
             background_owner: self.background_owner.clone(),
             in_background_job: self.in_background_job,
+            // A subshell draws its own values, as in bash, rather than repeating its parent's.
+            random: AtomicU64::new(RandomGen::fresh().pack()),
         }
     }
 
@@ -832,8 +892,26 @@ impl Process {
             self.err_msg(&format!("strands-shell: {key}: readonly variable"));
             return false;
         }
+        if key == "RANDOM" {
+            self.seed_random(&value.into());
+            return true;
+        }
         Arc::make_mut(&mut self.env).insert(key, value.into());
         true
+    }
+
+    /// The next value of `$RANDOM`, from 0 to 32767.
+    pub(crate) fn next_random(&self) -> u32 {
+        let mut random = RandomGen::unpack(self.random.load(Ordering::Relaxed));
+        let value = random.next();
+        self.random.store(random.pack(), Ordering::Relaxed);
+        value
+    }
+
+    /// Seed `$RANDOM` from an assigned value, where anything but an integer seeds 0.
+    fn seed_random(&mut self, value: &str) {
+        let seed = value.trim().parse::<i64>().unwrap_or(0);
+        *self.random.get_mut() = RandomGen::seeded(seed as u32).pack();
     }
 
     /// Remove an environment variable. Returns false if readonly.
