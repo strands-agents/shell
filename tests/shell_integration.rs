@@ -13608,3 +13608,69 @@ expect!(
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
 );
+
+// ── tac ─────────────────────────────────────────────────────────────
+
+expect_output!(
+    tac_reverses_stdin,
+    "printf 'a\\nb\\nc\\n' | tac",
+    "c\nb\na\n",
+    "",
+    0
+);
+expect_output!(
+    tac_keeps_an_unterminated_last_line_unterminated,
+    "printf 'a\\nb' | tac",
+    "ba\n",
+    "",
+    0
+);
+expect_output!(
+    tac_reverses_each_file_and_dash_is_stdin,
+    "printf '1\\n2\\n' > /tmp/t1; printf 'x\\ny\\n' | tac /tmp/t1 - /tmp/t1",
+    "2\n1\ny\nx\n2\n1\n",
+    "",
+    0
+);
+expect_output!(
+    tac_string_separator,
+    "printf 'aXYbXYc' | tac -s XY",
+    "cbXYaXY",
+    "",
+    0
+);
+expect_output!(
+    tac_separator_before,
+    "printf ',a,b,c' | tac -b -s ,",
+    ",c,b,a",
+    "",
+    0
+);
+shell_test!(
+    tac_reports_each_missing_file_and_continues,
+    "printf '1\\n2\\n' > /tmp/t1; tac /tmp/nope /tmp/nope2 /tmp/t1",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "2\n1\n");
+        assert!(out.stderr.contains("/tmp/nope:"), "stderr={:?}", out.stderr);
+        assert!(
+            out.stderr.contains("/tmp/nope2:"),
+            "stderr={:?}",
+            out.stderr
+        );
+        assert_eq!(out.status, 1);
+    }
+);
+expect_output!(
+    tac_finds_an_overlapping_separator_from_the_end,
+    "printf 'xaaay' | tac -s aa",
+    "yxaaa",
+    "",
+    0
+);
+expect_output!(
+    tac_second_dash_reads_nothing,
+    "printf 'a\\nb\\n' | tac - -",
+    "b\na\n",
+    "",
+    0
+);
