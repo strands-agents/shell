@@ -593,9 +593,10 @@ mod tests {
 
     #[test]
     fn timestamp_matches_gnu_header() {
-        // `TZ=UTC date -d @1762428896.123456789 '+%Y-%m-%d %H:%M:%S.%N %z'`.
-        let time = UNIX_EPOCH + Duration::new(1762428896, 123456789);
-        assert_eq!(timestamp(time), "2025-11-06 11:34:56.123456789 +0000");
+        // `TZ=UTC date -d @1762428896.1234567 '+%Y-%m-%d %H:%M:%S.%N %z'`. Windows keeps
+        // times in 100ns steps, so the nanoseconds stop at that precision.
+        let time = UNIX_EPOCH + Duration::new(1762428896, 123456700);
+        assert_eq!(timestamp(time), "2025-11-06 11:34:56.123456700 +0000");
     }
 
     #[test]
