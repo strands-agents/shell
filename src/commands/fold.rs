@@ -184,9 +184,15 @@ async fn cmd_fold(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut status = 0;
     // Stderr is taken once, on the first error, so later errors are reported too.
     let mut stderr = None;
+    let mut stdin_taken = false;
     for path in &files {
         let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if path == "-" {
-            Box::new(io::stdin()?)
+            // A second `-` finds standard input already read to the end.
+            if std::mem::replace(&mut stdin_taken, true) {
+                Box::new(tokio::io::empty())
+            } else {
+                Box::new(io::stdin()?)
+            }
         } else {
             match io::open(os, path, OpenFlags::read()).await {
                 Ok(fd) => Box::new(io::take_reader(fd)?),

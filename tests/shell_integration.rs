@@ -13690,3 +13690,10 @@ expect_output!(
     "",
     0
 );
+expect_output!(
+    fold_second_dash_reads_nothing,
+    "printf 'abc\\n' | fold -w 2 - -",
+    "ab\nc\n",
+    "",
+    0
+);
