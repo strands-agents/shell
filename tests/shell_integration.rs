@@ -4402,6 +4402,169 @@ expect!(
     "/tmp/lsrecursive:\na\nb\n\n/tmp/lsrecursive/a:\nbig\nsmall\n\n/tmp/lsrecursive/b:"
 );
 
+// ── stat ────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn stat_default_output() {
+    let dir = ls_fixture("stat_default", &[("f", 1536, LS_T0)]);
+    let out = run_ls_fixture(&dir, "stat /fx/f");
+    assert_eq!(
+        out.stdout,
+        "  File: /fx/f\n  Size: 1536      \tBlocks: 3          IO Block: 4096   regular file\n\
+         Device: 0h/0d\tInode: 0           Links: 1\n\
+         Access: (0644/-rw-r--r--)  Uid: ( 1000/    lash)   Gid: ( 1000/    lash)\n\
+         Access: 2020-01-01 00:00:00.000000000 +0000\n\
+         Modify: 2020-01-01 00:00:00.000000000 +0000\n\
+         Change: 2020-01-01 00:00:00.000000000 +0000\n Birth: -\n"
+    );
+    assert_eq!(out.stderr, "");
+    assert_eq!(out.status, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn stat_format_specifiers() {
+    let dir = ls_fixture("stat_format", &[("f", 1536, LS_T0), ("e", 0, LS_T0)]);
+    let out = run_ls_fixture(
+        &dir,
+        "stat -c '%n|%s|%F|%a|%A|%U|%G|%u|%g|%Y|%y|%X|%Z|%b|%B|%h|%o|%f|%w|%W|%q' /fx/f; \
+         stat --format='%F %5s|%-5s|%05s' /fx/e /fx/f",
+    );
+    assert_eq!(
+        out.stdout,
+        "/fx/f|1536|regular file|644|-rw-r--r--|lash|lash|1000|1000|1577836800|\
+         2020-01-01 00:00:00.000000000 +0000|1577836800|1577836800|3|512|1|4096|81a4|-|0|?\n\
+         regular empty file     0|0    |00000\n\
+         regular file  1536|1536 |01536\n"
+    );
+    assert_eq!(out.status, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn stat_precision_and_alternate_form() {
+    let dir = ls_fixture("stat_precision", &[("f", 5, LS_T0)]);
+    let out = run_ls_fixture(
+        &dir,
+        "stat -c '%.3Y|%.Y|%.0Y|%.12X|%#a|%#.3a|%.3a|%.3n|%#f|%#t|%.6s|%-#8a|' /fx/f",
+    );
+    // GNU prints these for a file whose mtime has no fractional seconds.
+    assert_eq!(
+        out.stdout,
+        "1577836800.000|1577836800.000000000|1577836800|1577836800.000000000000|\
+         0644|0644|644|/fx/f|0x81a4|0|000005|0644    |\n"
+    );
+    let out = run_ls_fixture(
+        &dir,
+        "stat -c '%+s|% s|%+a|%+06s|% 06s|%+-5s|%+f|%+h|%+u|% b|%+Y' /fx/f",
+    );
+    assert_eq!(
+        out.stdout,
+        "+5| 5|644|+00005| 00005|+5   |81a4|1|1000|1|+1577836800\n"
+    );
+}
+
+shell_test!(
+    stat_format_ending_in_percent_keeps_the_newline,
+    "printf x > /tmp/spc; stat -c '100%' /tmp/spc /tmp/spc; stat -c '%s%' /tmp/spc",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "100%\n100%\n1%\n");
+        assert_eq!(out.status, 0);
+    }
+);
+
+shell_test!(
+    stat_rejects_a_cut_short_directive,
+    "printf x > /tmp/scd; stat -c '%5' /tmp/scd; echo $?; stat --printf '%-' /tmp/scd",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "1\n");
+        assert_eq!(
+            out.stderr,
+            "stat: '%5': invalid directive\nstat: '%-': invalid directive\n"
+        );
+        assert_eq!(out.status, 1);
+    }
+);
+
+expect!(
+    stat_caps_a_huge_field_width,
+    "printf x > /tmp/shw; stat -c '%99999999999s' /tmp/shw | wc -c | tr -d ' '; \
+     stat -c '%-99999999999999999999999s|' /tmp/shw | wc -c | tr -d ' '",
+    "65536\n65537"
+);
+
+#[cfg(unix)]
+#[test]
+fn stat_terse() {
+    let dir = ls_fixture("stat_terse", &[("f", 1536, LS_T0)]);
+    let out = run_ls_fixture(&dir, "stat -t /fx/f");
+    assert_eq!(
+        out.stdout,
+        "/fx/f 1536 3 81a4 1000 1000 0 0 1 0 0 1577836800 1577836800 1577836800 0 4096\n"
+    );
+}
+
+expect!(
+    stat_directory_and_symlink,
+    "mkdir /tmp/sd; printf hello > /tmp/sd/f; ln -s f /tmp/sd/l; \
+     stat -c '%n %F %h %b' /tmp/sd /tmp/sd/l; stat -c %N /tmp/sd/l; stat /tmp/sd/l | head -1",
+    "/tmp/sd directory 2 0\n/tmp/sd/l symbolic link 1 0\n'/tmp/sd/l' -> 'f'\n  File: /tmp/sd/l -> f"
+);
+expect!(
+    stat_dereference_follows_links,
+    "printf hello > /tmp/sdf; ln -s sdf /tmp/sdl; stat -L -c '%n %F %s' /tmp/sdl; \
+     stat --dereference /tmp/sdl | head -1",
+    "/tmp/sdl regular file 5\n  File: /tmp/sdl"
+);
+expect!(
+    stat_quotes_names_like_gnu,
+    "cd /tmp; touch 'a b' \"it's\"; stat -c %N 'a b' \"it's\"",
+    "'a b'\n\"it's\""
+);
+expect!(
+    stat_character_device,
+    "stat /dev/null | sed -n 2p; stat /dev/null | grep -c 'Links: 1     Device type: 0,0$'",
+    "Size: 0         \tBlocks: 0          IO Block: 4096   character special file\n1"
+);
+
+shell_test!(
+    stat_printf_interprets_escapes_without_newline,
+    "printf hello > /tmp/sp; stat --printf '%s\\t\\101\\x42\\q|' /tmp/sp /tmp/sp",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "5\tABq|5\tABq|");
+        assert_eq!(
+            out.stderr,
+            "stat: warning: unrecognized escape '\\q'\n\
+             stat: warning: unrecognized escape '\\q'\n"
+        );
+        assert_eq!(out.status, 0);
+    }
+);
+
+shell_test!(
+    stat_missing_file_fails_but_reports_the_rest,
+    "printf x > /tmp/sm; stat -c %n /nope /tmp/sm",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "/tmp/sm\n");
+        assert_eq!(
+            out.stderr,
+            "stat: cannot stat '/nope': No such file or directory\n"
+        );
+        assert_eq!(out.status, 1);
+    }
+);
+
+shell_test!(
+    stat_missing_operand,
+    "stat",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert!(out.stderr.starts_with("stat: missing operand\n"));
+        assert_eq!(out.status, 1);
+    }
+);
+
 // ── tail coverage ───────────────────────────────────────────────────
 
 expect!(
