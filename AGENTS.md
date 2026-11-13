@@ -103,7 +103,7 @@ All `use` statements go at the **top of the file** (Rust modules, Python wrapper
 ### Adding commands
 
 - A coreutils-style command goes in `src/commands/` and is registered with `#[command("name")]`.
-- A state-mutating builtin goes in `src/builtins/` and is added to the `lookup()` match in `src/builtins/mod.rs`.
+- A state-mutating builtin goes in `src/builtins/` and is added to the `lookup()` match in `src/builtins/mod.rs`, with a `Topic` in `src/builtins/help.rs` for its `help` text.
 - If a command should appear under WASM too, make sure it's reachable through the WASM lookup path (the macro handles native registration via `inventory` automatically).
 
 ### Bindings stay in sync
@@ -143,7 +143,7 @@ PR titles must follow [Conventional Commits](https://www.conventionalcommits.org
 ## Things to Do
 
 - Keep imports at the top of every file.
-- Register coreutils-style commands with `#[command("name")]`; add builtins to `src/builtins/mod.rs`.
+- Register coreutils-style commands with `#[command("name")]`; add builtins to `src/builtins/mod.rs` and give each a `Topic` in `src/builtins/help.rs`.
 - Keep `src/python.rs` and `src/js.rs` in sync when changing the binding surface.
 - Run `cargo fmt` and `cargo clippy --workspace --all-targets` on any Rust you touch.
 - Run the test suite for the bindings you changed before opening a PR.
