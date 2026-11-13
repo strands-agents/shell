@@ -64,11 +64,16 @@ async fn cmd_rev(os: &dyn Kernel, args: &[String]) -> CommandResult {
         return Ok(0);
     }
     let mut status = 0;
+    // Stderr is taken once, on the first error, so later errors are reported too.
+    let mut stderr = None;
     for path in &files {
         let reader = match io::open(os, path, OpenFlags::read()).await {
             Ok(fd) => io::take_reader(fd)?,
             Err(e) => {
-                let mut ew = io::stderr()?;
+                let ew = match &mut stderr {
+                    Some(ew) => ew,
+                    None => stderr.insert(io::stderr()?),
+                };
                 wprintln!(ew, "rev: cannot open {path}: {e}")?;
                 status = 1;
                 continue;

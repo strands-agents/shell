@@ -13643,11 +13643,16 @@ fn rev_keeps_invalid_bytes() {
     }));
 }
 shell_test!(
-    rev_reports_a_missing_file_and_continues,
-    "printf 'ab\\n' > /tmp/r1; rev /tmp/r1 /tmp/nope /tmp/r1",
+    rev_reports_each_missing_file_and_continues,
+    "printf 'ab\\n' > /tmp/r1; rev /tmp/r1 /tmp/nope /tmp/nope2 /tmp/r1",
     |_shell: &mut Shell, out: strands_shell::Output| {
         assert_eq!(out.stdout, "ba\nba\n");
-        assert!(out.stderr.contains("/tmp/nope"), "stderr={:?}", out.stderr);
+        assert!(out.stderr.contains("/tmp/nope:"), "stderr={:?}", out.stderr);
+        assert!(
+            out.stderr.contains("/tmp/nope2:"),
+            "stderr={:?}",
+            out.stderr
+        );
         assert_eq!(out.status, 1);
     }
 );
