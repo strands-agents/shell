@@ -128,7 +128,7 @@ fn tool_list() -> Value {
     json!({"tools": [
         {
             "name": "shell",
-            "description": "Runs a command in the strands-shell virtual shell. Returns three text content blocks: content[0].text is stdout, content[1].text is stderr (both always present, empty string when a stream produced nothing), and content[2].text is the exit code as `exit code: N`. The exit code is also in metadata.exit_code.",
+            "description": "Runs a command in the strands-shell virtual shell. Returns three text blocks, in order: stdout, stderr, then `exit code: N`. stdout and stderr are exactly what the command wrote; an empty block means that stream produced nothing.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
