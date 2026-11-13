@@ -536,7 +536,9 @@ pub fn builtin_find<'a>(
         // `-exec CMD ;` counts as true whatever CMD returns, so a -delete
         // after it would remove every path the walk reaches.
         if depth_first && contains(&expr, |e| matches!(e, Expr::Exec(_, false))) {
-            proc.err_msg("find: -delete cannot be combined with -exec ... ;");
+            proc.err_msg(
+                "find: -delete with -exec ... ; not supported; use grep -rl PATTERN DIR | xargs rm",
+            );
             return Ok(1);
         }
         let mut failed = false;

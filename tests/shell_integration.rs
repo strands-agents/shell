@@ -2331,7 +2331,7 @@ fn find_delete_refuses_exec_each() {
     assert_eq!(out.stdout, "st=1\na\n");
     assert_eq!(
         out.stderr.trim(),
-        "find: -delete cannot be combined with -exec ... ;"
+        "find: -delete with -exec ... ; not supported; use grep -rl PATTERN DIR | xargs rm"
     );
 }
 
