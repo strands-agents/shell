@@ -3349,6 +3349,51 @@ expect!(
     "/usr/local/bin"
 );
 
+// ── whoami ──────────────────────────────────────────────────────────
+
+expect!(whoami_default, "whoami", "lash");
+expect!(whoami_follows_user, "USER=agent whoami", "agent");
+expect!(whoami_unset_user, "unset USER; whoami", "lash");
+expect!(whoami_empty_user, "USER= whoami", "lash");
+expect!(whoami_help, "whoami --help | head -1", "Usage: whoami");
+shell_test!(
+    whoami_extra_operand,
+    "whoami x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("whoami: unexpected argument \"x\""),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    whoami_bad_option,
+    "whoami -x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("whoami: invalid option"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+
+#[test]
+fn whoami_uses_builder_user() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().env("USER", "agent").build().unwrap();
+        let out = shell.run("whoami").await;
+        assert_eq!(out.stdout, "agent\n");
+        assert_eq!(out.status, 0);
+    }));
+}
+
 // ── cat options ─────────────────────────────────────────────────────
 
 #[test]

@@ -31,6 +31,7 @@ mod tr;
 mod r#true;
 mod uniq;
 mod wc;
+mod whoami;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -105,6 +106,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "true" => |os, args| Box::pin(r#true::cmd_true(os, args)),
             "uniq" => |os, args| Box::pin(uniq::cmd_uniq(os, args)),
             "wc" => |os, args| Box::pin(wc::cmd_wc(os, args)),
+            "whoami" => |os, args| Box::pin(whoami::cmd_whoami(os, args)),
             _ => return None,
         };
         Some(func)
