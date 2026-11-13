@@ -1,0 +1,5 @@
+status: 0
+stderr: non-empty
+--- stdout
+b1946ac92492d2347c6235b4d2611184  a
+status=1

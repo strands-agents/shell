@@ -1,0 +1,19 @@
+status: 0
+stderr: empty
+--- stdout
+a: OK
+bin: OK
+status=0
+status=0
+a: OK
+bin: OK
+status=0
+a: FAILED
+bin: OK
+status=1
+a: FAILED
+status=1
+status=1
+a: FAILED
+bin: FAILED open or read
+status=1

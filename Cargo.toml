@@ -45,6 +45,8 @@ url = "2"
 jaq-core = "2"
 jaq-std = { version = "2", features = ["format", "log", "math", "regex", "time", "std"] }
 jaq-json = { version = "1", features = ["serde_json"] }
+md-5 = "0.11"
+digest = { version = "0.11", features = ["alloc"] }
 
 # ----- Native-only dependencies -----
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

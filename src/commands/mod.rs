@@ -1,5 +1,6 @@
 mod basename;
 mod cat;
+mod checksum;
 mod chmod;
 mod cp;
 mod curl;
@@ -14,6 +15,7 @@ mod head;
 mod jq;
 mod ln;
 mod ls;
+mod md5sum;
 mod mkdir;
 mod mktemp;
 mod mv;
@@ -88,6 +90,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "jq" => |os, args| Box::pin(jq::cmd_jq(os, args)),
             "ln" => |os, args| Box::pin(ln::cmd_ln(os, args)),
             "ls" => |os, args| Box::pin(ls::cmd_ls(os, args)),
+            "md5sum" => |os, args| Box::pin(md5sum::cmd_md5sum(os, args)),
             "mkdir" => |os, args| Box::pin(mkdir::cmd_mkdir(os, args)),
             "mktemp" => |os, args| Box::pin(mktemp::cmd_mktemp(os, args)),
             "mv" => |os, args| Box::pin(mv::cmd_mv(os, args)),
