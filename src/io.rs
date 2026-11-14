@@ -41,7 +41,13 @@ pub fn stdout() -> std::io::Result<FdWriter> {
 
 /// Take stdin (fd 0) from the current process.
 pub fn stdin() -> std::io::Result<FdReader> {
-    CURRENT_PROCESS.with(|p| p.borrow_mut().take_reader(STDIN))
+    CURRENT_PROCESS.with(|p| {
+        let mut p = p.borrow_mut();
+        let reader = p.take_reader(STDIN)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let reader = reader.until(p.deadline);
+        Ok(reader)
+    })
 }
 
 /// Take stderr (fd 2) from the current process.
