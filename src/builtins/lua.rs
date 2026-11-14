@@ -11,6 +11,8 @@ use crate::exec;
 use crate::io as sio;
 use crate::os::{self, Kernel, OpenFlags, Process};
 
+use super::lua_pattern;
+
 pub fn builtin_lua<'a>(
     os: &'a dyn Kernel,
     proc: &'a mut Process,
@@ -192,6 +194,11 @@ pub fn setup_lua_vm(
             },
         )
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("lua: {e}").into() })?;
+
+        // The hook cannot interrupt a C pattern match, so guard those calls against the deadline.
+        lua_pattern::install(&lua).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("lua: {e}").into()
+        })?;
     }
 
     let kernel = sio::kernel();
