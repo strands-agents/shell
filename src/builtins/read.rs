@@ -13,6 +13,8 @@ pub fn builtin_read<'a>(
     Box::pin(async move {
         let mut raw = false;
         let mut prompt = String::new();
+        // None means the default newline delimiter.
+        let mut delim: Option<u8> = None;
         let mut vars = Vec::new();
         let mut i = 0;
         while i < args.len() {
@@ -23,6 +25,15 @@ pub fn builtin_read<'a>(
                     if i < args.len() {
                         prompt = args[i].clone();
                     }
+                }
+                "-d" => {
+                    i += 1;
+                    if i >= args.len() {
+                        proc.err_msg("strands-shell: read: -d: option requires an argument");
+                        return Ok(2);
+                    }
+                    // An empty delimiter is NUL, as in bash.
+                    delim = Some(args[i].as_bytes().first().copied().unwrap_or(0));
                 }
                 _ => vars.push(args[i].as_str()),
             }
@@ -37,18 +48,21 @@ pub fn builtin_read<'a>(
             w.write_all(prompt.as_bytes()).await?;
         }
 
+        let stop = delim.unwrap_or(b'\n');
         let mut reader = io::stdin()?;
         let mut line = String::new();
         // Read byte-by-byte to avoid BufReader consuming extra data
         let mut byte = [0u8; 1];
         let mut n = 0usize;
+        let mut found_delim = false;
         loop {
             use tokio::io::AsyncReadExt;
             match reader.read(&mut byte).await {
                 Ok(0) => break,
                 Ok(_) => {
                     n += 1;
-                    if byte[0] == b'\n' {
+                    if byte[0] == stop {
+                        found_delim = true;
                         break;
                     }
                     line.push(byte[0] as char);
@@ -68,6 +82,18 @@ pub fn builtin_read<'a>(
         io::with_process(|p| p.restore_fd(0, reader.into_fd_kind()));
         if n == 0 {
             return Ok(1); // EOF
+        }
+        // A custom delimiter: bash trims trailing IFS from the record, so
+        // `read -d ''` of `a\nb\n` with the default IFS yields `a\nb`.
+        if delim.is_some() {
+            let ifs_chars = proc
+                .env
+                .get("IFS")
+                .cloned()
+                .unwrap_or_else(|| " \t\n".into());
+            line = line
+                .trim_end_matches(|c: char| ifs_chars.contains(c))
+                .to_string();
         }
 
         // Strip trailing newline
@@ -115,6 +141,11 @@ pub fn builtin_read<'a>(
                 }
             }
         }
-        Ok(0)
+        // EOF before the delimiter still assigns what was read, and returns 1.
+        if delim.is_some() && !found_delim {
+            Ok(1)
+        } else {
+            Ok(0)
+        }
     })
 }
