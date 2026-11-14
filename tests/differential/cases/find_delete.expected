@@ -1,0 +1,8 @@
+status: 0
+stderr: non-empty
+--- stdout
+status=1
+d
+d/b.log
+d/keep
+start removed

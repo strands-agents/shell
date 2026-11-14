@@ -87,6 +87,7 @@ enum Expr {
     Print,
     Print0,
     Exec(Vec<String>, bool), // (cmd_template, plus_mode)
+    Delete,
     True,
     /// `-size`: comparison, count, unit in bytes.
     Size(Cmp, u64, u64),
@@ -273,6 +274,10 @@ fn parse_primary(args: &[String], pos: &mut usize) -> Result<Expr, String> {
             *pos += 1;
             Ok(Expr::Print0)
         }
+        "-delete" => {
+            *pos += 1;
+            Ok(Expr::Delete)
+        }
         "-size" => {
             *pos += 1;
             parse_size(&need_arg(args, pos)?)
@@ -327,8 +332,10 @@ fn eval_expr(
     name: &str,
     st: &crate::os::FileStat,
     is_empty_dir: bool,
+    delete_hit: &mut bool,
 ) -> (bool, bool) {
-    // Returns (matched, has_action)
+    // Returns (matched, has_action), and sets `delete_hit` when evaluation
+    // reaches -delete.
     match expr {
         Expr::True => (true, false),
         Expr::Name(pat) => (glob_match(pat.as_bytes(), name.as_bytes()), false),
@@ -356,23 +363,23 @@ fn eval_expr(
             (m, false)
         }
         Expr::Not(inner) => {
-            let (m, p) = eval_expr(inner, path, name, st, is_empty_dir);
+            let (m, p) = eval_expr(inner, path, name, st, is_empty_dir, delete_hit);
             (!m, p)
         }
         Expr::And(a, b) => {
-            let (ma, pa) = eval_expr(a, path, name, st, is_empty_dir);
+            let (ma, pa) = eval_expr(a, path, name, st, is_empty_dir, delete_hit);
             if !ma {
                 return (false, pa);
             }
-            let (mb, pb) = eval_expr(b, path, name, st, is_empty_dir);
+            let (mb, pb) = eval_expr(b, path, name, st, is_empty_dir, delete_hit);
             (mb, pa || pb)
         }
         Expr::Or(a, b) => {
-            let (ma, pa) = eval_expr(a, path, name, st, is_empty_dir);
+            let (ma, pa) = eval_expr(a, path, name, st, is_empty_dir, delete_hit);
             if ma {
                 return (true, pa);
             }
-            let (mb, pb) = eval_expr(b, path, name, st, is_empty_dir);
+            let (mb, pb) = eval_expr(b, path, name, st, is_empty_dir, delete_hit);
             (mb, pa || pb)
         }
         Expr::Size(cmp, n, unit) => {
@@ -403,12 +410,26 @@ fn eval_expr(
             (m, false)
         }
         Expr::Print | Expr::Print0 | Expr::Exec(..) => (true, true),
+        Expr::Delete => {
+            *delete_hit = true;
+            (true, true)
+        }
     }
+}
+
+/// Whether `expr` holds a node for which `want` is true.
+fn contains(expr: &Expr, want: fn(&Expr) -> bool) -> bool {
+    want(expr)
+        || match expr {
+            Expr::Not(e) => contains(e, want),
+            Expr::And(a, b) | Expr::Or(a, b) => contains(a, want) || contains(b, want),
+            _ => false,
+        }
 }
 
 fn has_action(expr: &Expr) -> bool {
     match expr {
-        Expr::Print | Expr::Print0 | Expr::Exec(..) => true,
+        Expr::Print | Expr::Print0 | Expr::Exec(..) | Expr::Delete => true,
         Expr::Not(e) => has_action(e),
         Expr::And(a, b) | Expr::Or(a, b) => has_action(a) || has_action(b),
         _ => false,
@@ -510,6 +531,17 @@ pub fn builtin_find<'a>(
         }
 
         let default_print = !has_action(&expr);
+        // -delete implies -depth: a directory is visited after its entries.
+        let depth_first = contains(&expr, |e| matches!(e, Expr::Delete));
+        // `-exec CMD ;` counts as true whatever CMD returns, so a -delete
+        // after it would remove every path the walk reaches.
+        if depth_first && contains(&expr, |e| matches!(e, Expr::Exec(_, false))) {
+            proc.err_msg(
+                "find: -delete with -exec ... ; not supported; use grep -rl PATTERN DIR | xargs rm",
+            );
+            return Ok(1);
+        }
+        let mut failed = false;
         let mut w = io::stdout()?;
         let mut ew = io::stderr().ok();
         let mut exec_plus_matches: Vec<String> = Vec::new();
@@ -527,8 +559,10 @@ pub fn builtin_find<'a>(
                 min_depth,
                 0,
                 default_print,
+                depth_first,
                 &mut exec_plus_matches,
                 &mut exec_plus_cmd,
+                &mut failed,
             )
             .await?;
         }
@@ -558,10 +592,11 @@ pub fn builtin_find<'a>(
             }
         }
 
-        Ok(0)
+        Ok(if failed { 1 } else { 0 })
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk<'a>(
     os: &'a dyn Kernel,
     proc: &'a mut Process,
@@ -573,82 +608,156 @@ fn walk<'a>(
     min_depth: usize,
     depth: usize,
     default_print: bool,
+    depth_first: bool,
     exec_plus_matches: &'a mut Vec<String>,
     exec_plus_cmd: &'a mut Option<Vec<String>>,
+    failed: &'a mut bool,
 ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + 'a>> {
     Box::pin(async move {
         let st = io::lstat(os, path).await;
         if !st.exists {
             return Ok(());
         }
+        let visit_here = depth >= min_depth;
+        if visit_here && !depth_first {
+            visit(
+                os,
+                proc,
+                w,
+                ew,
+                path,
+                &st,
+                expr,
+                default_print,
+                exec_plus_matches,
+                exec_plus_cmd,
+                failed,
+            )
+            .await?;
+        }
 
-        let name = path.rsplit('/').next().unwrap_or(path);
-        let is_empty_dir = if st.is_dir {
-            io::list_dir(os, path)
-                .await
-                .map(|e| e.is_empty())
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
-        if depth >= min_depth {
-            let (matched, has_act) = eval_expr(expr, path, name, &st, is_empty_dir);
-            if matched {
-                if has_act {
-                    do_actions(
-                        os,
-                        proc,
-                        w,
-                        ew,
-                        expr,
-                        path,
-                        exec_plus_matches,
-                        exec_plus_cmd,
-                    )
-                    .await?;
-                } else if default_print {
-                    w.write_all(path.as_bytes()).await?;
-                    w.write_all(b"\n").await?;
-                }
+        let at_max = matches!(max_depth, Some(max) if depth >= max);
+        if st.is_dir
+            && !at_max
+            && let Ok(entries) = io::list_dir(os, path).await
+        {
+            for entry in &entries {
+                let child = if path == "." {
+                    format!("./{}", entry.name)
+                } else if path.ends_with('/') {
+                    format!("{path}{}", entry.name)
+                } else {
+                    format!("{path}/{}", entry.name)
+                };
+                walk(
+                    os,
+                    proc,
+                    w,
+                    ew,
+                    &child,
+                    expr,
+                    max_depth,
+                    min_depth,
+                    depth + 1,
+                    default_print,
+                    depth_first,
+                    exec_plus_matches,
+                    exec_plus_cmd,
+                    failed,
+                )
+                .await?;
             }
         }
 
-        if st.is_dir {
-            if let Some(max) = max_depth
-                && depth >= max
-            {
-                return Ok(());
-            }
-            if let Ok(entries) = io::list_dir(os, path).await {
-                for entry in &entries {
-                    let child = if path == "." {
-                        format!("./{}", entry.name)
-                    } else if path.ends_with('/') {
-                        format!("{path}{}", entry.name)
-                    } else {
-                        format!("{path}/{}", entry.name)
-                    };
-                    walk(
-                        os,
-                        proc,
-                        w,
-                        ew,
-                        &child,
-                        expr,
-                        max_depth,
-                        min_depth,
-                        depth + 1,
-                        default_print,
-                        exec_plus_matches,
-                        exec_plus_cmd,
-                    )
-                    .await?;
-                }
-            }
+        if visit_here && depth_first {
+            visit(
+                os,
+                proc,
+                w,
+                ew,
+                path,
+                &st,
+                expr,
+                default_print,
+                exec_plus_matches,
+                exec_plus_cmd,
+                failed,
+            )
+            .await?;
         }
         Ok(())
     })
+}
+
+/// Evaluate `expr` for `path`, run the actions it reaches, and remove the
+/// path if it reaches -delete.
+#[allow(clippy::too_many_arguments)]
+async fn visit(
+    os: &dyn Kernel,
+    proc: &mut Process,
+    w: &mut crate::os::FdWriter,
+    ew: &mut Option<crate::os::FdWriter>,
+    path: &str,
+    st: &crate::os::FileStat,
+    expr: &Expr,
+    default_print: bool,
+    exec_plus_matches: &mut Vec<String>,
+    exec_plus_cmd: &mut Option<Vec<String>>,
+    failed: &mut bool,
+) -> std::io::Result<()> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    // Listed now, so under -delete a directory emptied of its entries counts
+    // as empty.
+    let is_empty_dir = if st.is_dir {
+        io::list_dir(os, path)
+            .await
+            .map(|e| e.is_empty())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    let mut delete_hit = false;
+    let (matched, has_act) = eval_expr(expr, path, name, st, is_empty_dir, &mut delete_hit);
+    if matched {
+        if has_act {
+            do_actions(
+                os,
+                proc,
+                w,
+                ew,
+                expr,
+                path,
+                exec_plus_matches,
+                exec_plus_cmd,
+            )
+            .await?;
+        } else if default_print {
+            w.write_all(path.as_bytes()).await?;
+            w.write_all(b"\n").await?;
+        }
+    }
+
+    // Like GNU find, -delete leaves the starting point "." in place and
+    // refuses any other path that ends in "." or "..".
+    let dot = matches!(
+        path.trim_end_matches('/').rsplit('/').next(),
+        Some("." | "..")
+    );
+    if delete_hit && path != "." {
+        let removed = if dot {
+            Err(std::io::Error::other("Invalid argument"))
+        } else if st.is_dir {
+            io::remove_dir(os, path).await
+        } else {
+            io::remove_file(os, path).await
+        };
+        if let Err(e) = removed {
+            proc.err_msg(&format!("find: cannot delete '{path}': {e}"));
+            *failed = true;
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

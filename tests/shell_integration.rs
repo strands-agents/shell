@@ -2237,6 +2237,150 @@ fn find_newer_missing_reference_fails() {
     );
 }
 
+// ── find -delete ─────────────────────────────────────────────────────
+
+#[test]
+fn find_delete_removes_entries_before_their_directory() {
+    let out = find_run(
+        "mkdir -p /tmp/fdl/a/b && touch /tmp/fdl/a/b/c /tmp/fdl/x",
+        "find /tmp/fdl -delete; echo st=$?; test -e /tmp/fdl || echo gone",
+    );
+    assert_eq!(out.stdout, "st=0\ngone\n");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn find_delete_visits_entries_first_under_print() {
+    let out = find_run(
+        "mkdir -p /tmp/fdo/k && touch /tmp/fdo/k/l",
+        "find /tmp/fdo -print -delete",
+    );
+    assert_eq!(out.stdout, "/tmp/fdo/k/l\n/tmp/fdo/k\n/tmp/fdo\n");
+    assert_eq!(out.status, 0, "{}", out.stderr);
+}
+
+#[test]
+fn find_delete_with_predicates_keeps_the_rest_and_prints_nothing() {
+    let out = find_run(
+        "mkdir -p /tmp/fdp/sub && touch /tmp/fdp/a.log /tmp/fdp/b.txt /tmp/fdp/sub/c.log",
+        "find /tmp/fdp -type f -name '*.log' -delete; find /tmp/fdp | sort",
+    );
+    assert_eq!(out.stdout, "/tmp/fdp\n/tmp/fdp/b.txt\n/tmp/fdp/sub\n");
+    assert_eq!(out.status, 0, "{}", out.stderr);
+}
+
+#[test]
+fn find_delete_reports_a_non_empty_directory_and_continues() {
+    let out = find_run(
+        "mkdir -p /tmp/fdn/d1/x /tmp/fdn/d2 && touch /tmp/fdn/d1/x/f",
+        "find /tmp/fdn -name 'd*' -delete; echo st=$?; find /tmp/fdn | sort",
+    );
+    assert_eq!(
+        out.stdout,
+        "st=1\n/tmp/fdn\n/tmp/fdn/d1\n/tmp/fdn/d1/x\n/tmp/fdn/d1/x/f\n"
+    );
+    assert_eq!(
+        out.stderr.trim(),
+        "find: cannot delete '/tmp/fdn/d1': directory not empty"
+    );
+}
+
+#[test]
+fn find_delete_empty_removes_directories_emptied_below_them() {
+    let out = find_run(
+        "mkdir -p /tmp/fde/a/b/c /tmp/fde/keep && echo x > /tmp/fde/keep/f",
+        "find /tmp/fde -empty -delete; find /tmp/fde | sort",
+    );
+    assert_eq!(out.stdout, "/tmp/fde\n/tmp/fde/keep\n/tmp/fde/keep/f\n");
+    assert_eq!(out.status, 0, "{}", out.stderr);
+}
+
+#[test]
+fn find_delete_leaves_the_dot_starting_point() {
+    let out = find_run(
+        "mkdir -p /tmp/fdd/a && touch /tmp/fdd/a/b /tmp/fdd/c",
+        "cd /tmp/fdd && find . -delete; echo st=$?; ls /tmp/fdd; test -d /tmp/fdd && echo kept",
+    );
+    assert_eq!(out.stdout, "st=0\nkept\n");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn find_delete_refuses_other_paths_ending_in_dot() {
+    for start in ["./", "./.", ".//", ".."] {
+        let out = find_run(
+            "mkdir -p /tmp/fdx/w/a && touch /tmp/fdx/w/a/b",
+            &format!(
+                "cd /tmp/fdx/w && find {start} -maxdepth 0 -delete; echo st=$?; test -d /tmp/fdx/w && echo kept"
+            ),
+        );
+        assert_eq!(out.stdout, "st=1\nkept\n", "{start}");
+        assert_eq!(
+            out.stderr.trim(),
+            format!("find: cannot delete '{start}': Invalid argument"),
+        );
+    }
+}
+
+#[test]
+fn find_delete_refuses_exec_each() {
+    let out = find_run(
+        "mkdir -p /tmp/fdc && touch /tmp/fdc/a",
+        "find /tmp/fdc -type f -exec false ';' -delete; echo st=$?; ls /tmp/fdc",
+    );
+    assert_eq!(out.stdout, "st=1\na\n");
+    assert_eq!(
+        out.stderr.trim(),
+        "find: -delete with -exec ... ; not supported; use grep -rl PATTERN DIR | xargs rm"
+    );
+}
+
+#[test]
+fn find_delete_reports_a_kernel_refusal() {
+    let out = find_run(
+        "mkdir -p /tmp/fdr/s && touch /tmp/fdr/s/t /tmp/fdr/u && chmod 555 /tmp/fdr/s",
+        "find /tmp/fdr /bin/cat -delete; echo st=$?; find /tmp/fdr | sort; test -e /bin/cat && echo kept",
+    );
+    assert_eq!(
+        out.stdout,
+        "st=1\n/tmp/fdr\n/tmp/fdr/s\n/tmp/fdr/s/t\nkept\n"
+    );
+    let errors: Vec<&str> = out.stderr.lines().collect();
+    assert_eq!(errors.len(), 4, "{}", out.stderr);
+    for (line, path) in errors
+        .iter()
+        .zip(["/tmp/fdr/s/t", "/tmp/fdr/s", "/tmp/fdr", "/bin/cat"])
+    {
+        assert!(
+            line.starts_with(&format!("find: cannot delete '{path}': ")),
+            "{}",
+            out.stderr
+        );
+    }
+}
+
+#[test]
+fn find_delete_on_a_readonly_bind_fails() {
+    let dir = TestDir::new("lsh_find_delete_ro");
+    std::fs::write(dir.join("keep.txt"), "x").unwrap();
+    let (rt, local) = rt();
+    let out = rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .bind_direct_readonly(dir.to_str().unwrap(), "/mnt/ro")
+            .build()
+            .unwrap();
+        shell.run("find /mnt/ro -name keep.txt -delete").await
+    }));
+    assert_eq!(out.status, 1);
+    assert!(
+        out.stderr
+            .contains("find: cannot delete '/mnt/ro/keep.txt': "),
+        "{}",
+        out.stderr
+    );
+    assert!(dir.join("keep.txt").exists());
+}
+
 // ── xargs builtin ───────────────────────────────────────────────────
 
 expect!(xargs_basic, "printf 'a b c' | xargs echo", "a b c");
