@@ -411,6 +411,7 @@ impl Kernel for VfsKernel {
                 return Err(io::Error::other("file size limit exceeded"));
             }
             let (tx, rx) = crate::os::pipe(8192);
+            let writers = tx.downgrade();
             let size_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let fd = proc.alloc_fd(FdKind::ChannelWriter {
                 tx,
@@ -418,7 +419,7 @@ impl Kernel for VfsKernel {
             })?;
             let append = flags.append;
             // Spawn a task to collect writes and flush to VFS
-            tokio::task::spawn_local(async move {
+            let drain = tokio::task::spawn_local(async move {
                 let mut rx = rx;
                 let mut buf = if append {
                     let v = vfs_ref.lock().await;
@@ -435,7 +436,11 @@ impl Kernel for VfsKernel {
                 }
                 let mut v = vfs_ref.lock().await;
                 let _ = v.write_file(ino, buf);
+                Ok(())
             });
+            // Tracked so that a command can wait for the content, as for a host write. The drain
+            // ignores a failed VFS write, so settling it reports no error.
+            proc.track_host_write(abs.clone(), writers, drain);
             Ok(fd)
         } else {
             Err(io::Error::new(
@@ -771,6 +776,46 @@ impl Kernel for VfsKernel {
         Ok(())
     }
 
+    async fn set_times(&self, proc: &Process, path: &str, times: FileTimes) -> io::Result<()> {
+        let abs = Self::abs(proc, path);
+        let mut vfs = self.vfs.lock().await;
+        if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
+            drop(vfs);
+            if ro {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "read-only bind mount",
+                ));
+            }
+            return host_set_times(&host_path, times);
+        }
+        let ino = vfs.resolve(&abs, true)?;
+        // As `utimensat` does: the owner may set any time, and a writer may set the current time.
+        let explicit = [times.accessed, times.modified]
+            .iter()
+            .any(|change| matches!(change, TimeChange::To(_)));
+        let owner = vfs.get(ino)?.uid == LASH_UID || LASH_UID == 0;
+        if !owner && (explicit || !vfs.check_permission(ino, LASH_UID, LASH_GID, 2)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ));
+        }
+        let now = std::time::SystemTime::now();
+        let inode = vfs.get_mut(ino)?;
+        for (change, slot) in [
+            (times.accessed, &mut inode.atime),
+            (times.modified, &mut inode.mtime),
+        ] {
+            match change {
+                TimeChange::Keep => {}
+                TimeChange::Now => *slot = now,
+                TimeChange::To(time) => *slot = time,
+            }
+        }
+        Ok(())
+    }
+
     fn now(&self) -> std::time::SystemTime {
         std::time::SystemTime::now()
     }
@@ -1093,6 +1138,68 @@ impl Kernel for VfsKernel {
     }
 }
 
+/// Set a host file's times with `utimensat`, following a symbolic link as `touch` does.
+#[cfg(unix)]
+fn host_set_times(path: &std::path::Path, times: FileTimes) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    let specification = [
+        host_timespec(times.accessed)?,
+        host_timespec(times.modified)?,
+    ];
+    // SAFETY: path is a valid NUL-terminated string, and specification holds the two timespec
+    // values utimensat reads.
+    let result =
+        unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), specification.as_ptr(), 0) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn host_set_times(_path: &std::path::Path, _times: FileTimes) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "touch cannot set times on this host",
+    ))
+}
+
+/// The `utimensat` value for one time change.
+#[cfg(unix)]
+fn host_timespec(change: TimeChange) -> io::Result<libc::timespec> {
+    let out_of_range = || io::Error::new(io::ErrorKind::InvalidInput, "time is out of range");
+    let (seconds, nanoseconds): (libc::time_t, libc::c_long) = match change {
+        TimeChange::Keep => (0, libc::UTIME_OMIT),
+        TimeChange::Now => (0, libc::UTIME_NOW),
+        TimeChange::To(time) => match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => (
+                libc::time_t::try_from(after.as_secs()).map_err(|_| out_of_range())?,
+                libc::c_long::from(after.subsec_nanos() as i32),
+            ),
+            Err(before) => {
+                let before = before.duration();
+                let seconds =
+                    libc::time_t::try_from(before.as_secs()).map_err(|_| out_of_range())?;
+                match before.subsec_nanos() {
+                    0 => (-seconds, 0),
+                    nanoseconds => (
+                        -seconds - 1,
+                        libc::c_long::from(1_000_000_000 - nanoseconds as i32),
+                    ),
+                }
+            }
+        },
+    };
+    // SAFETY: timespec is a plain C struct, and every field is set below.
+    let mut spec: libc::timespec = unsafe { std::mem::zeroed() };
+    spec.tv_sec = seconds;
+    spec.tv_nsec = nanoseconds;
+    Ok(spec)
+}
+
 // --- host stat helper ---
 
 #[cfg(unix)]
@@ -1139,6 +1246,7 @@ async fn host_stat(path: &std::path::Path) -> FileStat {
         dev: 0,
         ino: 0,
         modified: meta.modified().ok(),
+        accessed: meta.accessed().ok(),
     }
 }
 
@@ -1162,6 +1270,7 @@ fn host_stat_sync(path: &std::path::Path) -> FileStat {
         dev: 0,
         ino: 0,
         modified: meta.modified().ok(),
+        accessed: meta.accessed().ok(),
     }
 }
 
