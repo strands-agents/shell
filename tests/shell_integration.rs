@@ -13783,3 +13783,44 @@ expect!(
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
 );
+
+async fn run_with_stdin(cmd: &str, stdin: &'static [u8]) -> strands_shell::Output {
+    let mut shell = Shell::builder().build().unwrap();
+    let (tx, rx) = strands_shell::os::pipe(4);
+    shell.proc.set_channel_reader(0, rx);
+    tx.send(bytes::Bytes::from_static(stdin)).await.unwrap();
+    drop(tx);
+    shell.run(cmd).await
+}
+
+/// `head -c` must not drop the rest of stdin, including inside a substitution.
+#[test]
+fn head_bytes_in_a_substitution_leaves_the_rest_of_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(r#"x=$(head -c 1); printf "[%s]" "$x"; cat"#, b"abc\n").await;
+        assert_eq!(out.stdout, "[a]bc\n", "stderr={}", out.stderr);
+        assert_eq!(out.status, 0);
+    }));
+}
+
+/// `exec < file` with no command replaces the shell's stdin for later commands.
+#[test]
+fn exec_without_a_command_replaces_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(r#"exec < /dev/null; cat; echo end"#, b"abc\n").await;
+        assert_eq!(out.stdout, "end\n", "stderr={}", out.stderr);
+        assert_eq!(out.status, 0);
+    }));
+}
+
+/// `read -d ''` reads until EOF (NUL delimiter), keeps the data, and returns 1.
+#[test]
+fn read_empty_delimiter_takes_all_input_until_eof() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(r##"read -d '' x; printf "[%s] %s" "$x" "$?" "##, b"a\nb\n").await;
+        assert_eq!(out.stdout, "[a\nb] 1", "stderr={}", out.stderr);
+    }));
+}

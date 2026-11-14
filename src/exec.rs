@@ -3099,8 +3099,28 @@ async fn execute_pipeline_checked(
                 "exec" => {
                     let args = expand_words(os.clone(), proc, &pipeline[0].args[1..]).await;
                     if args.is_empty() {
-                        // `exec` with no args — just apply redirects
-                        // TODO: apply redirects to the shell process
+                        // `exec` with no command applies redirects to this shell, so later
+                        // commands see them. `exec < /dev/null` must replace stdin.
+                        let mut redirs = Vec::new();
+                        for r in &pipeline[0].redirects {
+                            let (word, expanded) = match r {
+                                Redirect::Write(_, w)
+                                | Redirect::Append(_, w)
+                                | Redirect::Read(_, w)
+                                | Redirect::ReadWrite(_, w)
+                                | Redirect::Clobber(_, w)
+                                | Redirect::DupWrite(_, w)
+                                | Redirect::DupRead(_, w) => {
+                                    (r.clone(), expand_word(os.clone(), proc, w).await)
+                                }
+                                Redirect::HereDoc(..) => (r.clone(), String::new()),
+                            };
+                            redirs.push((word, expanded));
+                        }
+                        if let Err(msg) = apply_redirects(&os, proc, &redirs).await {
+                            proc.err_msg(&format!("strands-shell: exec: {msg}"));
+                            return Ok(1);
+                        }
                         return Ok(0);
                     }
                     // exec with args — try to run as a command
