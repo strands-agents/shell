@@ -108,6 +108,67 @@ fn mcp_tools_list() {
 
 // ── shell tool ──────────────────────────────────────────────────────
 
+/// The number of text blocks the shell tool's description says a call
+/// returns, from its "Returns N text ... blocks" sentence.
+fn described_block_count(description: &str) -> usize {
+    let words: Vec<&str> = description.split_whitespace().collect();
+    let count = words
+        .windows(3)
+        .find(|w| w[0] == "Returns" && w[2] == "text")
+        .map(|w| w[1])
+        .unwrap_or_else(|| panic!("no \"Returns N text\" in {description:?}"));
+    match count {
+        "one" => 1,
+        "two" => 2,
+        "three" => 3,
+        "four" => 4,
+        other => panic!("unknown block count {other:?} in {description:?}"),
+    }
+}
+
+#[test]
+fn mcp_shell_result_has_the_block_count_the_description_states() {
+    let list = mcp_method(2, "tools/list", json!({}));
+    let shell = list["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|t| t["name"] == "shell")
+        .expect("shell tool");
+    let description = shell["description"].as_str().unwrap();
+    let blocks = described_block_count(description);
+    for command in [
+        "true",
+        "echo out",
+        "echo err >&2; exit 3",
+        "echo out; echo err >&2",
+    ] {
+        let r = mcp_tool("shell", json!({"command": command}));
+        let content = r["result"]["content"].as_array().expect("content array");
+        assert_eq!(
+            content.len(),
+            blocks,
+            "{command}: the description says {blocks} blocks, the result has {content:?}"
+        );
+        assert!(
+            content.iter().all(|block| block["type"] == "text"),
+            "{command}: {content:?}"
+        );
+        let expected = if command.contains("exit 3") { 3 } else { 0 };
+        if description.contains("metadata.exit_code") {
+            assert_eq!(r["result"]["metadata"]["exit_code"], expected, "{command}");
+        } else if description.contains("`exit code: N`") {
+            assert_eq!(
+                content[2]["text"],
+                format!("exit code: {expected}"),
+                "{command}"
+            );
+        } else {
+            panic!("the description names no exit-code channel: {description:?}");
+        }
+    }
+}
+
 #[test]
 fn mcp_shell_echo() {
     let r = mcp_tool("shell", json!({"command": "echo hello"}));
