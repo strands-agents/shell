@@ -1,0 +1,18 @@
+status: 0
+stderr: empty
+--- stdout
+hash status 0
+found 0 bin/mytool
+hashed after move 0 bin/mytool
+after hash -r 1 []
+./hereonly
+leading empty entry 0
+./hereonly
+middle empty entry 0
+./hereonly
+trailing empty entry 0
+no empty entry 1
+here
+ran through empty entry 0
+unset PATH, not a command 1
+unset PATH, not in cwd 1

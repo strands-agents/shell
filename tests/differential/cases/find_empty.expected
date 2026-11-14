@@ -1,0 +1,19 @@
+status: 0
+stderr: empty
+--- stdout
+./blank
+./empty
+./one/only
+./two/a
+./two/b
+one/only
+empty
+./empty
+./blank
+./one/only
+./two/a
+./two/b
+.
+./full
+./one
+./two

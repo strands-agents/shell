@@ -1,0 +1,8 @@
+status: 0
+stderr: empty
+--- stdout
+plain hidden
+gone hidden
+dropped hidden
+fixed hidden
+child sees []

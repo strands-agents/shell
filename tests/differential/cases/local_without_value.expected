@@ -1,0 +1,6 @@
+status: 0
+stderr: empty
+--- stdout
+v=[unset]
+z=[unset]
+after g z=1
