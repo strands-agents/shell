@@ -84,7 +84,7 @@ async fn cmd_date(os: &dyn Kernel, args: &[String]) -> CommandResult {
 /// seconds plus `nanos` nanoseconds after the Unix epoch, in a single pass
 /// so expanded text is never re-scanned. Like GNU `date`, an unknown
 /// specifier or a trailing `%` is copied through literally.
-fn format_date(fmt: &str, ts: i64, nanos: u32) -> String {
+pub(super) fn format_date(fmt: &str, ts: i64, nanos: u32) -> String {
     // Convert to date components (UTC)
     let days = ts / 86400;
     let secs = ts % 86400;
