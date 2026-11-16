@@ -3100,7 +3100,9 @@ async fn execute_pipeline_checked(
                     let args = expand_words(os.clone(), proc, &pipeline[0].args[1..]).await;
                     if args.is_empty() {
                         // `exec` with no command applies redirects to this shell, so later
-                        // commands see them. `exec < /dev/null` must replace stdin.
+                        // commands see them. The session process has no fd 1 or 2 of its
+                        // own, so output redirects stay no-ops until that is supported.
+                        // Only stdin is applied (`exec < file`, `exec <<EOF`).
                         let mut redirs = Vec::new();
                         for r in &pipeline[0].redirects {
                             let (word, expanded) = match r {
@@ -3117,6 +3119,14 @@ async fn execute_pipeline_checked(
                             };
                             redirs.push((word, expanded));
                         }
+                        redirs.retain(|(r, _)| {
+                            matches!(
+                                r,
+                                Redirect::Read(0, _)
+                                    | Redirect::ReadWrite(0, _)
+                                    | Redirect::HereDoc(0, ..)
+                            )
+                        });
                         if let Err(msg) = apply_redirects(&os, proc, &redirs).await {
                             proc.err_msg(&format!("strands-shell: exec: {msg}"));
                             return Ok(1);

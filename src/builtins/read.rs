@@ -18,27 +18,64 @@ pub fn builtin_read<'a>(
         let mut vars = Vec::new();
         let mut i = 0;
         while i < args.len() {
-            match args[i].as_str() {
-                "-r" => raw = true,
-                "-p" => {
-                    i += 1;
-                    if i < args.len() {
-                        prompt = args[i].clone();
-                    }
-                }
-                "-d" => {
-                    i += 1;
-                    if i >= args.len() {
-                        proc.err_msg("strands-shell: read: -d: option requires an argument");
-                        return Ok(2);
-                    }
-                    // An empty delimiter is NUL, as in bash.
-                    delim = Some(args[i].as_bytes().first().copied().unwrap_or(0));
-                }
-                _ => vars.push(args[i].as_str()),
+            let a = args[i].as_str();
+            if a == "--" {
+                vars.extend(args[i + 1..].iter().map(|s| s.as_str()));
+                break;
             }
+            if a.starts_with('-') && a != "-" {
+                let flags: Vec<char> = a.chars().skip(1).collect();
+                if flags.is_empty() || !matches!(flags[0], 'r' | 'p' | 'd') {
+                    vars.push(a);
+                    i += 1;
+                    continue;
+                }
+                let mut k = 0;
+                while k < flags.len() {
+                    match flags[k] {
+                        'r' => raw = true,
+                        'p' => {
+                            let attached: String = flags[k + 1..].iter().collect();
+                            if !attached.is_empty() {
+                                prompt = attached;
+                            } else if i + 1 < args.len() {
+                                i += 1;
+                                prompt = args[i].clone();
+                            }
+                            break;
+                        }
+                        'd' => {
+                            if k + 1 < flags.len() {
+                                let attached: String = flags[k + 1..].iter().collect();
+                                // An empty delimiter is NUL, as in bash.
+                                delim = Some(attached.as_bytes().first().copied().unwrap_or(0));
+                            } else {
+                                i += 1;
+                                if i >= args.len() {
+                                    proc.err_msg(
+                                        "strands-shell: read: -d: option requires an argument",
+                                    );
+                                    return Ok(2);
+                                }
+                                delim = Some(args[i].as_bytes().first().copied().unwrap_or(0));
+                            }
+                            break;
+                        }
+                        c => {
+                            proc.err_msg(&format!("strands-shell: read: -{c}: invalid option"));
+                            return Ok(2);
+                        }
+                    }
+                    k += 1;
+                }
+                i += 1;
+                continue;
+            }
+            vars.push(a);
             i += 1;
         }
+        // Bash never trims REPLY; remember whether the caller named a variable.
+        let named_vars = !vars.is_empty();
         if vars.is_empty() {
             vars.push("REPLY");
         }
@@ -83,21 +120,21 @@ pub fn builtin_read<'a>(
         if n == 0 {
             return Ok(1); // EOF
         }
-        // A custom delimiter: bash trims trailing IFS from the record, so
-        // `read -d ''` of `a\nb\n` with the default IFS yields `a\nb`.
-        if delim.is_some() {
+        // With a custom delimiter, bash trims only trailing IFS whitespace
+        // (space, tab, newline) and only when a variable name was given.
+        if delim.is_some() && named_vars {
             let ifs_chars = proc
                 .env
                 .get("IFS")
                 .cloned()
                 .unwrap_or_else(|| " \t\n".into());
             line = line
-                .trim_end_matches(|c: char| ifs_chars.contains(c))
+                .trim_end_matches(|c: char| matches!(c, ' ' | '\t' | '\n') && ifs_chars.contains(c))
                 .to_string();
         }
 
-        // Strip trailing newline
-        if line.ends_with('\r') {
+        // Strip a leftover CR from CRLF, but only for the default newline delimiter.
+        if delim.is_none() && line.ends_with('\r') {
             line.pop();
         }
 
