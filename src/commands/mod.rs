@@ -28,6 +28,7 @@ mod tail;
 mod tee;
 mod touch;
 mod tr;
+mod tree;
 mod r#true;
 mod uniq;
 mod wc;
@@ -102,6 +103,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "tee" => |os, args| Box::pin(tee::cmd_tee(os, args)),
             "touch" => |os, args| Box::pin(touch::cmd_touch(os, args)),
             "tr" => |os, args| Box::pin(tr::cmd_tr(os, args)),
+            "tree" => |os, args| Box::pin(tree::cmd_tree(os, args)),
             "true" => |os, args| Box::pin(r#true::cmd_true(os, args)),
             "uniq" => |os, args| Box::pin(uniq::cmd_uniq(os, args)),
             "wc" => |os, args| Box::pin(wc::cmd_wc(os, args)),
