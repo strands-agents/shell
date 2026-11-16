@@ -704,6 +704,28 @@ fn kernel_accessor_returns_the_supplied_trait_object() {
 }
 
 #[test]
+fn touch_on_a_kernel_without_set_times_creates_but_does_not_claim_success() {
+    let kernel = MemKernel::new();
+    let mut shell = shell_over(&kernel);
+    block_on(async {
+        let out = shell.run("touch new.txt").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(
+            committed(&kernel, "/work/new.txt", b"").await,
+            Some(Vec::new())
+        );
+
+        let out = shell.run("touch notes.txt").await;
+        assert_eq!(out.status, 1);
+        assert!(
+            out.stderr.contains("this kernel cannot set file times"),
+            "stderr: {}",
+            out.stderr
+        );
+    });
+}
+
+#[test]
 fn network_methods_keep_their_defaults() {
     let kernel = MemKernel::new();
     let mut shell = shell_over(&kernel);

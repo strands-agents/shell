@@ -63,6 +63,28 @@ pub struct FileStat {
     pub ino: u64,
     /// Modification time as duration since epoch.
     pub modified: Option<std::time::SystemTime>,
+    /// Access time, where the backing store records one.
+    pub accessed: Option<std::time::SystemTime>,
+}
+
+/// One time that [`Kernel::set_times`] sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeChange {
+    /// Keep the current time.
+    Keep,
+    /// Set the time to the current time, with the permission a write needs.
+    Now,
+    /// Set the time to this value, with the permission the owner has.
+    To(std::time::SystemTime),
+}
+
+/// The access and modification times that [`Kernel::set_times`] sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileTimes {
+    /// The access time.
+    pub accessed: TimeChange,
+    /// The modification time.
+    pub modified: TimeChange,
 }
 
 /// Access permission modes for Kernel::access().
@@ -1313,6 +1335,19 @@ pub trait Kernel: Send + Sync {
     async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String>;
     /// Set Unix permission mode bits on a path.
     async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()>;
+    /// Set the access and modification times of the file a path names, following a symlink as
+    /// [`Kernel::stat`] does.
+    ///
+    /// Permission follows `utimensat`: [`TimeChange::Now`] needs write access, [`TimeChange::To`]
+    /// needs ownership, and [`TimeChange::Keep`] leaves that time alone. A kernel that wraps
+    /// another must forward this. The default refuses with `Unsupported`, so a kernel that
+    /// predates this method still builds; `touch` of an existing file then fails on it.
+    async fn set_times(&self, _proc: &Process, _path: &str, _times: FileTimes) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this kernel cannot set file times",
+        ))
+    }
     /// Return the current wall-clock time.
     fn now(&self) -> std::time::SystemTime;
     /// Check whether a URL is allowed for network access.
