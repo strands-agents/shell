@@ -1,0 +1,13 @@
+status: 0
+stderr: non-empty
+--- stdout
+cba
+dlrow olleh
+eno
+owtb	a
+
+cba
+dlrow olleh
+cba
+dlrow olleh
+status 1
