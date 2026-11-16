@@ -1,0 +1,21 @@
+status: 0
+stderr: non-empty
+--- stdout
+three
+two
+one
+ba
+three
+two
+one
+y
+x
+three
+two
+one
+c,b,a,
+
+bathree
+two
+one
+status 1
