@@ -17,6 +17,7 @@ mod ls;
 mod mkdir;
 mod mktemp;
 mod mv;
+mod nl;
 mod pwd;
 mod readlink;
 mod rm;
@@ -91,6 +92,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "mkdir" => |os, args| Box::pin(mkdir::cmd_mkdir(os, args)),
             "mktemp" => |os, args| Box::pin(mktemp::cmd_mktemp(os, args)),
             "mv" => |os, args| Box::pin(mv::cmd_mv(os, args)),
+            "nl" => |os, args| Box::pin(nl::cmd_nl(os, args)),
             "pwd" => |os, args| Box::pin(pwd::cmd_pwd(os, args)),
             "readlink" => |os, args| Box::pin(readlink::cmd_readlink(os, args)),
             "rm" => |os, args| Box::pin(rm::cmd_rm(os, args)),
