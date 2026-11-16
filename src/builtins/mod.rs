@@ -9,6 +9,7 @@ mod getopts;
 mod hash;
 mod local;
 pub mod lua;
+mod lua_pattern;
 mod printf;
 mod pwd;
 mod read;
