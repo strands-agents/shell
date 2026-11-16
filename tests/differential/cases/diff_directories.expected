@@ -1,0 +1,44 @@
+status: 1
+stderr: empty
+--- stdout
+diff x/f y/f
+1c1
+< old
+---
+> new
+Only in x: onlyx
+Only in y: onlyy
+Common subdirectories: x/sub and y/sub
+status 1
+diff -r x/f y/f
+1c1
+< old
+---
+> new
+Only in x: onlyx
+Only in y: onlyy
+diff -r x/sub/z y/sub/z
+1c1
+< a
+---
+> b
+Files x/f and y/f differ
+Only in x: onlyx
+Only in y: onlyy
+Files x/sub/z and y/sub/z differ
+diff -rN x/f y/f
+1c1
+< old
+---
+> new
+diff -rN x/onlyx y/onlyx
+1d0
+< o
+diff -rN x/onlyy y/onlyy
+0a1
+> o
+diff -rN x/sub/z y/sub/z
+1c1
+< a
+---
+> b

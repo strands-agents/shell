@@ -50,7 +50,7 @@ This runs every case with `bash` in a fresh directory, with an empty
 environment except `PATH=/usr/bin:/bin`, `HOME` set to that directory and
 `LC_ALL=C`, and rewrites all `.expected` files. If any case exits 127 (usually
 a missing tool) nothing is written. Normal runs don't need bash. The current
-files were recorded on Linux with bash 5.2.15, GNU coreutils 8.32 and jq 1.8.1.
+files were recorded on Linux with bash 5.2.15, GNU coreutils 8.32, GNU diffutils 3.8 and jq 1.8.1.
 
 Files under `cases/` are stored byte for byte (see `.gitattributes`), so
 expected output with `\r\n` stays intact on Windows.

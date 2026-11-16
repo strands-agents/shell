@@ -1,0 +1,11 @@
+status: 0
+stderr: non-empty
+--- stdout
+same 0
+Files a and b differ
+brief 1
+Binary files a and bin differ
+binary 1
+stdin 0
+missing 2
+bad option 2
