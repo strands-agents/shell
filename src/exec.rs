@@ -181,9 +181,18 @@ async fn run_script(
         };
         return run_sourced(os, proc, command, "-c", arg0, args).await;
     }
-    if script_path.starts_with('-') {
+    // A single `--` ends the options, as in `sh -- script`; what follows is a
+    // path even when it starts with `-`.
+    let (script_path, args, after_dashdash) = match (script_path, args.split_first()) {
+        ("--", Some((path, rest))) => (path.as_str(), rest, true),
+        _ => (script_path, args, false),
+    };
+    if !after_dashdash && script_path.starts_with('-') {
         // An option is not a script path, so `sh --help` is not looked up as a file.
-        proc.err_msg(&format!("{}: {script_path}: invalid option", proc.arg0));
+        proc.err_msg(&format!(
+            "{}: {script_path}: option not supported; use sh FILE or sh -c CMD, with set -e/-x inside",
+            proc.arg0
+        ));
         return 2;
     }
     let fd = match os.open(proc, script_path, OpenFlags::read()).await {
