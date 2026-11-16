@@ -1,0 +1,21 @@
+status: 0
+stderr: non-empty
+--- stdout
+d/f
+d/sub
+missing
+nofile
+d/f
+../f
+../..
+l2
+ld/sub
+l1
+no/y
+d/f/x
+f
+f
+/
+d/f
+status 1
+status 1
