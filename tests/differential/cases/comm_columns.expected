@@ -1,0 +1,48 @@
+status: 0
+stderr: non-empty
+--- stdout
+apple
+		banana
+	cherry
+		date
+	fig
+	banana
+cherry
+	date
+fig
+apple
+	banana
+	date
+apple
+	cherry
+	fig
+banana
+date
+apple
+apple
+ |  | banana
+ | cherry
+ |  | date
+ | fig
+apple
+		banana
+	cherry
+		date
+	fig
+b
+a
+	banana
+	cherry
+	date
+	fig
+status 0
+b
+a
+	banana
+	cherry
+	date
+	fig
+status 1
+apple
+	b
+status 1

@@ -1,6 +1,7 @@
 mod basename;
 mod cat;
 mod chmod;
+mod comm;
 mod cp;
 mod curl;
 mod cut;
@@ -75,6 +76,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "basename" => |os, args| Box::pin(basename::cmd_basename(os, args)),
             "cat" => |os, args| Box::pin(cat::cmd_cat(os, args)),
             "chmod" => |os, args| Box::pin(chmod::cmd_chmod(os, args)),
+            "comm" => |os, args| Box::pin(comm::cmd_comm(os, args)),
             "cp" => |os, args| Box::pin(cp::cmd_cp(os, args)),
             "curl" => |os, args| Box::pin(curl::cmd_curl(os, args)),
             "cut" => |os, args| Box::pin(cut::cmd_cut(os, args)),
