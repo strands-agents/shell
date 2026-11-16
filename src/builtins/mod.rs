@@ -7,6 +7,7 @@ mod export;
 mod find;
 mod getopts;
 mod hash;
+mod help;
 mod local;
 pub mod lua;
 mod printf;
@@ -47,6 +48,7 @@ pub fn lookup(name: &str) -> Option<BuiltinFn> {
         "find" => Some(find::builtin_find),
         "getopts" => Some(getopts::builtin_getopts),
         "hash" => Some(hash::builtin_hash),
+        "help" => Some(help::builtin_help),
         "local" => Some(local::builtin_local),
         "lua" => Some(lua::builtin_lua),
         "printf" => Some(printf::builtin_printf),

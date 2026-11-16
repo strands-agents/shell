@@ -12,7 +12,7 @@ fn exec_fork(proc: &mut Process) -> Process {
     sub
 }
 
-fn shell_quote(s: &str) -> String {
+pub(super) fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
     }

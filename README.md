@@ -115,7 +115,7 @@ flowchart TB
             creds["Credentials: injected per-URL"]
             limits["Limits: timeout, output, fds"]
         end
-        engine["Shell engine: parser, 25 builtins, 33 commands, Lua 5.4"]
+        engine["Shell engine: parser, 26 builtins, 33 commands, Lua 5.4"]
     end
 ```
 
@@ -249,7 +249,7 @@ Out of the box, the shell is an empty sandbox — no files, no network, no crede
 
 ## Commands
 
-25 builtins, 33 commands, and a Bourne-compatible shell with pipes, loops, functions, and subshells.
+26 builtins, 33 commands, and a Bourne-compatible shell with pipes, loops, functions, and subshells.
 
 The commands agents use constantly: `grep`, `find`, `cat`, `head`, `tail`, `jq` for reading and searching. `sed`, `sort`, `tr`, `cut` for transforming output. `cp`, `mv`, `rm`, `mkdir` for managing files. `curl` for HTTP (SSRF-guarded, credentials auto-injected). `lua` for scripting when shell gets awkward.
 
