@@ -183,7 +183,7 @@ const MAX_FIELD: usize = u16::MAX as usize;
 
 /// Flags, width and precision of one numeric conversion.
 #[derive(Default)]
-struct Spec {
+pub(crate) struct Spec {
     left: bool,
     zero: bool,
     plus: bool,
@@ -193,7 +193,7 @@ struct Spec {
     precision: Option<usize>,
 }
 
-fn parse_spec(spec: &str) -> Spec {
+pub(crate) fn parse_spec(spec: &str) -> Spec {
     let mut out = Spec::default();
     let rest = spec.trim_start_matches(|c| {
         match c {
@@ -276,7 +276,7 @@ fn format_unsigned(spec: &Spec, conv: char, n: u64) -> String {
 }
 
 /// `%f`/`%e`/`%g` and their uppercase forms.
-fn format_float(spec: &Spec, conv: char, x: f64) -> String {
+pub(crate) fn format_float(spec: &Spec, conv: char, x: f64) -> String {
     let sign = if x.is_sign_negative() {
         "-"
     } else if spec.plus {
