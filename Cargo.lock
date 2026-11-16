@@ -1630,6 +1630,7 @@ dependencies = [
  "strands-shell-macros",
  "tokio",
  "toml",
+ "unicode-width",
  "url",
  "wasi 0.14.7+wasi-0.2.4",
 ]

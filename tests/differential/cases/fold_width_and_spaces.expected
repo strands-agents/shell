@@ -1,0 +1,49 @@
+status: 0
+stderr: non-empty
+--- stdout
+Lorem ipsum dolor si
+t amet, consectetur 
+adipiscing elit, sed
+ do eiusmod tempor
+short
+
+Lorem ipsum dolor 
+sit amet, 
+consectetur 
+adipiscing elit, 
+sed do eiusmod 
+tempor
+short
+
+Lorem ipsum 
+dolor sit 
+amet, 
+consectetur 
+adipiscing 
+elit, sed 
+do eiusmod 
+tempor
+short
+
+Lorem ipsum 
+dolor sit 
+amet, 
+consectetur 
+adipiscing 
+elit, sed 
+do eiusmod 
+tempor
+short
+
+a	bc
+defghijkl
+a	bcd
+efghi
+jkl
+aa  
+ bb 
+ cc
+abc
+def
+gh
+status 1
