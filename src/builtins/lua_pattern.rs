@@ -471,7 +471,7 @@ impl<'a> Matcher<'a> {
     }
 
     /// `%bxy`: the end of the balanced run that starts at `at`, or `None`.
-    fn balanced(&self, at: usize, args: usize) -> Step<Option<usize>> {
+    fn balanced(&mut self, at: usize, args: usize) -> Step<Option<usize>> {
         if args + 1 >= self.pattern.len() {
             return Err(Stop::Lua);
         }
@@ -482,6 +482,8 @@ impl<'a> Matcher<'a> {
         let mut depth = 1;
         let mut index = at;
         loop {
+            // One run can scan the rest of the subject, so count each byte toward the clock check.
+            self.tick()?;
             index += 1;
             let Some(&byte) = self.source.get(index) else {
                 return Ok(None);

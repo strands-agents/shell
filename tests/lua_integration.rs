@@ -1598,6 +1598,24 @@ fn a_backtracking_pattern_stops_at_the_command_deadline() {
 }
 
 #[test]
+fn a_balanced_match_over_a_long_subject_stops_near_half_the_deadline() {
+    // `%b()` scans the rest of the subject from every start, so the clock has to be read per byte.
+    let cases = [
+        r#"string.find(string.rep("(", 3e7), "%b()x")"#,
+        r#"string.gsub(string.rep("(", 3e7), "%b()", "")"#,
+    ];
+    for script in cases {
+        let (status, _, stderr, elapsed) = run_lua(Some(2), script);
+        assert_ne!(status, 0, "{script}\nstderr: {stderr}");
+        assert!(stderr.contains("timeout"), "{script}\nstderr: {stderr}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "{script} ran {elapsed:?} against a 2s deadline"
+        );
+    }
+}
+
+#[test]
 fn a_pure_lua_loop_still_stops_at_the_command_deadline() {
     let (status, _, stderr, elapsed) = run_lua(Some(1), "while true do end");
     assert_ne!(status, 0);
