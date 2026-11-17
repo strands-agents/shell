@@ -1,4 +1,3 @@
-# known-difference: command -v does not look up a name containing a slash; fixed by #272
 mkdir bin
 printf '#!/bin/sh\necho here\n' > here
 cp here bin/tool
