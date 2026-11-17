@@ -4481,6 +4481,46 @@ expect!(
 
 // ── tail coverage ───────────────────────────────────────────────────
 
+#[test]
+fn tail_large_line_counts_preserve_small_input() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for count in [usize::MAX, usize::MAX / 2] {
+            for (cmd, expected) in [
+                (format!("printf 'a\\nb\\nc' | tail -n {count}"), "a\nb\nc"),
+                (
+                    format!(
+                        "printf 'a\\nb\\nc' > /tmp/tail-large; tail -n {count} /tmp/tail-large"
+                    ),
+                    "a\nb\nc",
+                ),
+                (format!("printf '' | tail -n {count}"), ""),
+            ] {
+                let out = shell.run(&cmd).await;
+                assert_eq!(out.status, 0, "{cmd}: {}", out.stderr);
+                assert_eq!(out.stdout, expected, "{cmd}");
+                assert!(out.stderr.is_empty(), "{cmd}: {}", out.stderr);
+            }
+        }
+    }));
+}
+
+#[test]
+fn tail_line_count_boundaries() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (count, expected) in [(0, ""), (1, "c"), (3, "a\nb\nc"), (4, "a\nb\nc")] {
+            let cmd = format!("printf 'a\\nb\\nc' | tail -n {count}");
+            let out = shell.run(&cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: {}", out.stderr);
+            assert_eq!(out.stdout, expected, "{cmd}");
+            assert!(out.stderr.is_empty(), "{cmd}: {}", out.stderr);
+        }
+    }));
+}
+
 expect!(
     tail_from_file,
     "printf 'a\\nb\\nc\\nd\\ne\\n' > /tmp/tf; tail -n 2 /tmp/tf",
