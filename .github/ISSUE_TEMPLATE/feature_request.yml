@@ -1,7 +1,6 @@
 name: Feature Request
 description: Suggest a new feature or enhancement for Strands Shell
 title: "[FEATURE] "
-labels: ["triage"]
 assignees: []
 body:
   - type: markdown
