@@ -2712,6 +2712,22 @@ expect!(
     "1"
 );
 
+// ── which ───────────────────────────────────────────────────────────
+
+expect!(which_builtin, "which echo cat", "echo\ncat");
+expect!(which_ignores_options, "which -a -s echo", "echo");
+expect!(which_missing, "which nonexistent_cmd_xyz; echo $?", "1");
+expect!(
+    which_function_wins,
+    "which() { echo mine; }; which echo",
+    "mine"
+);
+expect!(
+    which_path_file,
+    "mkdir -p /tmp/wb && printf '#!/bin/sh\\n' > /tmp/wb/tool && chmod +x /tmp/wb/tool && PATH=/tmp/wb; which tool",
+    "/tmp/wb/tool"
+);
+
 // ── builtin builtin ─────────────────────────────────────────────────
 
 expect!(builtin_runs_echo, "builtin echo hello", "hello");

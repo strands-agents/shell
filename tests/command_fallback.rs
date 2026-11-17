@@ -553,6 +553,7 @@ fn lookups_find_a_served_name() {
             ("command -v python", "python\n"),
             ("command -V python3", "python3 is a shell builtin\n"),
             ("type python3", "python3 is a shell builtin\n"),
+            ("which python3", "python3\n"),
             ("hash python3; hash", ""),
             (
                 "if command -v python3; then echo found; fi",

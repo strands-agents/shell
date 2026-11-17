@@ -3114,6 +3114,22 @@ async fn execute_pipeline_checked(
                     proc.pending_exit = false;
                     return Err(ControlFlow::Exit(exit));
                 }
+                "which" if proc.get_function("which").is_none() => {
+                    // `which name...` answers as `command -v name...`; its options are ignored.
+                    let lit = |s: &str| vec![parser::WordPart::Literal(s.to_string())];
+                    let names = pipeline[0].args[1..]
+                        .iter()
+                        .skip_while(|w| parser::word_to_str(w).is_some_and(|s| s.starts_with('-')));
+                    let fake_cmd = parser::Command {
+                        env: pipeline[0].env.clone(),
+                        args: [lit("command"), lit("-v")]
+                            .into_iter()
+                            .chain(names.cloned())
+                            .collect(),
+                        redirects: pipeline[0].redirects.clone(),
+                    };
+                    return Box::pin(execute_pipeline_checked(os, proc, &[fake_cmd])).await;
+                }
                 "command" => {
                     if pipeline[0].args.len() < 2 {
                         return Ok(0);
