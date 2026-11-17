@@ -105,7 +105,9 @@ fn format_string(fmt: &str, params: &[String]) -> Vec<u8> {
                                         Some(dot) => (&s[..dot], Some(&s[dot + 1..])),
                                         None => (s, None),
                                     };
-                                    let width: usize = width_s.parse().unwrap_or(0);
+                                    // Clamped like the numeric conversions so a
+                                    // huge width can't exhaust memory.
+                                    let width = width_s.parse().unwrap_or(0).min(MAX_FIELD);
                                     // Precision truncates to N *characters*; take
                                     // by char so a byte slice can't split a
                                     // multibyte char (e.g. `printf '%.1s' é`).

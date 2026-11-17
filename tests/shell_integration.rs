@@ -6178,6 +6178,26 @@ fn printf_number_huge_field_is_capped() {
     }));
 }
 
+// A huge `%s` width is clamped like the numeric ones (#300).
+#[test]
+fn printf_string_huge_width_is_capped() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, len) in [
+            ("printf '%99999999999s|' a", 65536),
+            ("printf '%-99999999999s|' a", 65536),
+            ("printf '%99999999999.1s|' ab", 65536),
+            ("printf '%65535s|' a", 65536),
+            ("printf '%5s|' a", 6),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: status");
+            assert_eq!(out.stdout.len(), len, "{cmd}: length");
+        }
+    }));
+}
+
 // ── heredoc with tab strip ────────────────────────────────────────
 expect!(
     heredoc_tab_strip2,
