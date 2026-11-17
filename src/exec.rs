@@ -150,6 +150,20 @@ pub(crate) async fn lookup_command(
             .await
             .then(|| CommandLookup::Path(name.to_string()));
     }
+    if let Some(found) = lookup_command_before_path(os, proc, name, functions) {
+        return Some(found);
+    }
+    find_in_path(os, proc, name).await.map(CommandLookup::Path)
+}
+
+/// [`lookup_command`] for a name without `/`, stopping before the PATH search,
+/// for a caller that walks PATH itself and must probe each entry only once.
+pub(crate) fn lookup_command_before_path(
+    os: &dyn Kernel,
+    proc: &Process,
+    name: &str,
+    functions: bool,
+) -> Option<CommandLookup> {
     let function = functions && proc.get_function(name).is_some();
     if is_special(name)
         || crate::builtins::lookup(name).is_some()
@@ -164,7 +178,7 @@ pub(crate) async fn lookup_command(
     if let Some(path) = proc.hash_table.get(name) {
         return Some(CommandLookup::Path(path.clone()));
     }
-    find_in_path(os, proc, name).await.map(CommandLookup::Path)
+    None
 }
 
 /// Resolve an executable path to either a multicall command name or a shebang interpreter + script.

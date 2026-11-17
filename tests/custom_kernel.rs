@@ -320,6 +320,7 @@ impl Kernel for MemKernel {
 struct CountingKernel {
     inner: Arc<MemKernel>,
     lookups: Mutex<Vec<String>>,
+    probes: Mutex<Vec<String>>,
 }
 
 impl CountingKernel {
@@ -327,6 +328,7 @@ impl CountingKernel {
         Arc::new(Self {
             inner: MemKernel::new(),
             lookups: Mutex::new(Vec::new()),
+            probes: Mutex::new(Vec::new()),
         })
     }
 
@@ -397,6 +399,7 @@ impl Kernel for CountingKernel {
     }
 
     async fn is_executable(&self, proc: &Process, path: &str) -> bool {
+        self.probes.lock().unwrap().push(path.to_string());
         self.inner.is_executable(proc, path).await
     }
 
@@ -618,6 +621,24 @@ fn mkdir_p_looks_up_each_ancestor_once() {
         assert_eq!(kernel.lookups_of(path), 1, "{kind} {path}");
     }
     assert_eq!(kernel.lookups_of("/work"), 2, "existing /work");
+}
+
+#[test]
+fn which_probes_each_path_entry_once() {
+    for script in ["which tool", "which -a tool", "command -v tool"] {
+        let kernel = CountingKernel::new();
+        let dyn_kernel: Arc<dyn Kernel> = kernel.clone();
+        let mut shell = Shell::with_kernel(dyn_kernel);
+        block_on(async {
+            let out = shell.run(&format!("PATH=/one:/two {script}")).await;
+            assert_eq!((out.status, out.stdout.as_str()), (1, ""), "{script}");
+        });
+        assert_eq!(
+            *kernel.probes.lock().unwrap(),
+            ["/one/tool", "/two/tool"],
+            "{script}"
+        );
+    }
 }
 
 #[test]
