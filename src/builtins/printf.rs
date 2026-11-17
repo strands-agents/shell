@@ -106,8 +106,18 @@ fn format_string(fmt: &str, params: &[String]) -> Vec<u8> {
                                         None => (s, None),
                                     };
                                     // Clamped like the numeric conversions so a
-                                    // huge width can't exhaust memory.
-                                    let width = width_s.parse().unwrap_or(0).min(MAX_FIELD);
+                                    // huge width can't exhaust memory; all digits
+                                    // but unparseable means overflow, so clamp it too.
+                                    let width = match width_s.parse::<usize>() {
+                                        Ok(n) => n.min(MAX_FIELD),
+                                        Err(_)
+                                            if !width_s.is_empty()
+                                                && width_s.bytes().all(|b| b.is_ascii_digit()) =>
+                                        {
+                                            MAX_FIELD
+                                        }
+                                        Err(_) => 0,
+                                    };
                                     // Precision truncates to N *characters*; take
                                     // by char so a byte slice can't split a
                                     // multibyte char (e.g. `printf '%.1s' é`).
