@@ -1,7 +1,15 @@
-# known-difference: f "" "" passes no arguments; bash passes two empty ones
-f() { echo "$#"; }
-f "" ""
-f ''
-e=
-f $e
-f "$e"
+show() {
+  printf 'argc=%s\n' "$#"
+  for arg in "$@"; do printf '<%s>\n' "$arg"; done
+}
+show "" x
+show "" ""
+show '' x
+empty=
+show $empty
+show "$empty" y
+show """" ""'' a""b
+show "$@"
+show "" "$@"
+forward() { show "$@"; }
+forward '' x

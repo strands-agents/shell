@@ -1,7 +1,26 @@
 status: 0
 stderr: empty
 --- stdout
-2
-1
-0
-1
+argc=2
+<>
+<x>
+argc=2
+<>
+<>
+argc=2
+<>
+<x>
+argc=0
+argc=2
+<>
+<y>
+argc=3
+<>
+<>
+<ab>
+argc=0
+argc=1
+<>
+argc=2
+<>
+<x>

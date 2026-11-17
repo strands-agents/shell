@@ -647,6 +647,9 @@ fn expand_part_split<'a>(
                 segments.last_mut().unwrap().push(&tmp, false, false);
             }
             WordPart::DoubleQuoted(parts) => {
+                if parts.is_empty() {
+                    segments.last_mut().unwrap().push("", false, false);
+                }
                 for p in parts {
                     expand_part_split(os.clone(), proc, p, segments, ifs, true).await;
                 }
