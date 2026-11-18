@@ -159,7 +159,7 @@ forwarding_kernel!(StackCheckingKernel {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn recursive_functions_leave_stack_for_command_checks() {
+fn recursive_execution_leaves_stack_for_command_checks() {
     std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
         .spawn(|| {
@@ -167,10 +167,20 @@ fn recursive_functions_leave_stack_for_command_checks() {
                 let (checked, _) = checking_shell();
                 let inner = checked.kernel().clone();
                 let mut shell = Shell::with_kernel(Arc::new(StackCheckingKernel { inner }));
+                shell.proc.max_depth = 64;
                 let out = shell
                     .run(
                         "f() { if [ \"$1\" -gt 0 ]; then f \"$(($1 - 1))\"; \
                          else echo bottom; fi; }; f 60",
+                    )
+                    .await;
+                assert_eq!(out.status, 0, "{}", out.stderr);
+                assert_eq!(out.stdout, "bottom\n");
+                assert!(out.stderr.is_empty(), "{}", out.stderr);
+
+                let out = shell
+                    .run(
+                        r#"code='if [ "$n" -gt 0 ]; then n=$((n - 1)); eval "$code"; else echo bottom; fi'; n=62; eval "$code""#,
                     )
                     .await;
                 assert_eq!(out.status, 0, "{}", out.stderr);

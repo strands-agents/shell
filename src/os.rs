@@ -1001,7 +1001,8 @@ pub async fn read_to_end_limited<R: tokio::io::AsyncRead + Unpin>(
         return Ok(buf);
     }
     let mut buf = Vec::new();
-    let mut tmp = [0u8; 8192];
+    // The read buffer stays off the recursive executor's stack.
+    let mut tmp = vec![0u8; 8192];
     loop {
         let n = tokio::io::AsyncReadExt::read(reader, &mut tmp).await?;
         if n == 0 {

@@ -6019,12 +6019,12 @@ fn recursive_execution_can_be_cancelled_on_worker_stack() {
         .spawn(|| {
             let (rt, local) = rt();
             rt.block_on(local.run_until(async {
-                let mut shell = Shell::builder().max_depth(0).build().unwrap();
+                let mut shell = Shell::builder().build().unwrap();
                 let kernel = shell.kernel().clone();
                 let proc = kernel.new_process();
                 let mut run = Box::pin(shell.run(
                     "f() { if [ \"$1\" -gt 0 ]; then f \"$(($1 - 1))\"; \
-                     else touch /tmp/ready; sleep 60; echo leaked > /tmp/leaked; fi; }; f 500",
+                     else touch /tmp/ready; sleep 60; echo leaked > /tmp/leaked; fi; }; f 60",
                 ));
                 let ready = async {
                     while !kernel.stat(&proc, "/tmp/ready").await.exists {
@@ -6040,7 +6040,7 @@ fn recursive_execution_can_be_cancelled_on_worker_stack() {
                         result.expect("recursive call did not reach the bottom");
                     }
                 }
-                stacker::grow(64 * 1024, || drop(run));
+                drop(run);
                 assert_eq!(shell.run("test ! -e /tmp/leaked").await.status, 0);
                 assert_eq!(shell.run("echo alive").await.stdout, "alive\n");
             }));

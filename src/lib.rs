@@ -48,10 +48,6 @@
 //! }
 //! ```
 //!
-//! On native targets, recursive shell execution grows the stack as needed when
-//! polling or cancelling a future. It stays on the caller's thread and retains
-//! the configured recursion limit. WASM uses the stack supplied by its host.
-//!
 //! ## Sandboxing with Bind Mounts
 //!
 //! The shell starts with an empty virtual filesystem. Use bind mounts to
