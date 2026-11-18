@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::commands::CommandResult;
-use crate::exec::{CommandLookup, find_all_in_path, lookup_command};
+use crate::exec::{CommandLookup, find_all_in_path, lookup_command, lookup_command_before_path};
 use crate::os::{Kernel, Process};
 use crate::prelude::*;
 
@@ -55,12 +55,20 @@ pub fn builtin_which<'a>(
         let mut status = 0;
         for name in names {
             let mut printed = Vec::new();
-            match lookup_command(os, proc, name, false).await {
+            // With -a, PATH is walked once below, so the lookup stops before
+            // its own PATH search: each entry is probed once.
+            let walk = all && !name.contains('/');
+            let found = if walk {
+                lookup_command_before_path(os, proc, name, false)
+            } else {
+                lookup_command(os, proc, name, false).await
+            };
+            match found {
                 Some(CommandLookup::Builtin) => printed.push(name.clone()),
                 Some(CommandLookup::Path(path)) => printed.push(path),
                 Some(CommandLookup::Function) | None => {}
             }
-            if all && !name.contains('/') {
+            if walk {
                 for path in find_all_in_path(os, proc, name, true).await {
                     if !printed.contains(&path) {
                         printed.push(path);
