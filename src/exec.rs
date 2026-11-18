@@ -14,6 +14,8 @@ use crate::os::{
 };
 use crate::parser::{self, Connector, Item, Redirect, Word, WordPart};
 
+mod stack;
+
 /// Foreground tasks that abort on drop when the kernel has a command fallback or the
 /// process is a background job.
 struct ForegroundTasks {
@@ -1918,7 +1920,15 @@ fn captured_status(result: Result<i32, ControlFlow>, last_exit: i32) -> i32 {
 
 /// Execute a command line, capturing stdout along with the exit status of the last
 /// item it ran or the control flow that stopped it.
-async fn run_capturing_status(
+fn run_capturing_status<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    command_line: &'a parser::CommandLine,
+) -> impl std::future::Future<Output = (String, Result<i32, ControlFlow>)> + 'a {
+    stack::run(run_capturing_status_inner(os, proc, command_line))
+}
+
+async fn run_capturing_status_inner(
     os: Arc<dyn Kernel>,
     proc: &mut Process,
     command_line: &parser::CommandLine,
@@ -2354,7 +2364,15 @@ async fn execute_command_line_inner(
     Ok(last_exit)
 }
 
-async fn execute_item(
+fn execute_item<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    item: &'a parser::Item,
+) -> impl std::future::Future<Output = Result<i32, ControlFlow>> + 'a {
+    stack::run(execute_item_inner(os, proc, item))
+}
+
+async fn execute_item_inner(
     os: Arc<dyn Kernel>,
     proc: &mut Process,
     item: &parser::Item,

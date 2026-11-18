@@ -5969,6 +5969,87 @@ fn default_max_depth_is_nonzero() {
     }));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn recursive_execution_on_worker_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let (rt, local) = rt();
+            rt.block_on(local.run_until(async {
+                let mut shell = Shell::builder().build().unwrap();
+                let out = shell
+                    .run(
+                        "f() { local n=$1; if [ \"$n\" -gt 0 ]; then f \"$((n - 1))\"; \
+                         else answer=bottom; fi; }; f 60; echo \"$answer\"",
+                    )
+                    .await;
+                assert_eq!(out.status, 0, "{}", out.stderr);
+                assert_eq!(out.stdout, "bottom\n");
+                assert!(out.stderr.is_empty(), "{}", out.stderr);
+
+                let captured = format!(
+                    "x=$({}echo captured; {}); echo \"$x\"",
+                    "{ ".repeat(60),
+                    "}; ".repeat(60),
+                );
+                let out = shell.run(&captured).await;
+                assert_eq!(out.status, 0, "{}", out.stderr);
+                assert_eq!(out.stdout, "captured\n");
+
+                let out = shell.run("f 64").await;
+                assert_ne!(out.status, 0);
+                assert!(
+                    out.stderr.contains("maximum recursion depth exceeded"),
+                    "{}",
+                    out.stderr
+                );
+            }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn recursive_execution_can_be_cancelled_on_worker_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let (rt, local) = rt();
+            rt.block_on(local.run_until(async {
+                let mut shell = Shell::builder().max_depth(0).build().unwrap();
+                let kernel = shell.kernel().clone();
+                let proc = kernel.new_process();
+                let mut run = Box::pin(shell.run(
+                    "f() { if [ \"$1\" -gt 0 ]; then f \"$(($1 - 1))\"; \
+                     else touch /tmp/ready; sleep 60; echo leaked > /tmp/leaked; fi; }; f 500",
+                ));
+                let ready = async {
+                    while !kernel.stat(&proc, "/tmp/ready").await.exists {
+                        tokio::task::yield_now().await;
+                    }
+                };
+                tokio::select! {
+                    out = run.as_mut() => panic!(
+                        "run ended before cancellation: status={}, stderr={}",
+                        out.status, out.stderr
+                    ),
+                    result = tokio::time::timeout(std::time::Duration::from_secs(10), ready) => {
+                        result.expect("recursive call did not reach the bottom");
+                    }
+                }
+                stacker::grow(64 * 1024, || drop(run));
+                assert_eq!(shell.run("test ! -e /tmp/leaked").await.status, 0);
+                assert_eq!(shell.run("echo alive").await.stdout, "alive\n");
+            }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[test]
 fn max_depth_blocks_deep_eval() {
     let (rt, local) = rt();

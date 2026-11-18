@@ -54,6 +54,7 @@ napi-derive = { version = "3", optional = true }
 pyo3 = { version = "0.30", features = ["extension-module"], optional = true }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 rustyline = { version = "19", optional = true }
+stacker = "0.1"
 tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "io-std", "fs", "time", "process"] }
 
 # ----- Unix-only dependencies -----

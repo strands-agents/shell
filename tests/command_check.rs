@@ -142,6 +142,58 @@ struct CheckingKernel {
     fail_record: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct StackCheckingKernel {
+    inner: Arc<dyn Kernel>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+forwarding_kernel!(StackCheckingKernel {
+    async fn check_command(&self, request: &CommandRequest) -> io::Result<()> {
+        if stacker::remaining_stack().is_some_and(|remaining| remaining < 512 * 1024) {
+            return Err(io::Error::other("not enough stack for the command policy"));
+        }
+        self.inner.check_command(request).await
+    }
+});
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn recursive_functions_leave_stack_for_command_checks() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            block_on(async {
+                let (checked, _) = checking_shell();
+                let inner = checked.kernel().clone();
+                let mut shell = Shell::with_kernel(Arc::new(StackCheckingKernel { inner }));
+                let out = shell
+                    .run(
+                        "f() { if [ \"$1\" -gt 0 ]; then f \"$(($1 - 1))\"; \
+                         else echo bottom; fi; }; f 60",
+                    )
+                    .await;
+                assert_eq!(out.status, 0, "{}", out.stderr);
+                assert_eq!(out.stdout, "bottom\n");
+                assert!(out.stderr.is_empty(), "{}", out.stderr);
+
+                assert_eq!(shell.run("echo keep > /tmp/keep").await.status, 0);
+                let out = shell
+                    .run(
+                        "f() { if [ \"$1\" -gt 0 ]; then f \"$(($1 - 1))\"; \
+                         else rm /tmp/keep; fi; }; f 60",
+                    )
+                    .await;
+                assert_eq!(out.status, 126);
+                assert_eq!(out.stderr, "strands-shell: rm: denied by policy\n");
+                assert_eq!(shell.run("cat /tmp/keep").await.stdout, "keep\n");
+            });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 forwarding_kernel!(CheckingKernel {
     async fn check_command(&self, request: &CommandRequest) -> io::Result<()> {
         self.events.lock().unwrap().push(Event::Check(
