@@ -1,0 +1,23 @@
+status: 0
+stderr: non-empty
+--- stdout
+r=[unset]
+after assignment r=[unset]
+r2=1
+r2=1
+x=1
+after prefix x=[unset]
+a=1
+b=2
+a=changed
+c=3
+y gone from env
+y=[unset]
+y=3
+z=1
+w=inner
+w=outer
+w=outer
+in g v=set
+after g v=global
+q=[unset]

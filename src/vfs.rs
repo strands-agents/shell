@@ -56,6 +56,8 @@ pub struct Inode {
     pub gid: Gid,
     pub nlink: u32,
     pub mtime: SystemTime,
+    /// The access time, which only an explicit time change sets.
+    pub atime: SystemTime,
 }
 
 impl Inode {
@@ -64,6 +66,7 @@ impl Inode {
             InodeData::Dir(_) => 2, // . and parent
             _ => 1,
         };
+        let now = SystemTime::now();
         Self {
             ino: alloc_ino(),
             data,
@@ -71,7 +74,8 @@ impl Inode {
             uid,
             gid,
             nlink,
-            mtime: SystemTime::now(),
+            mtime: now,
+            atime: now,
         }
     }
 }
@@ -106,6 +110,7 @@ impl Vfs {
             gid: ROOT_GID,
             nlink: 2,
             mtime: SystemTime::now(),
+            atime: SystemTime::now(),
         };
         let mut inodes = HashMap::new();
         inodes.insert(ROOT_INO, root);
@@ -320,6 +325,7 @@ impl Vfs {
             gid,
             nlink: 2,
             mtime: SystemTime::now(),
+            atime: SystemTime::now(),
         };
         self.inodes.insert(ino, inode);
         self.dir_insert(parent_ino, &name, ino)?;
@@ -628,6 +634,7 @@ impl Vfs {
                     dev: 0,
                     ino: inode.ino,
                     modified: Some(inode.mtime),
+                    accessed: Some(inode.atime),
                 }
             }
         }

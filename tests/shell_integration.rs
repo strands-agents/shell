@@ -2712,6 +2712,83 @@ expect!(
     "1"
 );
 
+// ── which ───────────────────────────────────────────────────────────
+
+expect_output!(
+    which_agrees_with_command_v,
+    "for n in ls cd echo; do [ \"$(which $n)\" = \"$(command -v $n)\" ] || echo differ $n; done; which ls cd",
+    "ls\ncd\n",
+    "",
+    0
+);
+expect_output!(
+    which_missing_prints_nothing,
+    "which nonexistent_cmd_xyz",
+    "",
+    "",
+    1
+);
+expect_output!(
+    which_some_missing_exits_one,
+    "which ls nonexistent_cmd_xyz cat",
+    "ls\ncat\n",
+    "",
+    1
+);
+expect_output!(
+    which_finds_a_script_on_path,
+    "mkdir -p /tmp/bin; printf '#!/bin/sh\\n' > /tmp/bin/tool; chmod +x /tmp/bin/tool; \
+     PATH=/tmp/bin:$PATH; which tool; command -v tool",
+    "/tmp/bin/tool\n/tmp/bin/tool\n",
+    "",
+    0
+);
+expect_output!(
+    which_all_lists_every_path_match,
+    "mkdir -p /tmp/bin; printf '#!/bin/sh\\n' > /tmp/bin/ls; chmod +x /tmp/bin/ls; \
+     PATH=/tmp/bin:$PATH; which -a ls; which ls",
+    "ls\n/tmp/bin/ls\n/bin/ls\nls\n",
+    "",
+    0
+);
+expect_output!(
+    which_skips_functions,
+    "f() { :; }; which f; echo $?; command -v f",
+    "1\nf\n",
+    "",
+    0
+);
+expect_output!(
+    which_rejects_unknown_option,
+    "which -x ls",
+    "",
+    "strands-shell: which: -x: invalid option\nusage: which [-a] name ...\n",
+    2
+);
+expect_output!(
+    which_without_names_prints_usage,
+    "which",
+    "",
+    "usage: which [-a] name ...\n",
+    1
+);
+expect_output!(
+    which_rejects_unknown_long_option,
+    "which --all ls",
+    "",
+    "strands-shell: which: --all: invalid option\nusage: which [-a] name ...\n",
+    2
+);
+expect_output!(
+    which_checks_a_name_with_a_slash_as_a_path,
+    "mkdir -p /tmp/b; printf '#!/bin/sh\\n' > /tmp/b/s; chmod +x /tmp/b/s; cd /tmp/b; \
+     which -a /bin/ls ./s; command -v ./s; cd /tmp; PATH=/tmp:$PATH which b/s ./missing; echo $?",
+    "/bin/ls\n./s\n./s\nb/s\n1\n",
+    "",
+    0
+);
+expect_output!(which_double_dash_ends_options, "which -- -a", "", "", 1);
+
 // ── builtin builtin ─────────────────────────────────────────────────
 
 expect!(builtin_runs_echo, "builtin echo hello", "hello");
@@ -9293,6 +9370,181 @@ fn the_shells_own_stdin_reaches_a_substitution() {
         let out = shell.run(r#"input=$(cat); echo "[$input]""#).await;
         assert_eq!(out.stdout, "[{\"event\":1}]\n");
         assert_eq!(out.stderr, "");
+    }));
+}
+
+/// The ways to give the shell a stdin that stays open.
+#[derive(Clone, Copy, Debug)]
+enum OpenStdin {
+    Channel,
+    Outside,
+}
+
+/// Run `script` with a 500 ms timeout, on a stdin that got `input` and has no end-of-file.
+async fn run_on_open_stdin(
+    script: &str,
+    stdin: OpenStdin,
+    input: &'static [u8],
+) -> (Shell, strands_shell::Output) {
+    let mut shell = Shell::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .unwrap();
+    let (tx, rx) = strands_shell::os::pipe(4);
+    tx.send(bytes::Bytes::from_static(input)).await.unwrap();
+    match stdin {
+        OpenStdin::Channel => shell.proc.set_channel_reader(0, rx),
+        OpenStdin::Outside => shell.proc.set_outside_reader(0, rx),
+    }
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), shell.run(script))
+        .await
+        .unwrap_or_else(|_| panic!("{script} on {stdin:?} stdin: the deadline did not end it"));
+    drop(tx);
+    (shell, out)
+}
+
+#[test]
+fn a_read_from_stdin_with_no_end_stops_at_the_deadline() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for stdin in [OpenStdin::Channel, OpenStdin::Outside] {
+            for script in [
+                "cat",
+                "read x",
+                "x=$(cat)",
+                "x=$(read y)",
+                "(cat)",
+                "cat | cat",
+                "sleep 10 | cat",
+                "grep x",
+                "grep x; touch /tmp/after",
+                "lua -e 'io.write(\"ran\")'; touch /tmp/after",
+                "x=$(cat); touch /tmp/after",
+            ] {
+                if matches!(stdin, OpenStdin::Outside) && script.starts_with("lua") {
+                    continue;
+                }
+                let started = std::time::Instant::now();
+                let (mut shell, out) = run_on_open_stdin(script, stdin, b"first part").await;
+                assert!(
+                    !out.stdout.contains("ran"),
+                    "{script} on {stdin:?} stdin: ran after the deadline"
+                );
+                let (status, stderr) = (out.status, out.stderr);
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(3),
+                    "{script} on {stdin:?} stdin: {:?}",
+                    started.elapsed()
+                );
+                assert_eq!(status, 1, "{script} on {stdin:?} stdin: {stderr:?}");
+                let lines: Vec<&str> = stderr.lines().collect();
+                assert!(
+                    !lines.is_empty()
+                        && lines
+                            .iter()
+                            .all(|line| line.ends_with("execution timeout exceeded")),
+                    "{script} on {stdin:?} stdin: {stderr:?}"
+                );
+                assert!(
+                    lines
+                        .iter()
+                        .filter(|line| **line == "strands-shell: execution timeout exceeded")
+                        .count()
+                        <= 1,
+                    "{script} on {stdin:?} stdin: {stderr:?}"
+                );
+                let after = shell.run("test ! -e /tmp/after").await;
+                assert_eq!(
+                    after.status, 0,
+                    "{script} on {stdin:?} stdin: a later command ran"
+                );
+            }
+        }
+    }));
+}
+
+#[test]
+fn a_read_cut_off_by_the_deadline_leaves_its_partial_line_for_the_next_read() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, out) = run_on_open_stdin("read x", OpenStdin::Outside, b"abc").await;
+        assert_eq!(out.status, 1, "{}", out.stderr);
+        let next = shell.run("read y; echo \"[$y]\"").await;
+        assert_eq!(next.stdout, "[abc]\n", "{}", next.stderr);
+    }));
+}
+
+#[test]
+fn a_read_from_stdin_that_ends_in_time_is_unchanged() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            ("cat", "first\nsecond\n"),
+            ("read x; echo \"[$x]\"", "[first]\n"),
+            ("x=$(cat); echo \"[$x]\"", "[first\nsecond]\n"),
+            ("x=$(read y; echo \"$y\"); echo \"[$x]\"", "[first]\n"),
+            ("(cat)", "first\nsecond\n"),
+        ] {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let (tx, rx) = strands_shell::os::pipe(4);
+            shell.proc.set_outside_reader(0, rx);
+            let feed = tokio::task::spawn_local(async move {
+                tx.send(bytes::Bytes::from_static(b"first\n"))
+                    .await
+                    .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tx.send(bytes::Bytes::from_static(b"second\n"))
+                    .await
+                    .unwrap();
+            });
+            let out = shell.run(script).await;
+            feed.await.unwrap();
+            assert_eq!(out.stdout, expected, "{script}: {}", out.stderr);
+            assert_eq!(out.stderr, "", "{script}");
+            assert_eq!(out.status, 0, "{script}");
+        }
+    }));
+}
+
+#[test]
+fn a_closed_stdin_is_unchanged_by_the_deadline() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            ("cat", "first part"),
+            ("read x; echo \"[$x]\"", "[first part]\n"),
+            ("x=$(cat); echo \"[$x]\"", "[first part]\n"),
+            ("x=$(read y; echo \"$y\"); echo \"[$x]\"", "[first part]\n"),
+            ("(cat)", "first part"),
+            ("read x; cat; echo \"[$x]\"", "[first part]\n"),
+        ] {
+            for stdin in [OpenStdin::Channel, OpenStdin::Outside] {
+                let mut shell = Shell::builder()
+                    .timeout(std::time::Duration::from_millis(500))
+                    .build()
+                    .unwrap();
+                let (tx, rx) = strands_shell::os::pipe(4);
+                tx.send(bytes::Bytes::from_static(b"first part"))
+                    .await
+                    .unwrap();
+                drop(tx);
+                match stdin {
+                    OpenStdin::Channel => shell.proc.set_channel_reader(0, rx),
+                    OpenStdin::Outside => shell.proc.set_outside_reader(0, rx),
+                }
+                let out = shell.run(script).await;
+                assert_eq!(
+                    out.stdout, expected,
+                    "{script} on {stdin:?}: {}",
+                    out.stderr
+                );
+                assert_eq!(out.stderr, "", "{script} on {stdin:?}");
+                assert_eq!(out.status, 0, "{script} on {stdin:?}");
+            }
+        }
     }));
 }
 

@@ -91,7 +91,23 @@ fn is_special(name: &str) -> bool {
 }
 
 async fn find_in_path(os: &dyn Kernel, proc: &Process, name: &str) -> Option<String> {
-    let path_var = proc.env.get("PATH")?;
+    find_all_in_path(os, proc, name, false)
+        .await
+        .into_iter()
+        .next()
+}
+
+/// Every executable named `name` in PATH order, stopping at the first unless `all`.
+pub(crate) async fn find_all_in_path(
+    os: &dyn Kernel,
+    proc: &Process,
+    name: &str,
+    all: bool,
+) -> Vec<String> {
+    let mut found = Vec::new();
+    let Some(path_var) = proc.env.get("PATH") else {
+        return found;
+    };
     for dir in path_var.split(':') {
         let full = if dir.is_empty() {
             format!("./{name}")
@@ -99,10 +115,56 @@ async fn find_in_path(os: &dyn Kernel, proc: &Process, name: &str) -> Option<Str
             format!("{dir}/{name}")
         };
         if os.is_executable(proc, &full).await {
-            return Some(full);
+            found.push(full);
+            if !all {
+                break;
+            }
         }
     }
-    None
+    found
+}
+
+/// What `command -v` finds for a name.
+pub(crate) enum CommandLookup {
+    /// A builtin, a registered command, or a name the command fallback serves.
+    Builtin,
+    /// A shell function.
+    Function,
+    /// An executable file, from the hash table or a PATH search.
+    Path(String),
+}
+
+/// Resolve `name` as `command -v` does: builtins and registered commands, then
+/// functions, then the hash table, then PATH. With `functions` false, shell
+/// functions are not consulted, as for `which`, which locates commands only.
+/// A name containing `/` is a path and is found only when it is executable.
+pub(crate) async fn lookup_command(
+    os: &dyn Kernel,
+    proc: &Process,
+    name: &str,
+    functions: bool,
+) -> Option<CommandLookup> {
+    if name.contains('/') {
+        return os
+            .is_executable(proc, name)
+            .await
+            .then(|| CommandLookup::Path(name.to_string()));
+    }
+    let function = functions && proc.get_function(name).is_some();
+    if is_special(name)
+        || crate::builtins::lookup(name).is_some()
+        || crate::commands::lookup(name).is_some()
+        || (!function && command_fallback::serves(os, name))
+    {
+        return Some(CommandLookup::Builtin);
+    }
+    if function {
+        return Some(CommandLookup::Function);
+    }
+    if let Some(path) = proc.hash_table.get(name) {
+        return Some(CommandLookup::Path(path.clone()));
+    }
+    find_in_path(os, proc, name).await.map(CommandLookup::Path)
 }
 
 /// Resolve an executable path to either a multicall command name or a shebang interpreter + script.
@@ -3125,34 +3187,28 @@ async fn execute_pipeline_checked(
                         let verbose = args[0] == "-V";
                         let mut status = 0;
                         for name in &args[1..] {
-                            if is_special(name)
-                                || crate::builtins::lookup(name).is_some()
-                                || crate::commands::lookup(name).is_some()
-                                || (proc.get_function(name).is_none()
-                                    && command_fallback::serves(&*os, name))
-                            {
-                                if verbose {
-                                    let label = if is_special(name) {
-                                        "a special shell builtin"
+                            match lookup_command(&*os, proc, name, true).await {
+                                Some(CommandLookup::Builtin) => {
+                                    if verbose {
+                                        let label = if is_special(name) {
+                                            "a special shell builtin"
+                                        } else {
+                                            "a shell builtin"
+                                        };
+                                        proc.out_msg(&format!("{name} is {label}"));
                                     } else {
-                                        "a shell builtin"
-                                    };
-                                    proc.out_msg(&format!("{name} is {label}"));
-                                } else {
-                                    proc.out_msg(name);
+                                        proc.out_msg(name);
+                                    }
                                 }
-                            } else if proc.get_function(name).is_some() {
-                                if verbose {
-                                    proc.out_msg(&format!("{name} is a shell function"));
-                                } else {
-                                    proc.out_msg(name);
+                                Some(CommandLookup::Function) => {
+                                    if verbose {
+                                        proc.out_msg(&format!("{name} is a shell function"));
+                                    } else {
+                                        proc.out_msg(name);
+                                    }
                                 }
-                            } else if let Some(path) = proc.hash_table.get(name.as_str()).cloned() {
-                                proc.out_msg(&path);
-                            } else if let Some(path) = find_in_path(&*os, proc, name).await {
-                                proc.out_msg(&path);
-                            } else {
-                                status = 1;
+                                Some(CommandLookup::Path(path)) => proc.out_msg(&path),
+                                None => status = 1,
                             }
                         }
                         return Ok(status);
