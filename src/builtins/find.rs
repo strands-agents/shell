@@ -88,6 +88,101 @@ enum Expr {
     Print0,
     Exec(Vec<String>, bool), // (cmd_template, plus_mode)
     True,
+    /// `-size`: comparison, count, unit in bytes.
+    Size(Cmp, u64, u64),
+    /// `-mtime`/`-mmin`: comparison, reference age and window in seconds,
+    /// and the current time, filled in by `resolve_times`.
+    Age(Cmp, f64, f64, Option<std::time::SystemTime>),
+    /// `-newer FILE`: FILE and its mtime, filled in by `resolve_times`.
+    Newer(String, Option<std::time::SystemTime>),
+}
+
+#[derive(Clone, Copy)]
+enum Cmp {
+    Lt,
+    Eq,
+    Gt,
+}
+
+/// Split a leading `+` (greater than) or `-` (less than) off a numeric argument.
+fn split_cmp(s: &str) -> (Cmp, &str) {
+    if let Some(rest) = s.strip_prefix('+') {
+        (Cmp::Gt, rest)
+    } else if let Some(rest) = s.strip_prefix('-') {
+        (Cmp::Lt, rest)
+    } else {
+        (Cmp::Eq, s)
+    }
+}
+
+/// Parse `-size [+-]N[bcwkMG]`, which counts the size in units rounded up.
+fn parse_size(arg: &str) -> Result<Expr, String> {
+    let Some(last) = arg.chars().last() else {
+        return Err("find: invalid null argument to -size".into());
+    };
+    let (num, unit) = match last {
+        'b' => (&arg[..arg.len() - 1], 512),
+        'c' => (&arg[..arg.len() - 1], 1),
+        'w' => (&arg[..arg.len() - 1], 2),
+        'k' => (&arg[..arg.len() - 1], 1024),
+        'M' => (&arg[..arg.len() - 1], 1024 * 1024),
+        'G' => (&arg[..arg.len() - 1], 1024 * 1024 * 1024),
+        c if c.is_ascii_digit() => (arg, 512),
+        c => return Err(format!("find: invalid -size type `{c}'")),
+    };
+    let (cmp, digits) = split_cmp(num);
+    match digits.parse::<u64>() {
+        Ok(n) if digits.bytes().all(|b| b.is_ascii_digit()) => Ok(Expr::Size(cmp, n, unit)),
+        _ => Err(format!("find: Invalid argument `{arg}' to -size")),
+    }
+}
+
+/// Parse the `[+-]N` of `-mtime` (`unit` 86400) or `-mmin` (`unit` 60).
+fn parse_age(pred: &str, arg: &str, unit: f64) -> Result<Expr, String> {
+    let (cmp, num) = split_cmp(arg);
+    let valid = num.bytes().any(|b| b.is_ascii_digit())
+        && num.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        && num.bytes().filter(|&b| b == b'.').count() <= 1;
+    let n: f64 = match num.parse() {
+        Ok(n) if valid => n,
+        _ => return Err(format!("find: invalid argument `{arg}' to `{pred}'")),
+    };
+    // GNU counts -mtime N and +N from the N+1th day back, and -mtime -N
+    // from one second past the Nth. -mmin has no such shift.
+    let base = match cmp {
+        _ if pred != "-mtime" => n * unit,
+        Cmp::Lt => n * unit + 1.0,
+        _ => (n + 1.0) * unit,
+    };
+    Ok(Expr::Age(cmp, base, unit, None))
+}
+
+/// Fill in the current time for `-mtime`/`-mmin` and the mtime of each
+/// `-newer FILE` (without following a symlink).
+fn resolve_times<'a>(
+    os: &'a dyn Kernel,
+    expr: &'a mut Expr,
+    now: std::time::SystemTime,
+) -> Pin<Box<dyn Future<Output = Result<(), String>> + 'a>> {
+    Box::pin(async move {
+        match expr {
+            Expr::Age(.., at) => *at = Some(now),
+            Expr::Newer(file, reference) => {
+                let st = io::lstat(os, file).await;
+                if !st.exists {
+                    return Err(format!("find: '{file}': No such file or directory"));
+                }
+                *reference = Some(st.modified.unwrap_or(std::time::UNIX_EPOCH));
+            }
+            Expr::Not(e) => resolve_times(os, e, now).await?,
+            Expr::And(a, b) | Expr::Or(a, b) => {
+                resolve_times(os, a, now).await?;
+                resolve_times(os, b, now).await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    })
 }
 
 fn parse_expr(args: &[String], pos: &mut usize) -> Result<Expr, String> {
@@ -178,6 +273,22 @@ fn parse_primary(args: &[String], pos: &mut usize) -> Result<Expr, String> {
             *pos += 1;
             Ok(Expr::Print0)
         }
+        "-size" => {
+            *pos += 1;
+            parse_size(&need_arg(args, pos)?)
+        }
+        "-mtime" => {
+            *pos += 1;
+            parse_age(tok, &need_arg(args, pos)?, 86400.0)
+        }
+        "-mmin" => {
+            *pos += 1;
+            parse_age(tok, &need_arg(args, pos)?, 60.0)
+        }
+        "-newer" => {
+            *pos += 1;
+            need_arg(args, pos).map(|f| Expr::Newer(f, None))
+        }
         "-exec" => {
             *pos += 1;
             let mut cmd = Vec::new();
@@ -263,6 +374,33 @@ fn eval_expr(
             }
             let (mb, pb) = eval_expr(b, path, name, st, is_empty_dir);
             (mb, pa || pb)
+        }
+        Expr::Size(cmp, n, unit) => {
+            let units = st.len.div_ceil(*unit);
+            let m = match cmp {
+                Cmp::Lt => units < *n,
+                Cmp::Eq => units == *n,
+                Cmp::Gt => units > *n,
+            };
+            (m, false)
+        }
+        Expr::Age(cmp, base, window, now) => {
+            let m = matches!((st.modified, now), (Some(mtime), Some(now)) if {
+                let age = match now.duration_since(mtime) {
+                    Ok(d) => d.as_secs_f64(),
+                    Err(e) => -e.duration().as_secs_f64(),
+                };
+                match cmp {
+                    Cmp::Lt => age < *base,
+                    Cmp::Eq => age > *base - *window && age <= *base,
+                    Cmp::Gt => age > *base,
+                }
+            });
+            (m, false)
+        }
+        Expr::Newer(_, reference) => {
+            let m = matches!((st.modified, reference), (Some(t), Some(r)) if t > *r);
+            (m, false)
         }
         Expr::Print | Expr::Print0 | Expr::Exec(..) => (true, true),
     }
@@ -359,16 +497,21 @@ pub fn builtin_find<'a>(
         }
 
         let mut pos = 0;
-        let expr = match parse_expr(&filtered, &mut pos) {
+        let mut expr = match parse_expr(&filtered, &mut pos) {
             Ok(e) => e,
             Err(e) => {
                 proc.err_msg(&e);
                 return Ok(1);
             }
         };
+        if let Err(e) = resolve_times(os, &mut expr, os.now()).await {
+            proc.err_msg(&e);
+            return Ok(1);
+        }
 
         let default_print = !has_action(&expr);
         let mut w = io::stdout()?;
+        let mut ew = io::stderr().ok();
         let mut exec_plus_matches: Vec<String> = Vec::new();
         let mut exec_plus_cmd: Option<Vec<String>> = None;
 
@@ -377,6 +520,7 @@ pub fn builtin_find<'a>(
                 os,
                 proc,
                 &mut w,
+                &mut ew,
                 start_path,
                 &expr,
                 max_depth,
@@ -409,6 +553,9 @@ pub fn builtin_find<'a>(
             let mut sub = exec_fork(proc);
             let _ = Box::pin(crate::exec::execute(os_arc, &mut sub, &line)).await;
             w.write_all(sub.captured_output.as_bytes()).await?;
+            if let Some(ew) = ew.as_mut() {
+                ew.write_all(sub.captured_stderr.as_bytes()).await?;
+            }
         }
 
         Ok(0)
@@ -419,6 +566,7 @@ fn walk<'a>(
     os: &'a dyn Kernel,
     proc: &'a mut Process,
     w: &'a mut crate::os::FdWriter,
+    ew: &'a mut Option<crate::os::FdWriter>,
     path: &'a str,
     expr: &'a Expr,
     max_depth: Option<usize>,
@@ -448,7 +596,17 @@ fn walk<'a>(
             let (matched, has_act) = eval_expr(expr, path, name, &st, is_empty_dir);
             if matched {
                 if has_act {
-                    do_actions(os, proc, w, expr, path, exec_plus_matches, exec_plus_cmd).await?;
+                    do_actions(
+                        os,
+                        proc,
+                        w,
+                        ew,
+                        expr,
+                        path,
+                        exec_plus_matches,
+                        exec_plus_cmd,
+                    )
+                    .await?;
                 } else if default_print {
                     w.write_all(path.as_bytes()).await?;
                     w.write_all(b"\n").await?;
@@ -475,6 +633,7 @@ fn walk<'a>(
                         os,
                         proc,
                         w,
+                        ew,
                         &child,
                         expr,
                         max_depth,
@@ -492,10 +651,12 @@ fn walk<'a>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn do_actions<'a>(
     os: &'a dyn Kernel,
     proc: &'a mut Process,
     w: &'a mut crate::os::FdWriter,
+    ew: &'a mut Option<crate::os::FdWriter>,
     expr: &'a Expr,
     path: &'a str,
     exec_plus_matches: &'a mut Vec<String>,
@@ -535,14 +696,27 @@ fn do_actions<'a>(
                     let mut sub = exec_fork(proc);
                     let _ = Box::pin(crate::exec::execute(os_arc, &mut sub, &line)).await;
                     w.write_all(sub.captured_output.as_bytes()).await?;
+                    if let Some(ew) = ew.as_mut() {
+                        ew.write_all(sub.captured_stderr.as_bytes()).await?;
+                    }
                 }
             }
             Expr::And(a, b) | Expr::Or(a, b) => {
-                do_actions(os, proc, w, a, path, exec_plus_matches, exec_plus_cmd).await?;
-                do_actions(os, proc, w, b, path, exec_plus_matches, exec_plus_cmd).await?;
+                do_actions(os, proc, w, ew, a, path, exec_plus_matches, exec_plus_cmd).await?;
+                do_actions(os, proc, w, ew, b, path, exec_plus_matches, exec_plus_cmd).await?;
             }
             Expr::Not(inner) => {
-                do_actions(os, proc, w, inner, path, exec_plus_matches, exec_plus_cmd).await?;
+                do_actions(
+                    os,
+                    proc,
+                    w,
+                    ew,
+                    inner,
+                    path,
+                    exec_plus_matches,
+                    exec_plus_cmd,
+                )
+                .await?;
             }
             _ => {}
         }

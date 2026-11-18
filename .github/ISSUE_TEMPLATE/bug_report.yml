@@ -1,7 +1,6 @@
 name: Bug Report
 description: Report a bug in Strands Shell
 title: "[BUG] "
-labels: ["triage"]
 assignees: []
 body:
   - type: markdown

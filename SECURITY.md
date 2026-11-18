@@ -48,7 +48,10 @@ network, and credential operations flow through this interface. The default
    can escape declared mounts
 2. **Network SSRF guard** — two-layer check: URL-level parse + DNS-resolution-time
    IP filtering via `SafeResolver`. Blocks RFC1918, link-local, loopback, IMDS,
-   IPv4-mapped-IPv6, 6to4, Teredo
+   `0.0.0.0/8`, two cloud metadata addresses outside `169.254.0.0/16`, and
+   the IPv4 address inside IPv4-mapped, IPv4-compatible, IPv4-translated, NAT64
+   (`64:ff9b::/96`; all of `64:ff9b:1::/48`), 6to4, and Teredo IPv6 addresses.
+   A NAT64 network that uses its own prefix is not covered
 3. **Credential injection** — per-URL prefix matching with path-boundary checks;
    credentials injected only on original request, stripped on redirects
 4. **No syscalls** — pure userspace shell; no `fork`, `exec`, or raw syscall paths

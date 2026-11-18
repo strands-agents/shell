@@ -411,6 +411,7 @@ impl Kernel for VfsKernel {
                 return Err(io::Error::other("file size limit exceeded"));
             }
             let (tx, rx) = crate::os::pipe(8192);
+            let writers = tx.downgrade();
             let size_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let fd = proc.alloc_fd(FdKind::ChannelWriter {
                 tx,
@@ -418,7 +419,7 @@ impl Kernel for VfsKernel {
             })?;
             let append = flags.append;
             // Spawn a task to collect writes and flush to VFS
-            tokio::task::spawn_local(async move {
+            let drain = tokio::task::spawn_local(async move {
                 let mut rx = rx;
                 let mut buf = if append {
                     let v = vfs_ref.lock().await;
@@ -435,7 +436,11 @@ impl Kernel for VfsKernel {
                 }
                 let mut v = vfs_ref.lock().await;
                 let _ = v.write_file(ino, buf);
+                Ok(())
             });
+            // Tracked so that a command can wait for the content, as for a host write. The drain
+            // ignores a failed VFS write, so settling it reports no error.
+            proc.track_host_write(abs.clone(), writers, drain);
             Ok(fd)
         } else {
             Err(io::Error::new(
@@ -771,6 +776,46 @@ impl Kernel for VfsKernel {
         Ok(())
     }
 
+    async fn set_times(&self, proc: &Process, path: &str, times: FileTimes) -> io::Result<()> {
+        let abs = Self::abs(proc, path);
+        let mut vfs = self.vfs.lock().await;
+        if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
+            drop(vfs);
+            if ro {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "read-only bind mount",
+                ));
+            }
+            return host_set_times(&host_path, times);
+        }
+        let ino = vfs.resolve(&abs, true)?;
+        // As `utimensat` does: the owner may set any time, and a writer may set the current time.
+        let explicit = [times.accessed, times.modified]
+            .iter()
+            .any(|change| matches!(change, TimeChange::To(_)));
+        let owner = vfs.get(ino)?.uid == LASH_UID || LASH_UID == 0;
+        if !owner && (explicit || !vfs.check_permission(ino, LASH_UID, LASH_GID, 2)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ));
+        }
+        let now = std::time::SystemTime::now();
+        let inode = vfs.get_mut(ino)?;
+        for (change, slot) in [
+            (times.accessed, &mut inode.atime),
+            (times.modified, &mut inode.mtime),
+        ] {
+            match change {
+                TimeChange::Keep => {}
+                TimeChange::Now => *slot = now,
+                TimeChange::To(time) => *slot = time,
+            }
+        }
+        Ok(())
+    }
+
     fn now(&self) -> std::time::SystemTime {
         std::time::SystemTime::now()
     }
@@ -1093,6 +1138,68 @@ impl Kernel for VfsKernel {
     }
 }
 
+/// Set a host file's times with `utimensat`, following a symbolic link as `touch` does.
+#[cfg(unix)]
+fn host_set_times(path: &std::path::Path, times: FileTimes) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    let specification = [
+        host_timespec(times.accessed)?,
+        host_timespec(times.modified)?,
+    ];
+    // SAFETY: path is a valid NUL-terminated string, and specification holds the two timespec
+    // values utimensat reads.
+    let result =
+        unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), specification.as_ptr(), 0) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn host_set_times(_path: &std::path::Path, _times: FileTimes) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "touch cannot set times on this host",
+    ))
+}
+
+/// The `utimensat` value for one time change.
+#[cfg(unix)]
+fn host_timespec(change: TimeChange) -> io::Result<libc::timespec> {
+    let out_of_range = || io::Error::new(io::ErrorKind::InvalidInput, "time is out of range");
+    let (seconds, nanoseconds): (libc::time_t, libc::c_long) = match change {
+        TimeChange::Keep => (0, libc::UTIME_OMIT),
+        TimeChange::Now => (0, libc::UTIME_NOW),
+        TimeChange::To(time) => match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => (
+                libc::time_t::try_from(after.as_secs()).map_err(|_| out_of_range())?,
+                libc::c_long::from(after.subsec_nanos() as i32),
+            ),
+            Err(before) => {
+                let before = before.duration();
+                let seconds =
+                    libc::time_t::try_from(before.as_secs()).map_err(|_| out_of_range())?;
+                match before.subsec_nanos() {
+                    0 => (-seconds, 0),
+                    nanoseconds => (
+                        -seconds - 1,
+                        libc::c_long::from(1_000_000_000 - nanoseconds as i32),
+                    ),
+                }
+            }
+        },
+    };
+    // SAFETY: timespec is a plain C struct, and every field is set below.
+    let mut spec: libc::timespec = unsafe { std::mem::zeroed() };
+    spec.tv_sec = seconds;
+    spec.tv_nsec = nanoseconds;
+    Ok(spec)
+}
+
 // --- host stat helper ---
 
 #[cfg(unix)]
@@ -1139,6 +1246,7 @@ async fn host_stat(path: &std::path::Path) -> FileStat {
         dev: 0,
         ino: 0,
         modified: meta.modified().ok(),
+        accessed: meta.accessed().ok(),
     }
 }
 
@@ -1162,6 +1270,7 @@ fn host_stat_sync(path: &std::path::Path) -> FileStat {
         dev: 0,
         ino: 0,
         modified: meta.modified().ok(),
+        accessed: meta.accessed().ok(),
     }
 }
 
@@ -1365,6 +1474,12 @@ fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
                 || v4.is_link_local()
                 || v4.is_unspecified()
                 || v4.octets()[..2] == [169, 254]
+                // 0.0.0.0/8 ("this network") is reserved and not globally reachable,
+                // so curl refuses it by default; allowed_urls can still permit it.
+                || v4.octets()[0] == 0
+                // Platform metadata endpoints outside the ranges above.
+                || v4 == std::net::Ipv4Addr::new(168, 63, 129, 16) // Azure WireServer
+                || v4 == std::net::Ipv4Addr::new(100, 100, 100, 200) // Alibaba Cloud metadata
         }
         std::net::IpAddr::V6(v6) => {
             // Loopback (::1)
@@ -1392,6 +1507,23 @@ fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
             }
             // Link-local (fe80::/10)
             if segs[0] & 0xffc0 == 0xfe80 {
+                return true;
+            }
+            // IPv4-translated / SIIT (::ffff:0:0:0/96) — check embedded IPv4
+            if segs[..6] == [0, 0, 0, 0, 0xffff, 0] {
+                let o = v6.octets();
+                let v4 = std::net::Ipv4Addr::new(o[12], o[13], o[14], o[15]);
+                return is_ip_blocked(std::net::IpAddr::V4(v4));
+            }
+            // NAT64 well-known prefix (64:ff9b::/96, RFC 6052) — check embedded IPv4
+            if segs[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+                let o = v6.octets();
+                let v4 = std::net::Ipv4Addr::new(o[12], o[13], o[14], o[15]);
+                return is_ip_blocked(std::net::IpAddr::V4(v4));
+            }
+            // NAT64 local-use prefix (64:ff9b:1::/48, RFC 8215) — never globally
+            // routed and its embedding offset is operator-chosen, so block it all.
+            if segs[0] == 0x0064 && segs[1] == 0xff9b && segs[2] == 0x0001 {
                 return true;
             }
             // 6to4 (2002::/16) — check embedded IPv4
@@ -1536,6 +1668,34 @@ mod url_safety_tests {
             "ftp://example.com/",      // non-http scheme
         ] {
             assert!(check_url_safe(u).is_err(), "{u} should be blocked");
+        }
+    }
+
+    #[test]
+    fn check_url_safe_blocks_translated_and_platform_metadata_addresses() {
+        for u in [
+            "http://[64:ff9b::a9fe:a9fe]/", // NAT64 -> 169.254.169.254
+            "http://[64:ff9b::169.254.169.254]/",
+            "http://[64:ff9b::7f00:1]/",      // NAT64 -> 127.0.0.1
+            "http://[64:ff9b::a00:1]/",       // NAT64 -> 10.0.0.1
+            "http://[64:ff9b:1::a9fe:a9fe]/", // RFC 8215 local-use NAT64
+            "http://[::ffff:0:a9fe:a9fe]/",   // SIIT IPv4-translated
+            "http://168.63.129.16/",          // Azure WireServer
+            "http://100.100.100.200/",        // Alibaba Cloud metadata
+            "http://0.1.2.3/",                // 0.0.0.0/8
+        ] {
+            assert!(check_url_safe(u).is_err(), "{u} should be blocked");
+        }
+    }
+
+    #[test]
+    fn check_url_safe_allows_public_destinations_behind_nat64_and_shared_space() {
+        for u in [
+            "http://[64:ff9b::808:808]/", // NAT64 -> 8.8.8.8 stays reachable
+            "http://100.64.0.1/",         // RFC 6598 shared space is not metadata
+            "http://100.100.100.201/",    // neighbour of the Alibaba endpoint
+        ] {
+            assert!(check_url_safe(u).is_ok(), "{u} should be allowed");
         }
     }
 

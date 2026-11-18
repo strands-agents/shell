@@ -9,17 +9,20 @@ mod getopts;
 mod hash;
 mod local;
 pub mod lua;
+mod lua_pattern;
 mod printf;
 mod pwd;
 mod read;
 mod set;
 mod shift;
+mod shopt;
 mod test;
 mod trap;
 mod type_cmd;
 mod umask;
 mod unset;
 mod wait;
+mod which;
 mod xargs;
 
 use crate::commands::CommandResult;
@@ -54,6 +57,7 @@ pub fn lookup(name: &str) -> Option<BuiltinFn> {
         "readonly" => Some(export::builtin_readonly),
         "set" => Some(set::builtin_set),
         "shift" => Some(shift::builtin_shift),
+        "shopt" => Some(shopt::builtin_shopt),
         "test" | "[" => Some(test::builtin_test),
         "trap" => Some(trap::builtin_trap),
         "type" => Some(type_cmd::builtin_type),
@@ -61,6 +65,7 @@ pub fn lookup(name: &str) -> Option<BuiltinFn> {
         "unalias" => Some(alias::builtin_unalias),
         "unset" => Some(unset::builtin_unset),
         "wait" => Some(wait::builtin_wait),
+        "which" => Some(which::builtin_which),
         "xargs" => Some(xargs::builtin_xargs),
         _ => None,
     }

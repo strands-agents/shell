@@ -33,7 +33,9 @@ async fn cmd_sleep(_os: &dyn Kernel, args: &[String]) -> CommandResult {
         if let Some(dl) = deadline {
             tokio::select! {
                 _ = tokio::time::sleep(sleep_dur) => {}
-                _ = tokio::time::sleep_until(dl) => {}
+                _ = tokio::time::sleep_until(dl) => {
+                    return Err("execution timeout exceeded".into());
+                }
             }
         } else {
             tokio::time::sleep(sleep_dur).await;

@@ -1,0 +1,13 @@
+status: 0
+stderr: empty
+--- stdout
+AND_RAN
+OR_RAN
+dot=0
+AND_RAN
+OR_RAN
+source=0
+AND_RAN
+OR_RAN
+sh=0
+guard=1

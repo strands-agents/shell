@@ -6,6 +6,7 @@ Stream editor for filtering and transforming text.
 Options:
   -e SCRIPT  add SCRIPT to the commands to be executed
   -n         suppress automatic printing of pattern space
+  -E, -r     use extended regular expressions instead of basic ones
   -i[SUFFIX] edit files in place (optionally creating backup)";
 
 /// A parsed address.
@@ -49,7 +50,7 @@ enum Op {
     WriteFile(String), // w FILE
 }
 
-fn parse_addr(s: &str, pos: &mut usize) -> Option<Addr> {
+fn parse_addr(s: &str, pos: &mut usize, extended: bool) -> Option<Addr> {
     let chars: Vec<char> = s.chars().collect();
     if *pos >= chars.len() {
         return None;
@@ -84,12 +85,13 @@ fn parse_addr(s: &str, pos: &mut usize) -> Option<Addr> {
         if *pos < chars.len() {
             *pos += 1;
         } // skip closing /
+        let pat = if extended { pat } else { bre_to_ere(&pat) };
         return Some(Addr::Regex(pat, false));
     }
     None
 }
 
-fn parse_sub(s: &str, pos: &mut usize) -> Option<Op> {
+fn parse_sub(s: &str, pos: &mut usize, extended: bool) -> Option<Op> {
     let chars: Vec<char> = s.chars().collect();
     if *pos >= chars.len() {
         return None;
@@ -142,7 +144,11 @@ fn parse_sub(s: &str, pos: &mut usize) -> Option<Op> {
         *pos += 1;
     }
     Some(Op::Sub {
-        pattern,
+        pattern: if extended {
+            pattern
+        } else {
+            bre_to_ere(&pattern)
+        },
         replacement,
         global,
         icase,
@@ -168,7 +174,7 @@ fn parse_text_arg(s: &str, pos: &mut usize) -> String {
     s[start..].to_string()
 }
 
-fn parse_script(script: &str) -> Result<Vec<Cmd>, String> {
+fn parse_script(script: &str, extended: bool) -> Result<Vec<Cmd>, String> {
     let mut cmds = Vec::new();
     let chars: Vec<char> = script.chars().collect();
     let mut pos = 0;
@@ -192,11 +198,11 @@ fn parse_script(script: &str) -> Result<Vec<Cmd>, String> {
             continue;
         }
 
-        let addr1 = parse_addr(script, &mut pos);
+        let addr1 = parse_addr(script, &mut pos, extended);
         // Skip comma for range
         let addr2 = if pos < chars.len() && chars[pos] == ',' {
             pos += 1;
-            parse_addr(script, &mut pos)
+            parse_addr(script, &mut pos, extended)
         } else {
             None
         };
@@ -241,7 +247,7 @@ fn parse_script(script: &str) -> Result<Vec<Cmd>, String> {
         };
 
         let op = match op_char {
-            's' => parse_sub(script, &mut pos).ok_or("sed: invalid s command")?,
+            's' => parse_sub(script, &mut pos, extended).ok_or("sed: invalid s command")?,
             'd' => Op::Delete,
             'p' => Op::Print,
             'q' => Op::Quit,
@@ -324,29 +330,54 @@ fn addr_matches(addr: &Addr, lineno: usize, line: &str, is_last: bool) -> bool {
     }
 }
 
-/// Convert BRE (Basic Regular Expression) escapes to ERE for the regex crate.
-/// BRE uses \( \) \{ \} for groups/repetition; ERE uses ( ) { }.
+/// Convert a POSIX BRE (Basic Regular Expression) to the syntax of the regex crate.
+///
+/// In a BRE `\( \) \{ \}` (and the GNU `\+ \? \|`) are operators, while a
+/// bare `( ) { } + ? |` matches itself. A `*` at the start (or right after a
+/// leading `^`) and a `$` anywhere but the end are literal too.
 fn bre_to_ere(pat: &str) -> String {
     let mut out = String::with_capacity(pat.len());
     let chars: Vec<char> = pat.chars().collect();
     let mut i = 0;
+    // True at the start of the pattern, a `\(` group or a `\|` branch
+    let mut at_start = true;
     while i < chars.len() {
-        if chars[i] == '\\' && i + 1 < chars.len() {
-            match chars[i + 1] {
-                '(' | ')' | '{' | '}' => {
-                    out.push(chars[i + 1]);
-                    i += 2;
+        let c = chars[i];
+        let was_start = std::mem::replace(&mut at_start, false);
+        if c == '\\' && i + 1 < chars.len() {
+            let next = chars[i + 1];
+            match next {
+                '(' | '|' => {
+                    out.push(next);
+                    at_start = true;
                 }
+                ')' | '{' | '}' | '+' | '?' => out.push(next),
                 _ => {
                     out.push('\\');
-                    out.push(chars[i + 1]);
-                    i += 2;
+                    out.push(next);
                 }
             }
-        } else {
-            out.push(chars[i]);
-            i += 1;
+            i += 2;
+            continue;
         }
+        match c {
+            '(' | ')' | '{' | '}' | '+' | '?' | '|' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '*' if was_start => out.push_str("\\*"),
+            '^' if was_start => {
+                out.push('^');
+                at_start = true;
+            }
+            '$' => {
+                let rest = &chars[i + 1..];
+                let anchor = rest.is_empty() || matches!(rest, ['\\', ')' | '|', ..]);
+                out.push_str(if anchor { "$" } else { "\\$" });
+            }
+            _ => out.push(c),
+        }
+        i += 1;
     }
     out
 }
@@ -359,8 +390,7 @@ fn apply_sub(
     icase: bool,
 ) -> Option<String> {
     let flags = if icase { "(?i)" } else { "" };
-    let ere_pattern = bre_to_ere(pattern);
-    let re = match regex::Regex::new(&format!("{flags}{ere_pattern}")) {
+    let re = match regex::Regex::new(&format!("{flags}{pattern}")) {
         Ok(r) => r,
         Err(_) => return None,
     };
@@ -431,12 +461,14 @@ async fn cmd_sed(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut parser = lexopt::Parser::from_args(args);
     let mut scripts: Vec<String> = Vec::new();
     let mut suppress = false;
+    let mut extended = false;
     let mut in_place: Option<Option<String>> = None; // None = not in-place, Some(None) = -i, Some(Some(suffix)) = -i.suffix
     let mut files: Vec<String> = Vec::new();
 
     while let Some(arg) = parser.next()? {
         match arg {
             Short('n') => suppress = true,
+            Short('E') | Short('r') | Long("regexp-extended") => extended = true,
             Short('e') => scripts.push(parser.value()?.to_string_lossy().into_owned()),
             Short('i') => {
                 // -i may have an optional suffix attached or as next arg
@@ -463,7 +495,7 @@ async fn cmd_sed(os: &dyn Kernel, args: &[String]) -> CommandResult {
     }
 
     let combined = scripts.join("\n");
-    let cmds = match parse_script(&combined) {
+    let cmds = match parse_script(&combined, extended) {
         Ok(c) => c,
         Err(e) => {
             let mut w = io::stderr()?;

@@ -29,8 +29,10 @@ async fn cmd_mkdir(os: &dyn Kernel, args: &[String]) -> CommandResult {
     for dir in &dirs {
         if parents {
             // Build each component
+            let parts: Vec<&str> = dir.split('/').collect();
+            let target = parts.iter().rposition(|part| !part.is_empty());
             let mut path = String::new();
-            for part in dir.split('/') {
+            for (index, part) in parts.iter().enumerate() {
                 if part.is_empty() && path.is_empty() {
                     path.push('/');
                     continue;
@@ -39,10 +41,19 @@ async fn cmd_mkdir(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     path.push('/');
                 }
                 path.push_str(part);
-                let st = io::stat(os, &path).await;
-                if !st.exists {
-                    io::create_dir(os, &path).await?;
+                let is_ancestor = target.is_some_and(|target| index < target);
+                let skip = if is_ancestor {
+                    match io::try_stat(os, &path).await {
+                        Ok(stat) => stat.exists,
+                        Err(err) => err.kind() == std::io::ErrorKind::PermissionDenied,
+                    }
+                } else {
+                    io::stat(os, &path).await.exists
+                };
+                if skip {
+                    continue;
                 }
+                io::create_dir(os, &path).await?;
             }
         } else {
             io::create_dir(os, dir).await?;

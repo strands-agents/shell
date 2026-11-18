@@ -58,6 +58,9 @@ pub fn builtin_hash<'a>(
 
         let mut status = 0;
         for name in names {
+            if crate::command_fallback::serves(os, name) {
+                continue;
+            }
             match find_in_path(os, proc, name).await {
                 Some(path) => {
                     Arc::make_mut(&mut proc.hash_table).insert(name.clone(), path);
