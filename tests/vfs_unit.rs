@@ -877,6 +877,15 @@ fn normalize_dotdot_past_root() {
     assert_eq!(normalize("/../../a"), "/a");
 }
 
+// ── absolute ────────────────────────────────────────────────────────
+
+#[test]
+fn absolute_joins_relative_and_keeps_absolute() {
+    let cwd = std::path::Path::new("/home/lash");
+    assert_eq!(absolute(cwd, "a/../b"), "/home/lash/b");
+    assert_eq!(absolute(cwd, "/tmp/./x"), "/tmp/x");
+}
+
 // ── create_dev_nodes ────────────────────────────────────────────────
 
 #[test]

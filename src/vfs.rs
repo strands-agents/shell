@@ -743,6 +743,18 @@ pub fn normalize(path: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
+/// `path` made absolute against `cwd`, with `.` and `..` folded.
+///
+/// Every kernel that resolves a spelling against a working directory should use this, so they
+/// all read a path the same way.
+pub fn absolute(cwd: &std::path::Path, path: &str) -> String {
+    if path.starts_with('/') {
+        normalize(path)
+    } else {
+        normalize(&format!("{}/{}", cwd.display(), path))
+    }
+}
+
 /// Split a path into (parent, basename).
 fn split_path(path: &str) -> (String, String) {
     let path = normalize(path);
