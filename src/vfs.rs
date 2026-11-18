@@ -743,10 +743,7 @@ pub fn normalize(path: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
-/// `path` made absolute against `cwd`, with `.` and `..` folded.
-///
-/// Every kernel that resolves a spelling against a working directory should use this, so they
-/// all read a path the same way.
+/// Make a path absolute against `cwd`, then normalize it.
 pub fn absolute(cwd: &std::path::Path, path: &str) -> String {
     if path.starts_with('/') {
         normalize(path)
