@@ -743,6 +743,15 @@ pub fn normalize(path: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
+/// Make a path absolute against `cwd`, then normalize it.
+pub fn absolute(cwd: &std::path::Path, path: &str) -> String {
+    if path.starts_with('/') {
+        normalize(path)
+    } else {
+        normalize(&format!("{}/{}", cwd.display(), path))
+    }
+}
+
 /// Split a path into (parent, basename).
 fn split_path(path: &str) -> (String, String) {
     let path = normalize(path);
