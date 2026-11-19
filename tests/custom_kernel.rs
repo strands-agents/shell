@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use bytes::Bytes;
 use strands_shell::os::{
-    DirEntry, Fd, FdKind, FileStat, HttpRequest, Kernel, OpenFlags, Process, pipe,
+    DirEntry, Fd, FdKind, FileStat, HttpRequest, Kernel, OpenFlags, Process, SystemInfo, pipe,
 };
 use strands_shell::parser::{self, CommandLine, Connector, Item, Redirect, WordPart};
 use strands_shell::{
@@ -313,6 +313,16 @@ impl Kernel for MemKernel {
     fn now(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
     }
+
+    fn system(&self) -> SystemInfo {
+        SystemInfo {
+            kernel_name: "Darwin".into(),
+            kernel_release: "24.6.0".into(),
+            machine: "arm64".into(),
+            operating_system: "Darwin".into(),
+            ..SystemInfo::default()
+        }
+    }
 }
 
 /// A `MemKernel` that records each path lookup, and answers [`Kernel::try_stat`]
@@ -475,6 +485,16 @@ fn shell_starts_with_the_kernel_process() {
         assert_eq!(out.status, 0);
         assert_eq!(out.stdout, "/work\nfrom-kernel /work\n");
         assert_eq!(out.stderr, "");
+    });
+}
+
+#[test]
+fn uname_describes_the_kernel_system() {
+    let kernel = MemKernel::new();
+    let mut shell = shell_over(&kernel);
+    block_on(async {
+        let out = shell.run("uname -srmo").await;
+        assert_eq!(out.stdout, "Darwin 24.6.0 arm64 Darwin\n");
     });
 }
 

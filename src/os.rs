@@ -87,6 +87,35 @@ pub struct FileTimes {
     pub modified: TimeChange,
 }
 
+/// The system that `uname` describes, as [`Kernel::system`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemInfo {
+    /// The kernel name, for `uname -s`.
+    pub kernel_name: String,
+    /// The kernel release, for `uname -r`.
+    pub kernel_release: String,
+    /// The kernel version, for `uname -v`.
+    pub kernel_version: String,
+    /// The machine hardware name, for `uname -m`.
+    pub machine: String,
+    /// The operating system, for `uname -o`.
+    pub operating_system: String,
+}
+
+impl Default for SystemInfo {
+    /// The virtual system, which never shows the host. The release is the Strands Shell version,
+    /// and the machine is the architecture the shell was built for.
+    fn default() -> Self {
+        Self {
+            kernel_name: "Linux".into(),
+            kernel_release: env!("CARGO_PKG_VERSION").into(),
+            kernel_version: "#1".into(),
+            machine: std::env::consts::ARCH.into(),
+            operating_system: "Linux".into(),
+        }
+    }
+}
+
 /// Access permission modes for Kernel::access().
 pub const ACCESS_R: i32 = 4;
 pub const ACCESS_W: i32 = 2;
@@ -1350,6 +1379,10 @@ pub trait Kernel: Send + Sync {
     }
     /// Return the current wall-clock time.
     fn now(&self) -> std::time::SystemTime;
+    /// Describe the system for `uname`. The default is the virtual system.
+    fn system(&self) -> SystemInfo {
+        SystemInfo::default()
+    }
     /// Check whether a URL is allowed for network access.
     /// Returns Ok(()) if allowed, Err with a message if blocked.
     fn check_url(&self, _url: &str) -> io::Result<()> {
