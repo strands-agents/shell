@@ -3442,7 +3442,7 @@ expect!(
     uname_a,
     "uname -a; uname -a -p -i; uname -snrvmpio",
     format!(
-        "Linux localhost {0} #1 {1} Linux\nLinux localhost {0} #1 {1} Linux\nLinux localhost {0} #1 {1} Linux",
+        "Linux localhost {0} #1 {1} Linux\nLinux localhost {0} #1 {1} Linux\nLinux localhost {0} #1 {1} unknown unknown Linux",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::ARCH
     )

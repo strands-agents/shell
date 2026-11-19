@@ -29,12 +29,12 @@ const MACHINE: u8 = 1 << 4;
 const OS: u8 = 1 << 5;
 const PROCESSOR: u8 = 1 << 6;
 const PLATFORM: u8 = 1 << 7;
-const ALL: u8 = u8::MAX;
 
 #[command("uname")]
 async fn cmd_uname(_os: &dyn Kernel, args: &[String]) -> CommandResult {
     let mut parser = lexopt::Parser::from_args(args);
     let mut fields = 0;
+    let mut all = false;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") => {
@@ -42,7 +42,7 @@ async fn cmd_uname(_os: &dyn Kernel, args: &[String]) -> CommandResult {
                 wprintln!(w, "{}", HELP)?;
                 return Ok(0);
             }
-            Short('a') | Long("all") => fields = ALL,
+            Short('a') | Long("all") => all = true,
             Short('s') | Long("kernel-name") => fields |= SYSNAME,
             Short('n') | Long("nodename") => fields |= NODENAME,
             Short('r') | Long("kernel-release") => fields |= RELEASE,
@@ -54,12 +54,11 @@ async fn cmd_uname(_os: &dyn Kernel, args: &[String]) -> CommandResult {
             _ => return Err(arg.unexpected().into()),
         }
     }
-    if fields == 0 {
+    if all {
+        // Like GNU, -a leaves out the unknown processor and platform.
+        fields = !(PROCESSOR | PLATFORM);
+    } else if fields == 0 {
         fields = SYSNAME;
-    }
-    // Like GNU, asking for every field leaves out the unknown processor and platform.
-    if fields == ALL {
-        fields &= !(PROCESSOR | PLATFORM);
     }
     let host = io::with_process(|p| match p.get_env("HOSTNAME") {
         Some(host) if !host.is_empty() => host.to_string(),
