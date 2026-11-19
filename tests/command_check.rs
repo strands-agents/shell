@@ -175,7 +175,7 @@ fn recursive_execution_leaves_stack_for_command_checks() {
                     )
                     .await;
                 assert_eq!(out.status, 0, "{}", out.stderr);
-                assert_eq!(out.stdout, "bottom\n");
+                assert_eq!(out.stdout, "bottom\n", "{}", out.stderr);
                 assert!(out.stderr.is_empty(), "{}", out.stderr);
 
                 let out = shell
@@ -184,7 +184,7 @@ fn recursive_execution_leaves_stack_for_command_checks() {
                     )
                     .await;
                 assert_eq!(out.status, 0, "{}", out.stderr);
-                assert_eq!(out.stdout, "bottom\n");
+                assert_eq!(out.stdout, "bottom\n", "{}", out.stderr);
                 assert!(out.stderr.is_empty(), "{}", out.stderr);
 
                 let out = shell
@@ -193,7 +193,7 @@ fn recursive_execution_leaves_stack_for_command_checks() {
                     )
                     .await;
                 assert_eq!(out.status, 0, "{}", out.stderr);
-                assert_eq!(out.stdout, "bottom\n");
+                assert_eq!(out.stdout, "bottom\n", "{}", out.stderr);
                 assert!(out.stderr.is_empty(), "{}", out.stderr);
 
                 assert_eq!(shell.run("echo keep > /tmp/keep").await.status, 0);

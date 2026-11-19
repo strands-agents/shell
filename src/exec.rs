@@ -2450,15 +2450,17 @@ async fn execute_item_inner(
         Item::If {
             branches,
             else_body,
-        } => Box::pin(execute_if(os, proc, branches, else_body.as_ref())).await,
+        } => box_future(|| execute_if(os, proc, branches, else_body.as_ref())).await,
         Item::While { condition, body } => {
-            Box::pin(execute_while(os, proc, condition, body, false)).await
+            box_future(|| execute_while(os, proc, condition, body, false)).await
         }
         Item::Until { condition, body } => {
-            Box::pin(execute_while(os, proc, condition, body, true)).await
+            box_future(|| execute_while(os, proc, condition, body, true)).await
         }
-        Item::For { var, words, body } => Box::pin(execute_for(os, proc, var, words, body)).await,
-        Item::Case { word, arms } => Box::pin(execute_case(os, proc, word, arms)).await,
+        Item::For { var, words, body } => {
+            box_future(|| execute_for(os, proc, var, words, body)).await
+        }
+        Item::Case { word, arms } => box_future(|| execute_case(os, proc, word, arms)).await,
         Item::Function { name, body } => {
             proc.set_function(name, body.clone());
             Ok(0)
