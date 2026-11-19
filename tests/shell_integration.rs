@@ -6546,6 +6546,16 @@ shell_test!(
 
 // ── read with prompt ──────────────────────────────────────────────
 expect!(read_heredoc, "read x <<EOF\nhello\nEOF\necho $x", "hello");
+expect!(
+    read_utf8_multibyte,
+    "printf 'café 日本語 😀\\n' | { read l; printf '%s' \"$l\"; }",
+    "café 日本語 😀"
+);
+expect!(
+    read_utf8_multibyte_fields,
+    "printf 'é 日本\\n' | { read a b; printf '%s|%s' \"$a\" \"$b\"; }",
+    "é|日本"
+);
 
 // ── compound list with semicolons ─────────────────────────────────
 expect!(
