@@ -63,6 +63,28 @@ pub struct FileStat {
     pub ino: u64,
     /// Modification time as duration since epoch.
     pub modified: Option<std::time::SystemTime>,
+    /// Access time, where the backing store records one.
+    pub accessed: Option<std::time::SystemTime>,
+}
+
+/// One time that [`Kernel::set_times`] sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeChange {
+    /// Keep the current time.
+    Keep,
+    /// Set the time to the current time, with the permission a write needs.
+    Now,
+    /// Set the time to this value, with the permission the owner has.
+    To(std::time::SystemTime),
+}
+
+/// The access and modification times that [`Kernel::set_times`] sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileTimes {
+    /// The access time.
+    pub accessed: TimeChange,
+    /// The modification time.
+    pub modified: TimeChange,
 }
 
 /// Access permission modes for Kernel::access().
@@ -664,7 +686,12 @@ impl Process {
     /// Take the reader half out of an fd, removing it from the table.
     pub fn take_reader(&mut self, fd: Fd) -> io::Result<FdReader> {
         match self.fds.remove(&fd) {
-            Some(kind) => Ok(FdReader { kind, done: false }),
+            Some(kind) => Ok(FdReader {
+                kind,
+                done: false,
+                #[cfg(not(target_arch = "wasm32"))]
+                deadline: None,
+            }),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("bad fd {fd}"),
@@ -1028,6 +1055,9 @@ pub(crate) struct TakenFd {
 pub struct FdReader {
     kind: FdKind,
     done: bool,
+    /// When a channel read stops waiting and fails with a timeout.
+    #[cfg(not(target_arch = "wasm32"))]
+    deadline: Option<std::panic::AssertUnwindSafe<Pin<Box<tokio::time::Sleep>>>>,
 }
 
 impl FdReader {
@@ -1039,7 +1069,17 @@ impl FdReader {
                 buf: Vec::new(),
             },
             done: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            deadline: None,
         }
+    }
+
+    /// Make a channel read fail with a timeout once `deadline` passes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn until(mut self, deadline: Option<tokio::time::Instant>) -> Self {
+        self.deadline =
+            deadline.map(|at| std::panic::AssertUnwindSafe(Box::pin(tokio::time::sleep_until(at))));
+        self
     }
 
     /// Consume this reader and return the underlying FdKind.
@@ -1060,6 +1100,15 @@ impl AsyncRead for FdReader {
         }
         match &mut this.kind {
             FdKind::ChannelReader { rx, buf: remainder } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(deadline) = &mut this.deadline
+                    && deadline.as_mut().poll(cx).is_ready()
+                {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "execution timeout exceeded",
+                    )));
+                }
                 if !remainder.is_empty() {
                     let n = remainder.len().min(buf.remaining());
                     buf.put_slice(&remainder[..n]);
@@ -1286,6 +1335,19 @@ pub trait Kernel: Send + Sync {
     async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String>;
     /// Set Unix permission mode bits on a path.
     async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()>;
+    /// Set the access and modification times of the file a path names, following a symlink as
+    /// [`Kernel::stat`] does.
+    ///
+    /// Permission follows `utimensat`: [`TimeChange::Now`] needs write access, [`TimeChange::To`]
+    /// needs ownership, and [`TimeChange::Keep`] leaves that time alone. A kernel that wraps
+    /// another must forward this. The default refuses with `Unsupported`, so a kernel that
+    /// predates this method still builds; `touch` of an existing file then fails on it.
+    async fn set_times(&self, _proc: &Process, _path: &str, _times: FileTimes) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this kernel cannot set file times",
+        ))
+    }
     /// Return the current wall-clock time.
     fn now(&self) -> std::time::SystemTime;
     /// Check whether a URL is allowed for network access.

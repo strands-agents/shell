@@ -41,7 +41,13 @@ pub fn stdout() -> std::io::Result<FdWriter> {
 
 /// Take stdin (fd 0) from the current process.
 pub fn stdin() -> std::io::Result<FdReader> {
-    CURRENT_PROCESS.with(|p| p.borrow_mut().take_reader(STDIN))
+    CURRENT_PROCESS.with(|p| {
+        let mut p = p.borrow_mut();
+        let reader = p.take_reader(STDIN)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let reader = reader.until(p.deadline);
+        Ok(reader)
+    })
 }
 
 /// Take stderr (fd 2) from the current process.
@@ -171,6 +177,26 @@ pub async fn set_permissions(os: &dyn Kernel, path: &str, mode: u32) -> std::io:
     let result = os.set_permissions(&proc, path, mode).await;
     CURRENT_PROCESS.with(|p| p.replace(proc));
     result
+}
+
+/// Set the access and modification times of a path via the kernel.
+pub async fn set_times(
+    os: &dyn Kernel,
+    path: &str,
+    times: crate::os::FileTimes,
+) -> std::io::Result<()> {
+    let proc = CURRENT_PROCESS.with(|p| p.replace(Process::empty()));
+    let result = os.set_times(&proc, path, times).await;
+    CURRENT_PROCESS.with(|p| p.replace(proc));
+    result
+}
+
+/// Wait for the current process's closed host writes, and return one message per failure.
+pub(crate) async fn settle_host_writes() -> Vec<String> {
+    let proc = CURRENT_PROCESS.with(|p| p.replace(Process::empty()));
+    let failures = proc.settle_host_writes().await;
+    CURRENT_PROCESS.with(|p| p.replace(proc));
+    failures
 }
 
 #[macro_export]
