@@ -1,0 +1,11 @@
+status: 0
+stderr: empty
+--- stdout
+dir/sub/x
+dir/x
+dir//sub/x
+dir//x
+dir/sub/
+dir/sub/x
+./dir/sub/x
+./dir/x
