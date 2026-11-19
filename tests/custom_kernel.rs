@@ -318,9 +318,9 @@ impl Kernel for MemKernel {
         SystemInfo {
             kernel_name: "Darwin".into(),
             kernel_release: "24.6.0".into(),
+            kernel_version: "Darwin Kernel Version 24.6.0".into(),
             machine: "arm64".into(),
             operating_system: "Darwin".into(),
-            ..SystemInfo::default()
         }
     }
 }
@@ -493,8 +493,11 @@ fn uname_describes_the_kernel_system() {
     let kernel = MemKernel::new();
     let mut shell = shell_over(&kernel);
     block_on(async {
-        let out = shell.run("uname -srmo").await;
-        assert_eq!(out.stdout, "Darwin 24.6.0 arm64 Darwin\n");
+        let out = shell.run("uname -a").await;
+        assert_eq!(
+            out.stdout,
+            "Darwin localhost 24.6.0 Darwin Kernel Version 24.6.0 arm64 Darwin\n"
+        );
     });
 }
 

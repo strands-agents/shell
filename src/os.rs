@@ -103,8 +103,8 @@ pub struct SystemInfo {
 }
 
 impl Default for SystemInfo {
-    /// The virtual system, which never shows the host. The release is the Strands Shell version,
-    /// and the machine is the architecture the shell was built for.
+    /// The virtual system, which never shows the host: `Linux`, with the Strands Shell version as
+    /// its release and the architecture Shell was built for as its machine.
     fn default() -> Self {
         Self {
             kernel_name: "Linux".into(),
@@ -1379,7 +1379,7 @@ pub trait Kernel: Send + Sync {
     }
     /// Return the current wall-clock time.
     fn now(&self) -> std::time::SystemTime;
-    /// Describe the system for `uname`. The default is the virtual system.
+    /// Return the system that `uname` describes. The default is [`SystemInfo::default`].
     fn system(&self) -> SystemInfo {
         SystemInfo::default()
     }
