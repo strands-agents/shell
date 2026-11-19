@@ -2753,6 +2753,83 @@ expect!(
     "1"
 );
 
+// ── which ───────────────────────────────────────────────────────────
+
+expect_output!(
+    which_agrees_with_command_v,
+    "for n in ls cd echo; do [ \"$(which $n)\" = \"$(command -v $n)\" ] || echo differ $n; done; which ls cd",
+    "ls\ncd\n",
+    "",
+    0
+);
+expect_output!(
+    which_missing_prints_nothing,
+    "which nonexistent_cmd_xyz",
+    "",
+    "",
+    1
+);
+expect_output!(
+    which_some_missing_exits_one,
+    "which ls nonexistent_cmd_xyz cat",
+    "ls\ncat\n",
+    "",
+    1
+);
+expect_output!(
+    which_finds_a_script_on_path,
+    "mkdir -p /tmp/bin; printf '#!/bin/sh\\n' > /tmp/bin/tool; chmod +x /tmp/bin/tool; \
+     PATH=/tmp/bin:$PATH; which tool; command -v tool",
+    "/tmp/bin/tool\n/tmp/bin/tool\n",
+    "",
+    0
+);
+expect_output!(
+    which_all_lists_every_path_match,
+    "mkdir -p /tmp/bin; printf '#!/bin/sh\\n' > /tmp/bin/ls; chmod +x /tmp/bin/ls; \
+     PATH=/tmp/bin:$PATH; which -a ls; which ls",
+    "ls\n/tmp/bin/ls\n/bin/ls\nls\n",
+    "",
+    0
+);
+expect_output!(
+    which_skips_functions,
+    "f() { :; }; which f; echo $?; command -v f",
+    "1\nf\n",
+    "",
+    0
+);
+expect_output!(
+    which_rejects_unknown_option,
+    "which -x ls",
+    "",
+    "strands-shell: which: -x: invalid option\nusage: which [-a] name ...\n",
+    2
+);
+expect_output!(
+    which_without_names_prints_usage,
+    "which",
+    "",
+    "usage: which [-a] name ...\n",
+    1
+);
+expect_output!(
+    which_rejects_unknown_long_option,
+    "which --all ls",
+    "",
+    "strands-shell: which: --all: invalid option\nusage: which [-a] name ...\n",
+    2
+);
+expect_output!(
+    which_checks_a_name_with_a_slash_as_a_path,
+    "mkdir -p /tmp/b; printf '#!/bin/sh\\n' > /tmp/b/s; chmod +x /tmp/b/s; cd /tmp/b; \
+     which -a /bin/ls ./s; command -v ./s; cd /tmp; PATH=/tmp:$PATH which b/s ./missing; echo $?",
+    "/bin/ls\n./s\n./s\nb/s\n1\n",
+    "",
+    0
+);
+expect_output!(which_double_dash_ends_options, "which -- -a", "", "", 1);
+
 // ── builtin builtin ─────────────────────────────────────────────────
 
 expect!(builtin_runs_echo, "builtin echo hello", "hello");
@@ -4444,6 +4521,46 @@ expect!(
 );
 
 // ── tail coverage ───────────────────────────────────────────────────
+
+#[test]
+fn tail_large_line_counts_preserve_small_input() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for count in [usize::MAX, usize::MAX / 2] {
+            for (cmd, expected) in [
+                (format!("printf 'a\\nb\\nc' | tail -n {count}"), "a\nb\nc"),
+                (
+                    format!(
+                        "printf 'a\\nb\\nc' > /tmp/tail-large; tail -n {count} /tmp/tail-large"
+                    ),
+                    "a\nb\nc",
+                ),
+                (format!("printf '' | tail -n {count}"), ""),
+            ] {
+                let out = shell.run(&cmd).await;
+                assert_eq!(out.status, 0, "{cmd}: {}", out.stderr);
+                assert_eq!(out.stdout, expected, "{cmd}");
+                assert!(out.stderr.is_empty(), "{cmd}: {}", out.stderr);
+            }
+        }
+    }));
+}
+
+#[test]
+fn tail_line_count_boundaries() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (count, expected) in [(0, ""), (1, "c"), (3, "a\nb\nc"), (4, "a\nb\nc")] {
+            let cmd = format!("printf 'a\\nb\\nc' | tail -n {count}");
+            let out = shell.run(&cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: {}", out.stderr);
+            assert_eq!(out.stdout, expected, "{cmd}");
+            assert!(out.stderr.is_empty(), "{cmd}: {}", out.stderr);
+        }
+    }));
+}
 
 expect!(
     tail_from_file,
@@ -6215,6 +6332,28 @@ fn printf_number_huge_field_is_capped() {
             let out = shell.run(cmd).await;
             assert_eq!(out.status, 0, "{cmd}: status");
             assert_eq!(out.stdout.len(), len, "{cmd}: length");
+        }
+    }));
+}
+
+// A huge `%s` width is clamped like the numeric ones (#300).
+#[test]
+fn printf_string_huge_width_is_capped() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, len, tail) in [
+            ("printf '%99999999999s|' a", 65536, " a|"),
+            ("printf '%99999999999999999999999s|' a", 65536, " a|"),
+            ("printf '%-99999999999s|' a", 65536, "  |"),
+            ("printf '%99999999999.1s|' ab", 65536, " a|"),
+            ("printf '%65535s|' a", 65536, " a|"),
+            ("printf '%5s|' a", 6, " a|"),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: status");
+            assert_eq!(out.stdout.len(), len, "{cmd}: length");
+            assert!(out.stdout.ends_with(tail), "{cmd}: tail");
         }
     }));
 }
@@ -13823,4 +13962,73 @@ expect!(
     errexit_ignores_a_negated_pipeline_into_a_compound,
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
+);
+
+// ── id ──────────────────────────────────────────────────────────────
+
+expect!(
+    id_default,
+    "id",
+    "uid=1000(lash) gid=1000(lash) groups=1000(lash)"
+);
+expect!(id_u, "id -u", "1000");
+expect!(id_g, "id -g", "1000");
+expect!(
+    id_un,
+    "id -un; id -nu; id -u -n; id --user --name",
+    "lash\nlash\nlash\nlash"
+);
+expect!(id_gn, "id -gn", "lash");
+expect!(id_repeated_choice, "id -u -u", "1000");
+expect!(
+    id_follows_user,
+    "USER=agent id; USER=agent id -un",
+    "uid=1000(agent) gid=1000(agent) groups=1000(agent)\nagent"
+);
+expect!(id_unset_user, "unset USER; id -un", "lash");
+expect!(id_empty_user, "USER= id -un", "lash");
+expect!(id_help, "id --help | head -1", "Usage: id [OPTION]...");
+shell_test!(
+    id_n_alone,
+    "id -n",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("default format"), "{}", out.stderr);
+    }
+);
+shell_test!(
+    id_user_and_group,
+    "id -u -g",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+        assert!(
+            out.stderr.contains("more than one choice"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    id_bad_option,
+    "id -z",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(out.stderr.contains("id: invalid option"), "{}", out.stderr);
+    }
+);
+shell_test!(
+    id_operand,
+    "id someone",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("id: unexpected argument \"someone\""),
+            "{}",
+            out.stderr
+        );
+    }
 );

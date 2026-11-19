@@ -179,6 +179,26 @@ pub async fn set_permissions(os: &dyn Kernel, path: &str, mode: u32) -> std::io:
     result
 }
 
+/// Set the access and modification times of a path via the kernel.
+pub async fn set_times(
+    os: &dyn Kernel,
+    path: &str,
+    times: crate::os::FileTimes,
+) -> std::io::Result<()> {
+    let proc = CURRENT_PROCESS.with(|p| p.replace(Process::empty()));
+    let result = os.set_times(&proc, path, times).await;
+    CURRENT_PROCESS.with(|p| p.replace(proc));
+    result
+}
+
+/// Wait for the current process's closed host writes, and return one message per failure.
+pub(crate) async fn settle_host_writes() -> Vec<String> {
+    let proc = CURRENT_PROCESS.with(|p| p.replace(Process::empty()));
+    let failures = proc.settle_host_writes().await;
+    CURRENT_PROCESS.with(|p| p.replace(proc));
+    failures
+}
+
 #[macro_export]
 macro_rules! wprint {
     ($w:expr, $($arg:tt)*) => {

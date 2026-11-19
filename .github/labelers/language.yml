@@ -1,0 +1,24 @@
+# .github/labelers/language.yml
+# Identifies which Strands Shell binding the issue relates to.
+# Use max_labels: 1 since most issues target one binding.
+
+instructions: |
+  Strands Shell is a Rust crate with Python (PyO3, strands_shell) and Node.js (napi, @strands-agents/shell) bindings.
+  Label the binding only when the issue is specific to it: its API, packaging, install, or runtime behavior (for example the Python GIL, npm types, or publishing the crate to crates.io).
+  Shell behavior that every binding shares (commands, builtins, the parser, the virtual filesystem, network rules, MCP) gets no label, even though it is implemented in Rust.
+  The bug template's "Binding" field names the binding the reporter used, not necessarily the one at fault.
+
+# On issue events, each label also sets the native "Language" issue field via `option:`.
+field:
+  name: Language
+
+labels:
+  python:
+    description: "The Python binding (strands_shell, pip, pyproject.toml, PyO3)"
+    option: Python
+  typescript:
+    description: "The Node.js binding (@strands-agents/shell, npm, index.d.ts, napi)"
+    option: TypeScript
+  rust:
+    description: "The Rust crate as a Rust dependency: its public Rust API, cargo, crates.io"
+    option: Rust

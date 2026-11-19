@@ -61,7 +61,7 @@ async fn cmd_tail(os: &dyn Kernel, args: &[String]) -> CommandResult {
         }
     } else {
         // Keep last N lines in a ring buffer
-        let mut ring: VecDeque<String> = VecDeque::with_capacity(count + 1);
+        let mut ring: VecDeque<String> = VecDeque::new();
         let mut line = String::new();
         loop {
             line.clear();
