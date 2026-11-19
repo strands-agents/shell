@@ -833,9 +833,10 @@ pub fn create_bin_links(vfs: &mut Vfs) -> io::Result<()> {
     {
         // Create /bin symlinks for all known commands on WASM
         let cmds = [
-            "basename", "cat", "chmod", "cp", "cut", "date", "dirname", "echo", "env", "false",
-            "grep", "head", "id", "jq", "ln", "ls", "mkdir", "mktemp", "mv", "pwd", "readlink",
-            "rm", "rmdir", "sed", "sort", "tail", "tee", "touch", "tr", "true", "uniq", "wc",
+            "base64", "basename", "cat", "chmod", "cp", "cut", "date", "dirname", "echo", "env",
+            "false", "grep", "head", "id", "jq", "ln", "ls", "mkdir", "mktemp", "mv", "pwd",
+            "readlink", "rm", "rmdir", "sed", "sort", "tail", "tee", "touch", "tr", "true", "uniq",
+            "wc",
         ];
         for name in cmds {
             let path = format!("/bin/{name}");
