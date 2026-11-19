@@ -314,13 +314,14 @@ impl Kernel for MemKernel {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
     }
 
-    fn system(&self) -> SystemInfo {
+    fn uname(&self) -> SystemInfo {
         SystemInfo {
             kernel_name: "Darwin".into(),
+            node_name: "studio".into(),
             kernel_release: "24.6.0".into(),
             kernel_version: "Darwin Kernel Version 24.6.0".into(),
             machine: "arm64".into(),
-            operating_system: "Darwin".into(),
+            operating_system: "macOS".into(),
         }
     }
 }
@@ -496,7 +497,7 @@ fn uname_describes_the_kernel_system() {
         let out = shell.run("uname -a").await;
         assert_eq!(
             out.stdout,
-            "Darwin localhost 24.6.0 Darwin Kernel Version 24.6.0 arm64 Darwin\n"
+            "Darwin studio 24.6.0 Darwin Kernel Version 24.6.0 arm64 macOS\n"
         );
     });
 }

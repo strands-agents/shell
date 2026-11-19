@@ -13,9 +13,6 @@ Print information about the shell's system. With no OPTION, same as -s.
   -i, --hardware-platform  print the hardware platform (always unknown)
   -o, --operating-system   print the operating system";
 
-/// The host name when `$HOSTNAME` is unset or empty, matching `hostname`.
-const DEFAULT_HOSTNAME: &str = "localhost";
-
 const SYSNAME: u8 = 1;
 const NODENAME: u8 = 1 << 1;
 const RELEASE: u8 = 1 << 2;
@@ -55,11 +52,11 @@ async fn cmd_uname(os: &dyn Kernel, args: &[String]) -> CommandResult {
     } else if fields == 0 {
         fields = SYSNAME;
     }
+    let system = os.uname();
     let host = io::with_process(|p| match p.get_env("HOSTNAME") {
         Some(host) if !host.is_empty() => host.to_string(),
-        _ => DEFAULT_HOSTNAME.to_string(),
+        _ => system.node_name.clone(),
     });
-    let system = os.system();
     let values = [
         (SYSNAME, system.kernel_name.as_str()),
         (NODENAME, host.as_str()),
