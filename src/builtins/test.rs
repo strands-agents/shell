@@ -111,7 +111,7 @@ async fn parse_primary<'a>(
     !s.is_empty()
 }
 
-fn is_unary_op(s: &str) -> bool {
+pub(crate) fn is_unary_op(s: &str) -> bool {
     matches!(
         s,
         "-n" | "-z"
@@ -138,7 +138,7 @@ fn is_unary_op(s: &str) -> bool {
     )
 }
 
-fn is_binary_op(s: &str) -> bool {
+pub(crate) fn is_binary_op(s: &str) -> bool {
     matches!(
         s,
         "=" | "=="
@@ -157,7 +157,11 @@ fn is_binary_op(s: &str) -> bool {
     )
 }
 
-async fn eval_unary(op: &str, arg: &str, os: &dyn Kernel, proc: &Process) -> bool {
+pub(crate) async fn eval_unary(op: &str, arg: &str, os: &dyn Kernel, proc: &Process) -> bool {
+    // An empty path names no file.
+    if arg.is_empty() && !matches!(op, "-n" | "-z" | "-t") {
+        return false;
+    }
     match op {
         "-n" => !arg.is_empty(),
         "-z" => arg.is_empty(),
@@ -186,7 +190,13 @@ async fn eval_unary(op: &str, arg: &str, os: &dyn Kernel, proc: &Process) -> boo
     }
 }
 
-async fn eval_binary(left: &str, op: &str, right: &str, os: &dyn Kernel, proc: &Process) -> bool {
+pub(crate) async fn eval_binary(
+    left: &str,
+    op: &str,
+    right: &str,
+    os: &dyn Kernel,
+    proc: &Process,
+) -> bool {
     match op {
         "=" | "==" => left == right,
         "!=" => left != right,

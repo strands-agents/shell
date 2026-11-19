@@ -1,0 +1,32 @@
+status: 0
+stderr: empty
+--- stdout
+nonempty
+not-empty
+file
+either
+grouped
+no-split
+pattern
+not-pattern
+no-glob
+order
+numeric
+other
+status=1
+empty-not-executable
+empty-not-dir
+empty-operand
+operator-text-is-operand
+case-arm
+skipped-operand-not-expanded
+i=0
+joined-args
+var-set
+var-unset
+arithmetic
+then [[ a
+after-pipe
+redirected
+in-function
+multi-line

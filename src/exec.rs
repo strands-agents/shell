@@ -1,5 +1,7 @@
 use std::cell::RefCell;
+use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -12,7 +14,7 @@ use crate::io::{CURRENT_KERNEL, CURRENT_PROCESS};
 use crate::os::{
     self, CommandRequest, FdReader, Kernel, OpenFlags, Process, STDERR, STDIN, STDOUT, TakenFd,
 };
-use crate::parser::{self, Connector, Item, Redirect, Word, WordPart};
+use crate::parser::{self, CondTerm, Connector, Item, Redirect, Word, WordPart};
 
 /// Foreground tasks that abort on drop when the kernel has a command fallback or the
 /// process is a background job.
@@ -2092,6 +2094,10 @@ async fn run_capturing_status(
                     }
                     (exit, s)
                 }
+                Item::Conditional(terms) => (
+                    Box::pin(execute_conditional(os.clone(), proc, terms)).await,
+                    String::new(),
+                ),
                 Item::Case { word, arms } => {
                     let value = expand_word(os.clone(), proc, word).await;
                     let mut s = String::new();
@@ -2420,6 +2426,7 @@ async fn execute_item(
         }
         Item::For { var, words, body } => Box::pin(execute_for(os, proc, var, words, body)).await,
         Item::Case { word, arms } => Box::pin(execute_case(os, proc, word, arms)).await,
+        Item::Conditional(terms) => Ok(Box::pin(execute_conditional(os, proc, terms)).await),
         Item::Function { name, body } => {
             proc.set_function(name, body.clone());
             Ok(0)
@@ -2746,6 +2753,230 @@ async fn execute_case(
         }
     }
     Ok(0)
+}
+
+/// A syntax error in `[[ ... ]]`, reported with status 2.
+struct ConditionalSyntax(String);
+
+type ConditionalResult<'a> = Pin<Box<dyn Future<Output = Result<bool, ConditionalSyntax>> + 'a>>;
+
+/// Evaluate `[[ ... ]]`, expanding each operand only when the evaluation reaches it.
+async fn execute_conditional(os: Arc<dyn Kernel>, proc: &mut Process, terms: &[CondTerm]) -> i32 {
+    let mut pos = 0;
+    match conditional_or(os, proc, terms, &mut pos).await {
+        Ok(_) if pos < terms.len() => {
+            proc.err_msg(&format!(
+                "strands-shell: [[: unexpected `{}`",
+                cond_term_text(&terms[pos])
+            ));
+            2
+        }
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(ConditionalSyntax(message)) => {
+            proc.err_msg(&format!("strands-shell: [[: {message}"));
+            2
+        }
+    }
+}
+
+fn cond_term_text(term: &CondTerm) -> String {
+    match term {
+        CondTerm::Operator(op) => op.clone(),
+        CondTerm::Operand(word) => parser::word_to_str(word).unwrap_or_default(),
+    }
+}
+
+fn is_cond_operator(term: Option<&CondTerm>, operator: &str) -> bool {
+    matches!(term, Some(CondTerm::Operator(op)) if op == operator)
+}
+
+/// The text of an operand, or of an operator word read in operand position.
+async fn cond_operand(os: Arc<dyn Kernel>, proc: &mut Process, term: &CondTerm) -> String {
+    match term {
+        CondTerm::Operator(op) => op.clone(),
+        CondTerm::Operand(word) => expand_word(os, proc, word).await,
+    }
+}
+
+fn conditional_or<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    terms: &'a [CondTerm],
+    pos: &'a mut usize,
+) -> ConditionalResult<'a> {
+    Box::pin(async move {
+        let mut result = conditional_and(os.clone(), proc, terms, pos).await?;
+        while is_cond_operator(terms.get(*pos), "||") {
+            *pos += 1;
+            if result {
+                skip_conditional_and(terms, pos)?;
+            } else {
+                result = conditional_and(os.clone(), proc, terms, pos).await?;
+            }
+        }
+        Ok(result)
+    })
+}
+
+fn conditional_and<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    terms: &'a [CondTerm],
+    pos: &'a mut usize,
+) -> ConditionalResult<'a> {
+    Box::pin(async move {
+        let mut result = conditional_not(os.clone(), proc, terms, pos).await?;
+        while is_cond_operator(terms.get(*pos), "&&") {
+            *pos += 1;
+            if result {
+                result = conditional_not(os.clone(), proc, terms, pos).await?;
+            } else {
+                skip_conditional_not(terms, pos)?;
+            }
+        }
+        Ok(result)
+    })
+}
+
+fn conditional_not<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    terms: &'a [CondTerm],
+    pos: &'a mut usize,
+) -> ConditionalResult<'a> {
+    Box::pin(async move {
+        if is_cond_operator(terms.get(*pos), "!") {
+            *pos += 1;
+            return Ok(!conditional_not(os, proc, terms, pos).await?);
+        }
+        conditional_primary(os, proc, terms, pos).await
+    })
+}
+
+/// The binary operator at `pos + 1`, when a primary there is binary.
+fn cond_binary_operator(terms: &[CondTerm], pos: usize) -> Option<&str> {
+    match terms.get(pos + 1) {
+        Some(CondTerm::Operator(op))
+            if terms.get(pos + 2).is_some()
+                && (matches!(op.as_str(), "==" | "=" | "!=" | "=~")
+                    || crate::builtins::is_binary_op(op)) =>
+        {
+            Some(op)
+        }
+        _ => None,
+    }
+}
+
+/// The unary operator at `pos`, when a primary there is unary.
+fn cond_unary_operator(terms: &[CondTerm], pos: usize) -> Option<&str> {
+    match terms.get(pos) {
+        Some(CondTerm::Operator(op))
+            if terms.get(pos + 1).is_some() && (op == "-v" || crate::builtins::is_unary_op(op)) =>
+        {
+            Some(op)
+        }
+        _ => None,
+    }
+}
+
+fn conditional_primary<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    terms: &'a [CondTerm],
+    pos: &'a mut usize,
+) -> ConditionalResult<'a> {
+    Box::pin(async move {
+        let Some(first) = terms.get(*pos) else {
+            return Err(ConditionalSyntax("expected an operand".into()));
+        };
+        if is_cond_operator(Some(first), "(") {
+            *pos += 1;
+            let result = conditional_or(os, proc, terms, pos).await?;
+            if !is_cond_operator(terms.get(*pos), ")") {
+                return Err(ConditionalSyntax("expected `)`".into()));
+            }
+            *pos += 1;
+            return Ok(result);
+        }
+        if let Some(op) = cond_binary_operator(terms, *pos) {
+            let right = &terms[*pos + 2];
+            *pos += 3;
+            if op == "=~" {
+                return Err(ConditionalSyntax("`=~` is not supported".into()));
+            }
+            let left = cond_operand(os.clone(), proc, first).await;
+            let right = cond_operand(os.clone(), proc, right).await;
+            return Ok(match op {
+                "==" | "=" => case_match(&right, &left),
+                "!=" => !case_match(&right, &left),
+                "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
+                    let (a, b) = (eval_arith(proc, &left), eval_arith(proc, &right));
+                    crate::builtins::eval_binary(
+                        &a.to_string(),
+                        op,
+                        &b.to_string(),
+                        os.as_ref(),
+                        proc,
+                    )
+                    .await
+                }
+                _ => crate::builtins::eval_binary(&left, op, &right, os.as_ref(), proc).await,
+            });
+        }
+        if let Some(op) = cond_unary_operator(terms, *pos) {
+            let operand = cond_operand(os.clone(), proc, &terms[*pos + 1]).await;
+            *pos += 2;
+            return Ok(if op == "-v" {
+                proc.get_env(&operand).is_some()
+            } else {
+                crate::builtins::eval_unary(op, &operand, os.as_ref(), proc).await
+            });
+        }
+        *pos += 1;
+        Ok(!cond_operand(os, proc, first).await.is_empty())
+    })
+}
+
+/// Step past an `||` operand that the evaluation skips, expanding nothing.
+fn skip_conditional_and(terms: &[CondTerm], pos: &mut usize) -> Result<(), ConditionalSyntax> {
+    skip_conditional_not(terms, pos)?;
+    while is_cond_operator(terms.get(*pos), "&&") {
+        *pos += 1;
+        skip_conditional_not(terms, pos)?;
+    }
+    Ok(())
+}
+
+/// Step past an `&&` operand that the evaluation skips, expanding nothing.
+fn skip_conditional_not(terms: &[CondTerm], pos: &mut usize) -> Result<(), ConditionalSyntax> {
+    while is_cond_operator(terms.get(*pos), "!") {
+        *pos += 1;
+    }
+    if is_cond_operator(terms.get(*pos), "(") {
+        *pos += 1;
+        skip_conditional_and(terms, pos)?;
+        while is_cond_operator(terms.get(*pos), "||") {
+            *pos += 1;
+            skip_conditional_and(terms, pos)?;
+        }
+        if !is_cond_operator(terms.get(*pos), ")") {
+            return Err(ConditionalSyntax("expected `)`".into()));
+        }
+        *pos += 1;
+        return Ok(());
+    }
+    if terms.get(*pos).is_none() {
+        return Err(ConditionalSyntax("expected an operand".into()));
+    }
+    *pos += if cond_binary_operator(terms, *pos).is_some() {
+        3
+    } else if cond_unary_operator(terms, *pos).is_some() {
+        2
+    } else {
+        1
+    };
+    Ok(())
 }
 
 /// Simple glob-style pattern matching for case statements.
