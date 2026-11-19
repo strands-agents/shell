@@ -3450,6 +3450,7 @@ async fn execute_pipeline_checked(
                         args: pipeline[0].args[1..].to_vec(),
                         redirects: pipeline[0].redirects.clone(),
                     };
+                    proc.skip_function = true;
                     let exit = execute_pipeline(os, proc, &[fake_cmd]).await;
                     proc.pending_exit = false;
                     stop_at_deadline(proc)?;
@@ -3546,9 +3547,9 @@ async fn settle_host_writes(proc: &mut Process, exit: i32) -> i32 {
 }
 
 /// Whether Shell runs `name` itself rather than through the command fallback.
-fn runs_in_shell(proc: &Process, name: &str) -> bool {
+fn runs_in_shell(proc: &Process, name: &str, skip_function: bool) -> bool {
     builtins::lookup(name).is_some()
-        || proc.get_function(name).is_some()
+        || (!skip_function && proc.get_function(name).is_some())
         || commands::lookup(name).is_some()
         || name == "lash"
         || name == "sh"
@@ -3637,6 +3638,7 @@ async fn run_pipeline(
     capture: bool,
 ) -> (i32, String) {
     shell_proc.deadline_stop = false;
+    let skip_function = std::mem::take(&mut shell_proc.skip_function);
     let len = pipeline.len();
     let mut tasks = ForegroundTasks::new(os.as_ref(), shell_proc);
 
@@ -3735,7 +3737,7 @@ async fn run_pipeline(
         }
         let cmd = &expanded_args[i][0];
         if builtins::lookup(cmd).is_some()
-            || shell_proc.get_function(cmd).is_some()
+            || (!skip_function && shell_proc.get_function(cmd).is_some())
             || commands::lookup(cmd).is_some()
             || command_fallback::serves(os.as_ref(), cmd)
         {
@@ -3787,7 +3789,7 @@ async fn run_pipeline(
         {
             (program, args) = (inner, rest);
         }
-        if !runs_in_shell(shell_proc, program) {
+        if !runs_in_shell(shell_proc, program, skip_function) {
             if os.command_fallback().is_some() {
                 let request = CommandRequest::new(program, args, &shell_proc.cwd);
                 if let Err(e) = os.check_fallback(&request).await {
@@ -3956,7 +3958,11 @@ async fn run_pipeline(
         }
 
         // Single command: check for functions
-        if let Some(func_body) = shell_proc.get_function(&expanded_args[0][0]).cloned() {
+        if let Some(func_body) = shell_proc
+            .get_function(&expanded_args[0][0])
+            .filter(|_| !skip_function)
+            .cloned()
+        {
             let saved_args =
                 std::mem::replace(&mut shell_proc.args, expanded_args[0][1..].to_vec());
             shell_proc.push_local_scope();
@@ -4097,7 +4103,10 @@ async fn run_pipeline(
 
         // Check for builtin, function, or script before spawning
         let builtin = builtins::lookup(&name);
-        let func_body = child.get_function(&name).cloned();
+        let func_body = child
+            .get_function(&name)
+            .filter(|_| !skip_function)
+            .cloned();
         let is_script = name == "lash" || name == "sh";
 
         if builtin.is_some() || func_body.is_some() || is_script {

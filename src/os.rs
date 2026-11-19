@@ -87,6 +87,38 @@ pub struct FileTimes {
     pub modified: TimeChange,
 }
 
+/// The `uname` fields that a kernel reports, returned by [`Kernel::uname`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemInfo {
+    /// The kernel name, for `uname -s`.
+    pub kernel_name: String,
+    /// The node name, for `uname -n` when `$HOSTNAME` is unset or empty.
+    pub node_name: String,
+    /// The kernel release, for `uname -r`.
+    pub kernel_release: String,
+    /// The kernel version, for `uname -v`.
+    pub kernel_version: String,
+    /// The machine hardware name, for `uname -m`.
+    pub machine: String,
+    /// The operating system, for `uname -o`.
+    pub operating_system: String,
+}
+
+impl Default for SystemInfo {
+    /// The virtual system, which never shows the host: `Linux` on `localhost`, with the Strands
+    /// Shell version as its release and the architecture Shell was built for as its machine.
+    fn default() -> Self {
+        Self {
+            kernel_name: "Linux".into(),
+            node_name: "localhost".into(),
+            kernel_release: env!("CARGO_PKG_VERSION").into(),
+            kernel_version: "#1".into(),
+            machine: std::env::consts::ARCH.into(),
+            operating_system: "Linux".into(),
+        }
+    }
+}
+
 /// Access permission modes for Kernel::access().
 pub const ACCESS_R: i32 = 4;
 pub const ACCESS_W: i32 = 2;
@@ -199,6 +231,8 @@ pub struct Process {
     pub(crate) pending_exit: bool,
     /// An unsupported array aborts its function without requesting a shell exit.
     pub(crate) refused_array: bool,
+    /// The next pipeline runs its command without a shell function of that name, as `command` asks.
+    pub(crate) skip_function: bool,
     /// Exit status of the last command substitution performed, for commands with no name.
     pub(crate) last_subst_status: Option<i32>,
     /// PID of last background job (for $!).
@@ -392,6 +426,7 @@ impl Process {
             deadline_stop: false,
             pending_exit: false,
             refused_array: false,
+            skip_function: false,
             last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
@@ -444,6 +479,7 @@ impl Process {
             deadline_stop: false,
             pending_exit: false,
             refused_array: false,
+            skip_function: false,
             last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
@@ -556,6 +592,7 @@ impl Process {
             deadline_stop: false,
             pending_exit: false,
             refused_array: false,
+            skip_function: false,
             last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
@@ -1350,6 +1387,10 @@ pub trait Kernel: Send + Sync {
     }
     /// Return the current wall-clock time.
     fn now(&self) -> std::time::SystemTime;
+    /// Return the `uname` fields that this kernel reports. The default is [`SystemInfo::default`].
+    fn uname(&self) -> SystemInfo {
+        SystemInfo::default()
+    }
     /// Check whether a URL is allowed for network access.
     /// Returns Ok(()) if allowed, Err with a message if blocked.
     fn check_url(&self, _url: &str) -> io::Result<()> {
