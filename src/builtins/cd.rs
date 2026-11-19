@@ -29,6 +29,9 @@ pub fn builtin_cd<'a>(
                     return Ok(1);
                 }
             }
+        } else if args[0].is_empty() {
+            // An empty operand is `.`, as in bash; the kernel refuses an empty path.
+            ".".to_string()
         } else {
             args[0].clone()
         };

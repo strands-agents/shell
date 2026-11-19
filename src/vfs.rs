@@ -743,12 +743,18 @@ pub fn normalize(path: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
-/// Make a path absolute against `cwd`, then normalize it.
-pub fn absolute(cwd: &std::path::Path, path: &str) -> String {
-    if path.starts_with('/') {
-        normalize(path)
+/// Make a path absolute against `cwd`, then normalize it. An empty path names no file, as in
+/// POSIX.
+pub fn absolute(cwd: &std::path::Path, path: &str) -> io::Result<String> {
+    if path.is_empty() {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no such file or directory",
+        ))
+    } else if path.starts_with('/') {
+        Ok(normalize(path))
     } else {
-        normalize(&format!("{}/{}", cwd.display(), path))
+        Ok(normalize(&format!("{}/{}", cwd.display(), path)))
     }
 }
 
