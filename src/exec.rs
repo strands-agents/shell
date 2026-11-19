@@ -647,6 +647,14 @@ fn expand_part_split<'a>(
                 segments.last_mut().unwrap().push(&tmp, false, false);
             }
             WordPart::DoubleQuoted(parts) => {
+                // A quoted part makes a field even when it comes out empty, except
+                // when it holds "$@", which makes no field when there are no args.
+                if !parts
+                    .iter()
+                    .any(|p| matches!(p, WordPart::Var(n) if n == "@"))
+                {
+                    segments.last_mut().unwrap().push("", false, false);
+                }
                 for p in parts {
                     expand_part_split(os.clone(), proc, p, segments, ifs, true).await;
                 }
