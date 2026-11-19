@@ -1,3 +1,4 @@
+mod base64;
 mod basename;
 mod cat;
 mod chmod;
@@ -11,6 +12,7 @@ mod env;
 mod r#false;
 mod grep;
 mod head;
+mod id;
 mod jq;
 mod ln;
 mod ls;
@@ -73,6 +75,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
     {
         // Static lookup table for WASM (inventory crate not available)
         let func: CommandFn = match name {
+            "base64" => |os, args| Box::pin(base64::cmd_base64(os, args)),
             "basename" => |os, args| Box::pin(basename::cmd_basename(os, args)),
             "cat" => |os, args| Box::pin(cat::cmd_cat(os, args)),
             "chmod" => |os, args| Box::pin(chmod::cmd_chmod(os, args)),
@@ -86,6 +89,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "false" => |os, args| Box::pin(r#false::cmd_false(os, args)),
             "grep" => |os, args| Box::pin(grep::cmd_grep(os, args)),
             "head" => |os, args| Box::pin(head::cmd_head(os, args)),
+            "id" => |os, args| Box::pin(id::cmd_id(os, args)),
             "jq" => |os, args| Box::pin(jq::cmd_jq(os, args)),
             "ln" => |os, args| Box::pin(ln::cmd_ln(os, args)),
             "ls" => |os, args| Box::pin(ls::cmd_ls(os, args)),
