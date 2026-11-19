@@ -617,7 +617,8 @@ fn expand_part_split<'a>(
                     // A quoted expansion is one field even when it comes out empty.
                     segments.last_mut().unwrap().push("", false, false);
                 }
-                if uses_alternate_word(proc, name, op, *colon) {
+                let val = resolve_var(proc, name);
+                if uses_alternate_word(val.as_deref(), op, *colon) {
                     for p in word {
                         if !quoted && let WordPart::Literal(s) = p {
                             // Unquoted, the word's own text is split like an expansion.
@@ -627,7 +628,7 @@ fn expand_part_split<'a>(
                         }
                     }
                 } else if op == "-"
-                    && let Some(v) = resolve_var(proc, name)
+                    && let Some(v) = val
                 {
                     segments.last_mut().unwrap().push(&v, !quoted, false);
                 }
@@ -656,8 +657,8 @@ fn expand_part_split<'a>(
 }
 
 /// Whether `${name-word}` or `${name+word}` expands to `word` rather than to the value.
-fn uses_alternate_word(proc: &Process, name: &str, op: &str, colon: bool) -> bool {
-    let is_unset_or_null = match resolve_var(proc, name) {
+fn uses_alternate_word(val: Option<&str>, op: &str, colon: bool) -> bool {
+    let is_unset_or_null = match val {
         None => true,
         Some(v) => colon && v.is_empty(),
     };
@@ -965,9 +966,7 @@ impl<'a> ArithParser<'a> {
 
     /// Resolve a variable name to its integer value.
     fn var_val(&self, name: &str) -> i64 {
-        self.proc
-            .env
-            .get(name)
+        resolve_var(self.proc, name)
             .and_then(|v| v.parse().ok())
             .unwrap_or(0)
     }
@@ -1406,6 +1405,7 @@ fn resolve_var(proc: &Process, name: &str) -> Option<String> {
         "$" => Some(proc.pid.to_string()),
         "!" => proc.last_bg_pid.map(|p| p.to_string()),
         "#" => Some(proc.args.len().to_string()),
+        "RANDOM" => Some(proc.next_random().to_string()),
         "-" => {
             let mut flags = String::new();
             if proc.opt_errexit {
@@ -1452,7 +1452,7 @@ fn check_nounset(proc: &mut Process, name: &str) -> bool {
     }
     // Special variables never trigger nounset
     match name {
-        "?" | "$" | "!" | "#" | "-" | "0" | "@" | "*" => return false,
+        "?" | "$" | "!" | "#" | "-" | "0" | "@" | "*" | "RANDOM" => return false,
         n if n.len() == 1 && n.as_bytes()[0].is_ascii_digit() => return false,
         _ => {}
     }
