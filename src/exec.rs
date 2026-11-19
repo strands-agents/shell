@@ -183,7 +183,16 @@ enum ExecTarget {
     Shebang(Vec<String>),
 }
 
-async fn resolve_executable(
+#[inline(never)]
+fn resolve_executable<'a>(
+    os: &'a dyn Kernel,
+    proc: &'a Process,
+    name: &'a str,
+) -> Execution<'a, Option<(String, ExecTarget)>> {
+    Box::pin(resolve_executable_inner(os, proc, name))
+}
+
+async fn resolve_executable_inner(
     os: &dyn Kernel,
     proc: &Process,
     name: &str,
@@ -2985,10 +2994,8 @@ async fn run_special_redirected(
         return Err(ControlFlow::Exit(2));
     }
     let body_os = os.clone();
-    box_future(|| {
-        run_redirected(os, proc, &redirects, move |proc| {
-            Box::pin(run_special(body_os, proc, special, args))
-        })
+    run_redirected(os, proc, &redirects, move |proc| {
+        Box::pin(run_special(body_os, proc, special, args))
     })
     .await
     .unwrap_or(Ok(1))
@@ -2997,7 +3004,20 @@ async fn run_special_redirected(
 /// Run `body` in the current shell with expanded redirections applied to its I/O.
 ///
 /// Returns `None`, without running `body`, when a redirection fails.
-async fn run_redirected<F>(
+#[inline(never)]
+fn run_redirected<'a, F>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    redirects: &'a [(Redirect, String)],
+    body: F,
+) -> Execution<'a, Option<Result<i32, ControlFlow>>>
+where
+    F: for<'p> FnOnce(&'p mut Process) -> Execution<'p, Result<i32, ControlFlow>> + 'a,
+{
+    Box::pin(run_redirected_inner(os, proc, redirects, body))
+}
+
+async fn run_redirected_inner<F>(
     os: Arc<dyn Kernel>,
     proc: &mut Process,
     redirects: &[(Redirect, String)],
@@ -3469,29 +3489,40 @@ fn run_stage(
     })
 }
 
-#[inline(never)]
-fn run_pipeline<'a>(
-    os: Arc<dyn Kernel>,
-    proc: &'a mut Process,
-    pipeline: &'a [parser::Command],
-    capture: bool,
-) -> Execution<'a, (i32, String)> {
-    Box::pin(run_pipeline_inner(os, proc, pipeline, capture))
-}
-
-async fn run_pipeline_inner(
+async fn run_pipeline(
     os: Arc<dyn Kernel>,
     shell_proc: &mut Process,
     pipeline: &[parser::Command],
     capture: bool,
 ) -> (i32, String) {
     shell_proc.deadline_stop = false;
-    let len = pipeline.len();
     let mut tasks = ForegroundTasks::new(os.as_ref(), shell_proc);
+    let pipeline = match prepare_pipeline(os.clone(), shell_proc, pipeline).await {
+        Ok(pipeline) => pipeline,
+        Err(status) => return (status, String::new()),
+    };
+    run_expanded_pipeline(os, shell_proc, pipeline, &mut tasks, capture).await
+}
+
+#[inline(never)]
+fn prepare_pipeline<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    pipeline: &'a [parser::Command],
+) -> Execution<'a, Result<ExpandedPipeline, i32>> {
+    Box::pin(prepare_pipeline_inner(os, proc, pipeline))
+}
+
+async fn prepare_pipeline_inner(
+    os: Arc<dyn Kernel>,
+    shell_proc: &mut Process,
+    pipeline: &[parser::Command],
+) -> Result<ExpandedPipeline, i32> {
+    let len = pipeline.len();
 
     if shell_proc.max_pipeline > 0 && len > shell_proc.max_pipeline {
         shell_proc.err_msg("strands-shell: pipeline too long");
-        return (1, String::new());
+        return Err(1);
     }
 
     // Expand all args/env/redirects up front
@@ -3540,19 +3571,19 @@ async fn run_pipeline_inner(
             shell_proc.err_msg(msg);
         }
         shell_proc.deadline_stop = true;
-        return (1, String::new());
+        return Err(1);
     }
 
     // Abort if nounset error occurred during expansion
     if shell_proc.nounset_error {
         shell_proc.last_exit = 2;
-        return (2, String::new());
+        return Err(2);
     }
 
     // A command substitution can run past the deadline, so do not run the command it fed.
     if let Some(msg) = shell_proc.check_limits() {
         shell_proc.err_msg(msg);
-        return (1, String::new());
+        return Err(1);
     }
 
     // xtrace: print expanded commands to stderr
@@ -3573,7 +3604,7 @@ async fn run_pipeline_inner(
             shell_proc.set_env(k, v);
         }
         // With no command name, the status is that of the last command substitution.
-        return (shell_proc.last_subst_status.unwrap_or(0), String::new());
+        return Err(shell_proc.last_subst_status.unwrap_or(0));
     }
 
     // Resolve executables: for each stage, if the command is not a builtin,
@@ -3590,9 +3621,7 @@ async fn run_pipeline_inner(
         {
             continue;
         }
-        if let Some((_path, target)) =
-            box_future(|| resolve_executable(os.as_ref(), shell_proc, cmd)).await
-        {
+        if let Some((_path, target)) = resolve_executable(os.as_ref(), shell_proc, cmd).await {
             match target {
                 ExecTarget::Multicall(name) => {
                     args[0] = name;
@@ -3600,7 +3629,7 @@ async fn run_pipeline_inner(
                 ExecTarget::Shebang(interp) => {
                     // Check if the interpreter resolves to a multicall binary
                     if let Some((_, ExecTarget::Multicall(mcname))) =
-                        box_future(|| resolve_executable(os.as_ref(), shell_proc, &interp[0])).await
+                        resolve_executable(os.as_ref(), shell_proc, &interp[0]).await
                     {
                         // Multicall: rewrite to <command> <script_path> [orig_args...]
                         let script_path = interp.last().unwrap().clone();
@@ -3643,7 +3672,7 @@ async fn run_pipeline_inner(
                 let request = CommandRequest::new(program, args, &shell_proc.cwd);
                 if let Err(e) = os.check_fallback(&request).await {
                     shell_proc.err_msg(&format!("strands-shell: {program}: {e}"));
-                    return (126, String::new());
+                    return Err(126);
                 }
             }
             requests.push(None);
@@ -3652,13 +3681,189 @@ async fn run_pipeline_inner(
         let request = CommandRequest::new(program, args, &shell_proc.cwd);
         if let Err(e) = os.check_command(&request).await {
             shell_proc.err_msg(&format!("strands-shell: {program}: {e}"));
-            return (126, String::new());
+            return Err(126);
         }
         requests.push(Some(CheckedCommand {
             os: os.clone(),
             request: Some(request),
         }));
     }
+
+    Ok(ExpandedPipeline {
+        args: expanded_args,
+        env: expanded_env,
+        redirects: expanded_redirects,
+        requests,
+    })
+}
+
+struct ExpandedPipeline {
+    args: Vec<Vec<String>>,
+    env: Vec<Vec<(String, String)>>,
+    redirects: Vec<Vec<(Redirect, String)>>,
+    requests: Vec<Option<CheckedCommand>>,
+}
+
+enum OutputDrain {
+    Capture(tokio::task::JoinHandle<String>),
+    Copy(tokio::task::JoinHandle<()>),
+}
+
+struct BuiltinIo {
+    process: Option<Process>,
+    stdout: OutputDrain,
+    stderr: OutputDrain,
+    redirects_stdin: bool,
+    kept_stdin: Option<TakenFd>,
+}
+
+#[inline(never)]
+fn prepare_builtin_io<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    redirects: &'a [(Redirect, String)],
+    tasks: &'a mut ForegroundTasks,
+    capture: bool,
+) -> Execution<'a, Option<Box<BuiltinIo>>> {
+    Box::pin(prepare_builtin_io_inner(
+        os, proc, redirects, tasks, capture,
+    ))
+}
+
+async fn prepare_builtin_io_inner(
+    os: Arc<dyn Kernel>,
+    shell_proc: &mut Process,
+    redirects: &[(Redirect, String)],
+    tasks: &mut ForegroundTasks,
+    capture: bool,
+) -> Option<Box<BuiltinIo>> {
+    let mut io_proc = shell_proc.fork();
+    // Inherit stdin from shell_proc if present (e.g. CompoundPipeline). A stdin
+    // redirect sets the caller's stdin aside until the builtin ends.
+    shell_proc.transfer_fd(STDIN, &mut io_proc);
+    let redirects_stdin = replaces_stdin(redirects);
+    let kept_stdin = redirects_stdin.then(|| take_stdin(&mut io_proc)).flatten();
+    let (out_tx, out_rx) = os::pipe(64);
+    let (err_tx, err_rx) = os::pipe(64);
+    // A writer the caller installed takes the place of the local pipe.
+    if shell_proc.inherit_channel_writer(STDOUT, &mut io_proc) {
+        drop(out_tx);
+    } else {
+        io_proc.set_channel_writer(STDOUT, out_tx);
+    }
+    let caller_stderr = shell_proc.inherit_channel_writer(STDERR, &mut io_proc);
+    if !caller_stderr {
+        io_proc.set_channel_writer(STDERR, err_tx.clone());
+    }
+    shell_proc.set_err_tx(err_tx);
+
+    // Apply redirects to the io_proc so builtins see them
+    if let Err(e) = apply_redirects(&os, &mut io_proc, redirects).await {
+        shell_proc.clear_err_tx();
+        if caller_stderr && let Some(tx) = shell_proc.stderr_channel() {
+            shell_proc.set_err_tx(tx);
+        }
+        shell_proc.err_msg(&format!("strands-shell: {e}"));
+        shell_proc.clear_err_tx();
+        give_stdin(shell_proc, kept_stdin);
+        return None;
+    }
+    // Builtin diagnostics follow the command's own stderr redirection.
+    if let Some(tx) = io_proc.stderr_channel() {
+        shell_proc.set_err_tx(tx);
+    }
+
+    // Drain stdout/stderr concurrently with the builtin to avoid
+    // deadlock when the builtin produces more output than the channel
+    // capacity.
+    let max_output = shell_proc.max_output;
+    let stdout_drain = if capture {
+        OutputDrain::Capture(tokio::task::spawn_local(async move {
+            let mut reader = FdReader::from_receiver(out_rx);
+            os::read_to_string_lossy_limited(&mut reader, max_output)
+                .await
+                .unwrap_or_default()
+        }))
+    } else {
+        OutputDrain::Copy(tokio::task::spawn_local(async move {
+            let mut reader = FdReader::from_receiver(out_rx);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let _ = tokio::io::copy(&mut reader, &mut tokio::io::stdout()).await;
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let mut buf = Vec::new();
+                let _ = reader.read_to_end(&mut buf).await;
+                let _ = std::io::Write::write_all(&mut std::io::stdout(), &buf);
+            }
+        }))
+    };
+    let stderr_drain = if capture {
+        OutputDrain::Capture(tokio::task::spawn_local(async move {
+            let mut reader = FdReader::from_receiver(err_rx);
+            os::read_to_string_lossy_limited(&mut reader, max_output)
+                .await
+                .unwrap_or_default()
+        }))
+    } else {
+        OutputDrain::Copy(tokio::task::spawn_local(async move {
+            let mut reader = FdReader::from_receiver(err_rx);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let _ = tokio::io::copy(&mut reader, &mut tokio::io::stderr()).await;
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let mut buf = Vec::new();
+                let _ = reader.read_to_end(&mut buf).await;
+                let _ = std::io::Write::write_all(&mut std::io::stderr(), &buf);
+            }
+        }))
+    };
+    for drain in [&stdout_drain, &stderr_drain] {
+        match drain {
+            OutputDrain::Capture(h) => tasks.own(h),
+            OutputDrain::Copy(h) => tasks.own(h),
+        }
+    }
+
+    Some(Box::new(BuiltinIo {
+        process: Some(io_proc),
+        stdout: stdout_drain,
+        stderr: stderr_drain,
+        redirects_stdin,
+        kept_stdin,
+    }))
+}
+
+#[inline(never)]
+fn run_expanded_pipeline<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    pipeline: ExpandedPipeline,
+    tasks: &'a mut ForegroundTasks,
+    capture: bool,
+) -> Execution<'a, (i32, String)> {
+    Box::pin(run_expanded_pipeline_inner(
+        os, proc, pipeline, tasks, capture,
+    ))
+}
+
+async fn run_expanded_pipeline_inner(
+    os: Arc<dyn Kernel>,
+    shell_proc: &mut Process,
+    pipeline: ExpandedPipeline,
+    tasks: &mut ForegroundTasks,
+    capture: bool,
+) -> (i32, String) {
+    let ExpandedPipeline {
+        args: expanded_args,
+        env: expanded_env,
+        redirects: expanded_redirects,
+        mut requests,
+    } = pipeline;
+    let len = expanded_args.len();
 
     // Single command: check for builtins
     if len == 1 {
@@ -3667,111 +3872,32 @@ async fn run_pipeline_inner(
                 let name = expanded_args[0][0].clone();
                 let args: Vec<String> = expanded_args[0][1..].to_vec();
 
-                let mut io_proc = shell_proc.fork();
-                // Inherit stdin from shell_proc if present (e.g. CompoundPipeline). A stdin
-                // redirect sets the caller's stdin aside until the builtin ends.
-                shell_proc.transfer_fd(STDIN, &mut io_proc);
-                let redirects_stdin = replaces_stdin(&expanded_redirects[0]);
-                let mut kept_stdin = redirects_stdin.then(|| take_stdin(&mut io_proc)).flatten();
-                let (out_tx, out_rx) = os::pipe(64);
-                let (err_tx, err_rx) = os::pipe(64);
-                // A writer the caller installed takes the place of the local pipe.
-                if shell_proc.inherit_channel_writer(STDOUT, &mut io_proc) {
-                    drop(out_tx);
-                } else {
-                    io_proc.set_channel_writer(STDOUT, out_tx);
-                }
-                let caller_stderr = shell_proc.inherit_channel_writer(STDERR, &mut io_proc);
-                if !caller_stderr {
-                    io_proc.set_channel_writer(STDERR, err_tx.clone());
-                }
-                shell_proc.set_err_tx(err_tx);
-
-                // Apply redirects to the io_proc so builtins see them
-                if let Err(e) = apply_redirects(&os, &mut io_proc, &expanded_redirects[0]).await {
-                    shell_proc.clear_err_tx();
-                    if caller_stderr && let Some(tx) = shell_proc.stderr_channel() {
-                        shell_proc.set_err_tx(tx);
-                    }
-                    shell_proc.err_msg(&format!("strands-shell: {e}"));
-                    shell_proc.clear_err_tx();
-                    give_stdin(shell_proc, kept_stdin);
+                let Some(mut io) = prepare_builtin_io(
+                    os.clone(),
+                    shell_proc,
+                    &expanded_redirects[0],
+                    tasks,
+                    capture,
+                )
+                .await
+                else {
                     return (1, String::new());
-                }
-                // Builtin diagnostics follow the command's own stderr redirection.
-                if let Some(tx) = io_proc.stderr_channel() {
-                    shell_proc.set_err_tx(tx);
-                }
-
-                // Drain stdout/stderr concurrently with the builtin to avoid
-                // deadlock when the builtin produces more output than the channel
-                // capacity.
-                let max_output = shell_proc.max_output;
-                enum Drain {
-                    Capture(tokio::task::JoinHandle<String>),
-                    Copy(tokio::task::JoinHandle<()>),
-                }
-                let stdout_drain = if capture {
-                    Drain::Capture(tokio::task::spawn_local(async move {
-                        let mut reader = FdReader::from_receiver(out_rx);
-                        os::read_to_string_lossy_limited(&mut reader, max_output)
-                            .await
-                            .unwrap_or_default()
-                    }))
-                } else {
-                    Drain::Copy(tokio::task::spawn_local(async move {
-                        let mut reader = FdReader::from_receiver(out_rx);
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            let _ = tokio::io::copy(&mut reader, &mut tokio::io::stdout()).await;
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            let mut buf = Vec::new();
-                            let _ = reader.read_to_end(&mut buf).await;
-                            let _ = std::io::Write::write_all(&mut std::io::stdout(), &buf);
-                        }
-                    }))
                 };
-                let stderr_drain = if capture {
-                    Drain::Capture(tokio::task::spawn_local(async move {
-                        let mut reader = FdReader::from_receiver(err_rx);
-                        os::read_to_string_lossy_limited(&mut reader, max_output)
-                            .await
-                            .unwrap_or_default()
-                    }))
-                } else {
-                    Drain::Copy(tokio::task::spawn_local(async move {
-                        let mut reader = FdReader::from_receiver(err_rx);
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            let _ = tokio::io::copy(&mut reader, &mut tokio::io::stderr()).await;
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            let mut buf = Vec::new();
-                            let _ = reader.read_to_end(&mut buf).await;
-                            let _ = std::io::Write::write_all(&mut std::io::stderr(), &buf);
-                        }
-                    }))
-                };
-                for drain in [&stdout_drain, &stderr_drain] {
-                    match drain {
-                        Drain::Capture(h) => tasks.own(h),
-                        Drain::Copy(h) => tasks.own(h),
-                    }
-                }
 
-                let io_cell = RefCell::new(io_proc);
-                let result = CURRENT_KERNEL
-                    .scope(
+                let result = box_future(|| {
+                    let io_cell = RefCell::new(
+                        io.process
+                            .take()
+                            .expect("builtin process has not been consumed"),
+                    );
+                    CURRENT_KERNEL.scope(
                         os.clone(),
                         CURRENT_PROCESS.scope(io_cell, async {
                             let r = f(os.as_ref(), shell_proc, &args).await;
                             // Transfer stdin back so it survives across loop iterations, or give
                             // back the caller's own when a redirect replaced it.
-                            if redirects_stdin {
-                                give_stdin(shell_proc, kept_stdin.take());
+                            if io.redirects_stdin {
+                                give_stdin(shell_proc, io.kept_stdin.take());
                             } else {
                                 CURRENT_PROCESS
                                     .with(|p| p.borrow_mut().transfer_fd(STDIN, shell_proc));
@@ -3779,22 +3905,23 @@ async fn run_pipeline_inner(
                             r
                         }),
                     )
-                    .await;
+                })
+                .await;
                 if let Err(e) = &result {
                     shell_proc.err_msg(&format!("strands-shell: {name}: {e}"));
                 }
                 shell_proc.clear_err_tx();
 
-                let stdout_str = match stdout_drain {
-                    Drain::Capture(h) => h.await.unwrap_or_default(),
-                    Drain::Copy(h) => {
+                let stdout_str = match io.stdout {
+                    OutputDrain::Capture(h) => h.await.unwrap_or_default(),
+                    OutputDrain::Copy(h) => {
                         let _ = h.await;
                         String::new()
                     }
                 };
-                let stderr_str = match stderr_drain {
-                    Drain::Capture(h) => h.await.unwrap_or_default(),
-                    Drain::Copy(h) => {
+                let stderr_str = match io.stderr {
+                    OutputDrain::Capture(h) => h.await.unwrap_or_default(),
+                    OutputDrain::Copy(h) => {
                         let _ = h.await;
                         String::new()
                     }
@@ -3821,18 +3948,16 @@ async fn run_pipeline_inner(
                 Some(execute_command_line_inner(os.clone(), shell_proc, &func_body).await)
             } else {
                 let body_os = os.clone();
-                box_future(|| {
-                    run_redirected(
-                        os.clone(),
-                        shell_proc,
-                        &expanded_redirects[0],
-                        move |proc| {
-                            Box::pin(async move {
-                                execute_command_line_inner(body_os, proc, &func_body).await
-                            })
-                        },
-                    )
-                })
+                run_redirected(
+                    os.clone(),
+                    shell_proc,
+                    &expanded_redirects[0],
+                    move |proc| {
+                        Box::pin(async move {
+                            execute_command_line_inner(body_os, proc, &func_body).await
+                        })
+                    },
+                )
                 .await
             };
             // A failed redirect leaves the function's check unreported, so it is dropped.

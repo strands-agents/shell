@@ -187,6 +187,15 @@ fn recursive_execution_leaves_stack_for_command_checks() {
                 assert_eq!(out.stdout, "bottom\n");
                 assert!(out.stderr.is_empty(), "{}", out.stderr);
 
+                let out = shell
+                    .run(
+                        r#"echo input > /tmp/input; f() { if [ "$1" -gt 0 ]; then find /tmp/input -exec f "$(($1 - 1))" \; ; else echo bottom; fi; }; f 31"#,
+                    )
+                    .await;
+                assert_eq!(out.status, 0, "{}", out.stderr);
+                assert_eq!(out.stdout, "bottom\n");
+                assert!(out.stderr.is_empty(), "{}", out.stderr);
+
                 assert_eq!(shell.run("echo keep > /tmp/keep").await.status, 0);
                 let out = shell
                     .run(
