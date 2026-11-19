@@ -63,6 +63,60 @@ pub struct FileStat {
     pub ino: u64,
     /// Modification time as duration since epoch.
     pub modified: Option<std::time::SystemTime>,
+    /// Access time, where the backing store records one.
+    pub accessed: Option<std::time::SystemTime>,
+}
+
+/// One time that [`Kernel::set_times`] sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeChange {
+    /// Keep the current time.
+    Keep,
+    /// Set the time to the current time, with the permission a write needs.
+    Now,
+    /// Set the time to this value, with the permission the owner has.
+    To(std::time::SystemTime),
+}
+
+/// The access and modification times that [`Kernel::set_times`] sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileTimes {
+    /// The access time.
+    pub accessed: TimeChange,
+    /// The modification time.
+    pub modified: TimeChange,
+}
+
+/// The `uname` fields that a kernel reports, returned by [`Kernel::uname`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemInfo {
+    /// The kernel name, for `uname -s`.
+    pub kernel_name: String,
+    /// The node name, for `uname -n` when `$HOSTNAME` is unset or empty.
+    pub node_name: String,
+    /// The kernel release, for `uname -r`.
+    pub kernel_release: String,
+    /// The kernel version, for `uname -v`.
+    pub kernel_version: String,
+    /// The machine hardware name, for `uname -m`.
+    pub machine: String,
+    /// The operating system, for `uname -o`.
+    pub operating_system: String,
+}
+
+impl Default for SystemInfo {
+    /// The virtual system, which never shows the host: `Linux` on `localhost`, with the Strands
+    /// Shell version as its release and the architecture Shell was built for as its machine.
+    fn default() -> Self {
+        Self {
+            kernel_name: "Linux".into(),
+            node_name: "localhost".into(),
+            kernel_release: env!("CARGO_PKG_VERSION").into(),
+            kernel_version: "#1".into(),
+            machine: std::env::consts::ARCH.into(),
+            operating_system: "Linux".into(),
+        }
+    }
 }
 
 /// Access permission modes for Kernel::access().
@@ -177,6 +231,8 @@ pub struct Process {
     pub(crate) pending_exit: bool,
     /// An unsupported array aborts its function without requesting a shell exit.
     pub(crate) refused_array: bool,
+    /// The next pipeline runs its command without a shell function of that name, as `command` asks.
+    pub(crate) skip_function: bool,
     /// Exit status of the last command substitution performed, for commands with no name.
     pub(crate) last_subst_status: Option<i32>,
     /// PID of last background job (for $!).
@@ -370,6 +426,7 @@ impl Process {
             deadline_stop: false,
             pending_exit: false,
             refused_array: false,
+            skip_function: false,
             last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
@@ -422,6 +479,7 @@ impl Process {
             deadline_stop: false,
             pending_exit: false,
             refused_array: false,
+            skip_function: false,
             last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
@@ -534,6 +592,7 @@ impl Process {
             deadline_stop: false,
             pending_exit: false,
             refused_array: false,
+            skip_function: false,
             last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
@@ -664,7 +723,12 @@ impl Process {
     /// Take the reader half out of an fd, removing it from the table.
     pub fn take_reader(&mut self, fd: Fd) -> io::Result<FdReader> {
         match self.fds.remove(&fd) {
-            Some(kind) => Ok(FdReader { kind, done: false }),
+            Some(kind) => Ok(FdReader {
+                kind,
+                done: false,
+                #[cfg(not(target_arch = "wasm32"))]
+                deadline: None,
+            }),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("bad fd {fd}"),
@@ -1028,6 +1092,9 @@ pub(crate) struct TakenFd {
 pub struct FdReader {
     kind: FdKind,
     done: bool,
+    /// When a channel read stops waiting and fails with a timeout.
+    #[cfg(not(target_arch = "wasm32"))]
+    deadline: Option<std::panic::AssertUnwindSafe<Pin<Box<tokio::time::Sleep>>>>,
 }
 
 impl FdReader {
@@ -1039,7 +1106,17 @@ impl FdReader {
                 buf: Vec::new(),
             },
             done: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            deadline: None,
         }
+    }
+
+    /// Make a channel read fail with a timeout once `deadline` passes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn until(mut self, deadline: Option<tokio::time::Instant>) -> Self {
+        self.deadline =
+            deadline.map(|at| std::panic::AssertUnwindSafe(Box::pin(tokio::time::sleep_until(at))));
+        self
     }
 
     /// Consume this reader and return the underlying FdKind.
@@ -1060,6 +1137,15 @@ impl AsyncRead for FdReader {
         }
         match &mut this.kind {
             FdKind::ChannelReader { rx, buf: remainder } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(deadline) = &mut this.deadline
+                    && deadline.as_mut().poll(cx).is_ready()
+                {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "execution timeout exceeded",
+                    )));
+                }
                 if !remainder.is_empty() {
                     let n = remainder.len().min(buf.remaining());
                     buf.put_slice(&remainder[..n]);
@@ -1286,8 +1372,25 @@ pub trait Kernel: Send + Sync {
     async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String>;
     /// Set Unix permission mode bits on a path.
     async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()>;
+    /// Set the access and modification times of the file a path names, following a symlink as
+    /// [`Kernel::stat`] does.
+    ///
+    /// Permission follows `utimensat`: [`TimeChange::Now`] needs write access, [`TimeChange::To`]
+    /// needs ownership, and [`TimeChange::Keep`] leaves that time alone. A kernel that wraps
+    /// another must forward this. The default refuses with `Unsupported`, so a kernel that
+    /// predates this method still builds; `touch` of an existing file then fails on it.
+    async fn set_times(&self, _proc: &Process, _path: &str, _times: FileTimes) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this kernel cannot set file times",
+        ))
+    }
     /// Return the current wall-clock time.
     fn now(&self) -> std::time::SystemTime;
+    /// Return the `uname` fields that this kernel reports. The default is [`SystemInfo::default`].
+    fn uname(&self) -> SystemInfo {
+        SystemInfo::default()
+    }
     /// Check whether a URL is allowed for network access.
     /// Returns Ok(()) if allowed, Err with a message if blocked.
     fn check_url(&self, _url: &str) -> io::Result<()> {

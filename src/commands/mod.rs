@@ -1,3 +1,4 @@
+mod base64;
 mod basename;
 mod cat;
 mod chmod;
@@ -12,6 +13,7 @@ mod r#false;
 mod grep;
 mod head;
 mod hostname;
+mod id;
 mod jq;
 mod ln;
 mod ls;
@@ -30,8 +32,10 @@ mod tee;
 mod touch;
 mod tr;
 mod r#true;
+mod uname;
 mod uniq;
 mod wc;
+mod whoami;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -73,6 +77,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
     {
         // Static lookup table for WASM (inventory crate not available)
         let func: CommandFn = match name {
+            "base64" => |os, args| Box::pin(base64::cmd_base64(os, args)),
             "basename" => |os, args| Box::pin(basename::cmd_basename(os, args)),
             "cat" => |os, args| Box::pin(cat::cmd_cat(os, args)),
             "chmod" => |os, args| Box::pin(chmod::cmd_chmod(os, args)),
@@ -87,6 +92,7 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "grep" => |os, args| Box::pin(grep::cmd_grep(os, args)),
             "head" => |os, args| Box::pin(head::cmd_head(os, args)),
             "hostname" => |os, args| Box::pin(hostname::cmd_hostname(os, args)),
+            "id" => |os, args| Box::pin(id::cmd_id(os, args)),
             "jq" => |os, args| Box::pin(jq::cmd_jq(os, args)),
             "ln" => |os, args| Box::pin(ln::cmd_ln(os, args)),
             "ls" => |os, args| Box::pin(ls::cmd_ls(os, args)),
@@ -105,8 +111,10 @@ pub fn lookup(name: &str) -> Option<CommandFn> {
             "touch" => |os, args| Box::pin(touch::cmd_touch(os, args)),
             "tr" => |os, args| Box::pin(tr::cmd_tr(os, args)),
             "true" => |os, args| Box::pin(r#true::cmd_true(os, args)),
+            "uname" => |os, args| Box::pin(uname::cmd_uname(os, args)),
             "uniq" => |os, args| Box::pin(uniq::cmd_uniq(os, args)),
             "wc" => |os, args| Box::pin(wc::cmd_wc(os, args)),
+            "whoami" => |os, args| Box::pin(whoami::cmd_whoami(os, args)),
             _ => return None,
         };
         Some(func)

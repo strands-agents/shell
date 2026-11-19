@@ -1,0 +1,10 @@
+status: 0
+stderr: non-empty
+--- stdout
+wrapped
+1
+status=0
+hi
+ho
+status=127
+fn-f
