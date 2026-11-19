@@ -743,6 +743,15 @@ pub fn normalize(path: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
+/// Make a path absolute against `cwd`, then normalize it.
+pub fn absolute(cwd: &std::path::Path, path: &str) -> String {
+    if path.starts_with('/') {
+        normalize(path)
+    } else {
+        normalize(&format!("{}/{}", cwd.display(), path))
+    }
+}
+
 /// Split a path into (parent, basename).
 fn split_path(path: &str) -> (String, String) {
     let path = normalize(path);
@@ -833,9 +842,10 @@ pub fn create_bin_links(vfs: &mut Vfs) -> io::Result<()> {
     {
         // Create /bin symlinks for all known commands on WASM
         let cmds = [
-            "basename", "cat", "chmod", "cp", "cut", "date", "dirname", "echo", "env", "false",
-            "grep", "head", "id", "jq", "ln", "ls", "mkdir", "mktemp", "mv", "pwd", "readlink",
-            "rm", "rmdir", "sed", "sort", "tail", "tee", "touch", "tr", "true", "uniq", "wc",
+            "base64", "basename", "cat", "chmod", "cp", "cut", "date", "dirname", "echo", "env",
+            "false", "grep", "head", "id", "jq", "ln", "ls", "mkdir", "mktemp", "mv", "pwd",
+            "readlink", "rm", "rmdir", "sed", "sort", "tail", "tee", "touch", "tr", "true",
+            "uname", "uniq", "wc", "whoami",
         ];
         for name in cmds {
             let path = format!("/bin/{name}");

@@ -26,15 +26,6 @@ impl VfsKernel {
         }
     }
 
-    /// Resolve a path relative to the process cwd, producing an absolute virtual path.
-    fn abs(proc: &Process, path: &str) -> String {
-        if path.starts_with('/') {
-            vfs::normalize(path)
-        } else {
-            vfs::normalize(&format!("{}/{}", proc.cwd.display(), path))
-        }
-    }
-
     /// Check that the user has write permission on the parent directory of `abs_path`.
     fn check_parent_write(vfs: &Vfs, abs_path: &str) -> io::Result<()> {
         let parent = match abs_path.rfind('/') {
@@ -293,7 +284,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn open(&self, proc: &mut Process, path: &str, flags: OpenFlags) -> io::Result<Fd> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
 
         // Check for host-backed path (bind_direct passthrough)
         {
@@ -451,7 +442,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn list_dir(&self, proc: &Process, path: &str) -> io::Result<Vec<DirEntry>> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -483,7 +474,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn change_dir(&self, proc: &mut Process, path: &str) -> io::Result<()> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -512,7 +503,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn stat(&self, proc: &Process, path: &str) -> FileStat {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -530,7 +521,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn lstat(&self, proc: &Process, path: &str) -> FileStat {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -548,7 +539,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn access(&self, proc: &Process, path: &str, mode: i32) -> bool {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -583,7 +574,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let vfs = self.vfs.lock().await;
         // Resolve to verify the path exists and follow symlinks
         let _ = vfs.resolve(&abs, true)?;
@@ -591,7 +582,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn is_executable(&self, proc: &Process, path: &str) -> bool {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let vfs = self.vfs.lock().await;
 
         if let Some((_host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -619,7 +610,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn glob(&self, proc: &Process, pattern: &str) -> Vec<String> {
-        let abs_pattern = Self::abs(proc, pattern);
+        let abs_pattern = vfs::absolute(&proc.cwd, pattern);
         let vfs = self.vfs.lock().await;
         let mut results = Vec::new();
         glob_vfs(&vfs, &abs_pattern, &mut results);
@@ -640,7 +631,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn remove_file(&self, proc: &Process, path: &str) -> io::Result<()> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -658,7 +649,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn remove_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -676,7 +667,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn create_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -698,8 +689,8 @@ impl Kernel for VfsKernel {
     }
 
     async fn rename(&self, proc: &Process, from: &str, to: &str) -> io::Result<()> {
-        let abs_from = Self::abs(proc, from);
-        let abs_to = Self::abs(proc, to);
+        let abs_from = vfs::absolute(&proc.cwd, from);
+        let abs_to = vfs::absolute(&proc.cwd, to);
         let vfs = self.vfs.lock().await;
         let host_from = Self::resolve_host(&vfs, &abs_from);
         let host_to = Self::resolve_host(&vfs, &abs_to);
@@ -723,7 +714,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn symlink(&self, proc: &Process, target: &str, link: &str) -> io::Result<()> {
-        let abs_link = Self::abs(proc, link);
+        let abs_link = vfs::absolute(&proc.cwd, link);
         let mut vfs = self.vfs.lock().await;
         Self::check_parent_write(&vfs, &abs_link)?;
         vfs.symlink(&abs_link, target, LASH_UID, LASH_GID)?;
@@ -731,7 +722,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let vfs = self.vfs.lock().await;
         if let Some((host_path, _ro)) = Self::resolve_host_nofollow(&vfs, &abs) {
             drop(vfs);
@@ -750,7 +741,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let mut vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -777,7 +768,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn set_times(&self, proc: &Process, path: &str, times: FileTimes) -> io::Result<()> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path);
         let mut vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
