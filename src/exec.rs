@@ -496,6 +496,8 @@ struct Segment {
     splittable: Vec<bool>, // parallel to buf bytes
     globbable: Vec<bool>,  // parallel to buf bytes — false = quoted (no glob)
     has_nonsplit: bool,
+    has_quoted_unset: bool,
+    has_empty_quoted_at: bool,
 }
 
 impl Segment {
@@ -505,6 +507,8 @@ impl Segment {
             splittable: Vec::new(),
             globbable: Vec::new(),
             has_nonsplit: false,
+            has_quoted_unset: false,
+            has_empty_quoted_at: false,
         }
     }
     fn push(&mut self, s: &str, splittable: bool, globbable: bool) {
@@ -574,6 +578,9 @@ fn expand_part_split<'a>(
                 if quoted {
                     // "$@" — each arg becomes a separate segment
                     let args = proc.args.clone();
+                    if args.is_empty() {
+                        segments.last_mut().unwrap().has_empty_quoted_at = true;
+                    }
                     for (i, arg) in args.iter().enumerate() {
                         segments.last_mut().unwrap().push(arg, false, false);
                         if i + 1 < args.len() {
@@ -610,6 +617,8 @@ fn expand_part_split<'a>(
                 if let Some(val) = resolve_var(proc, name) {
                     let splittable = !quoted;
                     segments.last_mut().unwrap().push(&val, splittable, false);
+                } else if quoted {
+                    segments.last_mut().unwrap().has_quoted_unset = true;
                 }
             }
             WordPart::VarOp(name, op, word, colon) if op == "-" || op == "+" => {
@@ -693,7 +702,12 @@ fn ifs_split(seg: Segment, ifs: &str) -> Vec<(String, bool)> {
         splittable,
         globbable,
         has_nonsplit,
+        has_quoted_unset,
+        has_empty_quoted_at,
     } = seg;
+    // A quoted unset variable supplies an empty field unless the same word
+    // contains a quoted "$@" with no positional arguments.
+    let has_nonsplit = has_nonsplit || (has_quoted_unset && !has_empty_quoted_at);
 
     // Check if any glob metachar is in a globbable position
     let has_glob = buf
