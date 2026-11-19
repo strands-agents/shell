@@ -2762,6 +2762,10 @@ type ConditionalResult<'a> = Pin<Box<dyn Future<Output = Result<bool, Conditiona
 
 /// Evaluate `[[ ... ]]`, expanding each operand only when the evaluation reaches it.
 async fn execute_conditional(os: Arc<dyn Kernel>, proc: &mut Process, terms: &[CondTerm]) -> i32 {
+    if terms.iter().any(|term| is_cond_operator(Some(term), "=~")) {
+        proc.err_msg("strands-shell: [[: `=~` is not supported");
+        return 2;
+    }
     let mut pos = 0;
     match conditional_or(os, proc, terms, &mut pos).await {
         Ok(_) if pos < terms.len() => {
@@ -2797,6 +2801,29 @@ async fn cond_operand(os: Arc<dyn Kernel>, proc: &mut Process, term: &CondTerm) 
         CondTerm::Operator(op) => op.clone(),
         CondTerm::Operand(word) => expand_word(os, proc, word).await,
     }
+}
+
+/// The right side of `==` or `!=` as a pattern, with its quoted parts escaped.
+async fn cond_pattern(os: Arc<dyn Kernel>, proc: &mut Process, term: &CondTerm) -> String {
+    let CondTerm::Operand(word) = term else {
+        return cond_operand(os, proc, term).await;
+    };
+    let mut pattern = String::new();
+    for part in word {
+        let mut text = String::new();
+        expand_part(os.clone(), proc, part, &mut text).await;
+        if matches!(part, WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)) {
+            for ch in text.chars() {
+                if matches!(ch, '\\' | '*' | '?' | '[') {
+                    pattern.push('\\');
+                }
+                pattern.push(ch);
+            }
+        } else {
+            pattern.push_str(&text);
+        }
+    }
+    pattern
 }
 
 fn conditional_or<'a>(
@@ -2902,14 +2929,13 @@ fn conditional_primary<'a>(
         if let Some(op) = cond_binary_operator(terms, *pos) {
             let right = &terms[*pos + 2];
             *pos += 3;
-            if op == "=~" {
-                return Err(ConditionalSyntax("`=~` is not supported".into()));
-            }
             let left = cond_operand(os.clone(), proc, first).await;
+            if matches!(op, "==" | "=" | "!=") {
+                let pattern = cond_pattern(os.clone(), proc, right).await;
+                return Ok(escaped_glob_match(&pattern, &left) == (op != "!="));
+            }
             let right = cond_operand(os.clone(), proc, right).await;
             return Ok(match op {
-                "==" | "=" => case_match(&right, &left),
-                "!=" => !case_match(&right, &left),
                 "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
                     let (a, b) = (eval_arith(proc, &left), eval_arith(proc, &right));
                     crate::builtins::eval_binary(
@@ -2984,11 +3010,31 @@ fn case_match(pattern: &str, value: &str) -> bool {
     glob_match(pattern.as_bytes(), value.as_bytes())
 }
 
+/// Glob matching where a backslash makes the next pattern byte literal.
+fn escaped_glob_match(pattern: &str, value: &str) -> bool {
+    glob_match_with(pattern.as_bytes(), value.as_bytes(), true)
+}
+
 fn glob_match(pat: &[u8], val: &[u8]) -> bool {
+    glob_match_with(pat, val, false)
+}
+
+fn glob_match_with(pat: &[u8], val: &[u8], escapes: bool) -> bool {
     let (mut pi, mut vi) = (0, 0);
     let (mut star_p, mut star_v) = (usize::MAX, 0);
     while vi < val.len() {
-        if pi < pat.len() && pat[pi] == b'[' {
+        if escapes && pi + 1 < pat.len() && pat[pi] == b'\\' {
+            if pat[pi + 1] == val[vi] {
+                pi += 2;
+                vi += 1;
+            } else if star_p != usize::MAX {
+                pi = star_p + 1;
+                star_v += 1;
+                vi = star_v;
+            } else {
+                return false;
+            }
+        } else if pi < pat.len() && pat[pi] == b'[' {
             // Character class
             if let Some((matched, end)) = glob_bracket(pat, pi, val[vi]) {
                 if matched {

@@ -40,3 +40,38 @@ f() { [[ $1 == y ]]; }
 f y && echo in-function
 [[ a &&
   b ]] && echo multi-line
+[[
+  -n a ]] && echo break-after-open
+[[ -n a
+]] && echo break-before-close
+[[ -n a
+  && -n b ]] && echo break-before-and
+[[ -z a
+  || -n b ]] && echo break-before-or
+[[ -z x && -n $(echo ran > side2) ]]
+[ -e side2 ] || echo and-skipped-operand-not-expanded
+[[ -n x || ( -n y && -n z ) ]] && echo skipped-group
+[[ -z x && a == b || -n y ]] && echo skipped-binary
+[[ -n x || -n y && -z z ]] && echo and-binds-tighter
+[[ ! ! x ]] && echo double-not
+[[ foo.rs != *.rs ]] || echo not-pattern-matches
+[[ foo.rs = *.rs ]] && echo single-equals-pattern
+empty=
+[[ -v empty ]] && echo set-but-empty
+touch exe; chmod +x exe
+[[ -x exe ]] && echo executable
+a='file[1].txt'
+[[ "$a" == "$a" ]] && echo quoted-rhs-is-literal
+[[ abc == "a*" ]] || echo quoted-star-is-literal
+[[ abc != 'a?c' ]] && echo single-quoted-is-literal
+y='e*o'
+[[ hello == *"$y"* ]] || echo quoted-part-is-literal
+[[ 'he*o!' == *"$y"* ]] && echo unquoted-part-is-pattern
+[[ 'a\b' == 'a\b' ]] && echo quoted-backslash-is-literal
+[ -e "$empty" ] || echo test-empty-path
+test -f "$empty" || echo test-empty-file
+[ ! -a "$empty" ] || echo three-args-not-and-empty
+[ x -o "$empty" ] && echo three-args-or
+[[ "" -ef "" ]] || echo empty-ef
+[[ . -nt "" ]] && echo exists-newer-than-empty
+[[ "" -ot . ]] && echo empty-older-than-exists

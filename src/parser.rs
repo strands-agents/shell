@@ -323,24 +323,16 @@ fn parse_conditional(tokens: &[Token]) -> Result<(Item, &[Token]), String> {
             Token::RParen => CondTerm::Operator(")".into()),
             Token::RedirectIn => CondTerm::Operator("<".into()),
             Token::RedirectOut => CondTerm::Operator(">".into()),
-            // A line break may follow `&&`, `||`, or `(`.
-            Token::Semi if matches!(terms.last(), Some(CondTerm::Operator(op)) if matches!(op.as_str(), "&&" | "||" | "(")) =>
-            {
-                continue;
-            }
             Token::Word(w) if is_conditional_operator(w) => CondTerm::Operator(w.clone()),
             Token::Word(_) | Token::WordParts(_) => CondTerm::Operand(tok_to_word(tok)),
             other => {
-                return Err(format!(
-                    "syntax error: unexpected '{}' in `[[`",
-                    tok_name(other)
-                ));
+                return Err(format!("unexpected '{}' in `[[`", tok_name(other)));
             }
         };
         terms.push(term);
     }
     if terms.is_empty() {
-        return Err("syntax error: expected an expression in `[[`".into());
+        return Err("unexpected ']]': `[[` needs an expression".into());
     }
     Ok((Item::Conditional(terms), &tokens[i..]))
 }
@@ -865,13 +857,65 @@ pub fn collect_dollar_pub(
     collect_dollar(chars)
 }
 
+/// Tracks whether the tokenizer is between a command-position `[[` and its `]]`.
+#[derive(Default)]
+struct ConditionalTracker {
+    seen: usize,
+    after_command: bool,
+    inside: bool,
+}
+
+impl ConditionalTracker {
+    fn observe(&mut self, tokens: &[Token]) {
+        for tok in &tokens[self.seen..] {
+            let command_start = !self.after_command;
+            self.seen += 1;
+            if self.inside {
+                if *tok == Token::Word("]]".into()) {
+                    self.inside = false;
+                }
+                continue;
+            }
+            self.after_command = match tok {
+                Token::Semi
+                | Token::DoubleSemi
+                | Token::And
+                | Token::Or
+                | Token::Pipe
+                | Token::Amp
+                | Token::LParen
+                | Token::RParen => false,
+                Token::Word(w) if command_start && w == "[[" => {
+                    self.inside = true;
+                    true
+                }
+                Token::Word(w)
+                    if command_start
+                        && matches!(
+                            w.as_str(),
+                            "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "{" | "!"
+                        ) =>
+                {
+                    false
+                }
+                _ => true,
+            };
+        }
+    }
+}
+
 /// Tokenize shell input, treating a final unquoted backslash as incomplete when `more_input` is true.
 fn tokenize(input: &str, more_input: bool) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
+    let mut conditional = ConditionalTracker::default();
 
     while let Some(&c) = chars.peek() {
+        conditional.observe(&tokens);
         match c {
+            '\n' if conditional.inside => {
+                chars.next();
+            }
             '#' => {
                 // comment — skip rest of line
                 while let Some(&c) = chars.peek() {
@@ -2405,6 +2449,8 @@ mod tests {
             "echo a; ;;",
             "echo *(N)",
             "echo a (",
+            "[[ a ; b ]]",
+            "[[ ]]",
         ] {
             let err = p(input).unwrap_err();
             assert!(is_definite_error(&err), "{input:?}: {err}");
@@ -2420,6 +2466,8 @@ mod tests {
             "echo 'a",
             "echo $(a",
             "f()",
+            "[[ -n a",
+            "[[ -n a\n&& -n b",
         ] {
             let err = p(input).unwrap_err();
             assert!(!is_definite_error(&err), "{input:?}: {err}");

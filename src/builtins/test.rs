@@ -15,6 +15,17 @@ pub fn builtin_test<'a>(
         } else {
             args
         };
+        if let [left, op, right] = args
+            && matches!(op.as_str(), "-a" | "-o")
+        {
+            let (left, right) = (!left.is_empty(), !right.is_empty());
+            let result = if op == "-a" {
+                left && right
+            } else {
+                left || right
+            };
+            return Ok(if result { 0 } else { 1 });
+        }
         let mut pos = 0;
         let result = parse_or(args, &mut pos, os, proc).await;
         Ok(if result && pos == args.len() { 0 } else { 1 })
@@ -197,6 +208,10 @@ pub(crate) async fn eval_binary(
     os: &dyn Kernel,
     proc: &Process,
 ) -> bool {
+    if matches!(op, "-nt" | "-ot" | "-ef") && (left.is_empty() || right.is_empty()) {
+        return op == "-nt" && right.is_empty() && os.stat(proc, left).await.exists
+            || op == "-ot" && left.is_empty() && os.stat(proc, right).await.exists;
+    }
     match op {
         "=" | "==" => left == right,
         "!=" => left != right,
