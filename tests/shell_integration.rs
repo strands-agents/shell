@@ -6255,6 +6255,28 @@ fn printf_number_huge_field_is_capped() {
     }));
 }
 
+// A huge `%s` width is clamped like the numeric ones (#300).
+#[test]
+fn printf_string_huge_width_is_capped() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, len, tail) in [
+            ("printf '%99999999999s|' a", 65536, " a|"),
+            ("printf '%99999999999999999999999s|' a", 65536, " a|"),
+            ("printf '%-99999999999s|' a", 65536, "  |"),
+            ("printf '%99999999999.1s|' ab", 65536, " a|"),
+            ("printf '%65535s|' a", 65536, " a|"),
+            ("printf '%5s|' a", 6, " a|"),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: status");
+            assert_eq!(out.stdout.len(), len, "{cmd}: length");
+            assert!(out.stdout.ends_with(tail), "{cmd}: tail");
+        }
+    }));
+}
+
 // ── heredoc with tab strip ────────────────────────────────────────
 expect!(
     heredoc_tab_strip2,
@@ -13859,4 +13881,73 @@ expect!(
     errexit_ignores_a_negated_pipeline_into_a_compound,
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
+);
+
+// ── id ──────────────────────────────────────────────────────────────
+
+expect!(
+    id_default,
+    "id",
+    "uid=1000(lash) gid=1000(lash) groups=1000(lash)"
+);
+expect!(id_u, "id -u", "1000");
+expect!(id_g, "id -g", "1000");
+expect!(
+    id_un,
+    "id -un; id -nu; id -u -n; id --user --name",
+    "lash\nlash\nlash\nlash"
+);
+expect!(id_gn, "id -gn", "lash");
+expect!(id_repeated_choice, "id -u -u", "1000");
+expect!(
+    id_follows_user,
+    "USER=agent id; USER=agent id -un",
+    "uid=1000(agent) gid=1000(agent) groups=1000(agent)\nagent"
+);
+expect!(id_unset_user, "unset USER; id -un", "lash");
+expect!(id_empty_user, "USER= id -un", "lash");
+expect!(id_help, "id --help | head -1", "Usage: id [OPTION]...");
+shell_test!(
+    id_n_alone,
+    "id -n",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("default format"), "{}", out.stderr);
+    }
+);
+shell_test!(
+    id_user_and_group,
+    "id -u -g",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+        assert!(
+            out.stderr.contains("more than one choice"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    id_bad_option,
+    "id -z",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(out.stderr.contains("id: invalid option"), "{}", out.stderr);
+    }
+);
+shell_test!(
+    id_operand,
+    "id someone",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("id: unexpected argument \"someone\""),
+            "{}",
+            out.stderr
+        );
+    }
 );
