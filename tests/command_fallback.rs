@@ -390,6 +390,25 @@ fn the_handler_sees_expanded_args_cwd_and_command_local_env() {
 }
 
 #[test]
+fn the_handler_sees_only_exported_variables() {
+    block_on(async {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut shell = recording_shell(calls.clone());
+        let out = shell
+            .run("MODE=plain; cargo context; export MODE; cargo context")
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        let modes: Vec<_> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.mode.clone())
+            .collect();
+        assert_eq!(modes, [None, Some("plain".to_string())]);
+    });
+}
+
+#[test]
 fn a_decline_matches_a_shell_without_a_handler() {
     block_on(async {
         let mut plain = Shell::builder().build().unwrap();
@@ -553,6 +572,7 @@ fn lookups_find_a_served_name() {
             ("command -v python", "python\n"),
             ("command -V python3", "python3 is a shell builtin\n"),
             ("type python3", "python3 is a shell builtin\n"),
+            ("which python3 python", "python3\npython\n"),
             ("hash python3; hash", ""),
             (
                 "if command -v python3; then echo found; fi",
@@ -578,6 +598,14 @@ fn a_served_name_wins_over_a_path_script_of_the_same_name() {
         let cases = [
             ("PATH=/tmp/bin; python3 --version", "served\n"),
             ("PATH=/tmp/bin; command -v python3", "python3\n"),
+            (
+                "PATH=/tmp/bin; which -a python3",
+                "python3\n/tmp/bin/python3\n",
+            ),
+            (
+                "python3() { :; }; which python3; unset -f python3",
+                "python3\n",
+            ),
             (
                 "PATH=/tmp/bin; hash python3; type python3",
                 "python3 is a shell builtin\n",
@@ -650,7 +678,12 @@ fn a_name_the_fallback_does_not_serve_is_still_not_found() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut shell = python_shell(calls.clone());
         let mut plain = Shell::builder().build().unwrap();
-        for script in ["command -v missing", "type missing", "hash missing"] {
+        for script in [
+            "command -v missing",
+            "type missing",
+            "hash missing",
+            "which missing",
+        ] {
             let baseline = plain.run(script).await;
             let out = shell.run(script).await;
             assert_eq!(out.status, 1, "{script}");

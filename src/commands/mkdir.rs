@@ -27,7 +27,9 @@ async fn cmd_mkdir(os: &dyn Kernel, args: &[String]) -> CommandResult {
         return Err("mkdir: missing operand".into());
     }
     for dir in &dirs {
-        if parents {
+        // An empty operand goes to the kernel, which refuses it; the walk
+        // below would read it as `/`.
+        if parents && !dir.is_empty() {
             // Build each component
             let parts: Vec<&str> = dir.split('/').collect();
             let target = parts.iter().rposition(|part| !part.is_empty());

@@ -11,6 +11,8 @@ use crate::exec;
 use crate::io as sio;
 use crate::os::{self, Kernel, OpenFlags, Process};
 
+use super::lua_pattern;
+
 pub fn builtin_lua<'a>(
     os: &'a dyn Kernel,
     proc: &'a mut Process,
@@ -96,9 +98,11 @@ pub fn builtin_lua<'a>(
         // Pre-read stdin for io.read() when script comes from file or -e
         let stdin_data = if (script_file.is_some() || eval_code.is_some()) && !stdin_is_outside {
             if let Ok(mut r) = sio::stdin() {
-                os::read_to_string_limited(&mut r, proc.max_output)
-                    .await
-                    .unwrap_or_default()
+                match os::read_to_string_limited(&mut r, proc.max_output).await {
+                    Ok(data) => data,
+                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(e.into()),
+                    Err(_) => String::new(),
+                }
             } else {
                 String::new()
             }
@@ -190,13 +194,21 @@ pub fn setup_lua_vm(
             },
         )
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("lua: {e}").into() })?;
+
+        // The hook cannot interrupt a C pattern match, so guard those calls against the deadline.
+        lua_pattern::install(&lua).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("lua: {e}").into()
+        })?;
     }
 
     let kernel = sio::kernel();
+    // Lua runs as a program of its own, so it sees only the exported variables.
+    let mut child = proc.fork();
+    child.keep_exported_only();
     setup_sandbox(
         &lua,
         kernel,
-        proc,
+        &mut child,
         script_args,
         stdin_data,
         stdout_buf,
