@@ -3490,6 +3490,51 @@ expect!(
     "/usr/local/bin"
 );
 
+// ── whoami ──────────────────────────────────────────────────────────
+
+expect!(whoami_default, "whoami", "lash");
+expect!(whoami_follows_user, "USER=agent whoami", "agent");
+expect!(whoami_unset_user, "unset USER; whoami", "lash");
+expect!(whoami_empty_user, "USER= whoami", "lash");
+expect!(whoami_help, "whoami --help | head -1", "Usage: whoami");
+shell_test!(
+    whoami_extra_operand,
+    "whoami x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("whoami: unexpected argument \"x\""),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    whoami_bad_option,
+    "whoami -x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("whoami: invalid option"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+
+#[test]
+fn whoami_uses_builder_user() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().env("USER", "agent").build().unwrap();
+        let out = shell.run("whoami").await;
+        assert_eq!(out.stdout, "agent\n");
+        assert_eq!(out.status, 0);
+    }));
+}
+
 // ── cat options ─────────────────────────────────────────────────────
 
 #[test]
@@ -14130,5 +14175,78 @@ shell_test!(
             "{}",
             out.stderr
         );
+    }
+);
+
+// ── [[ ]] refusals ──────────────────────────────────────────────────
+
+shell_test!(
+    double_bracket_refuses_a_regex_even_when_short_circuited,
+    "[[ -z x && abc =~ b || -n y ]]; echo rc=$?; [[ -n x || ( x =~ ^a ) ]]; echo rc=$?",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "rc=2\nrc=2\n");
+        assert_eq!(
+            out.stderr.matches("`=~` is not supported").count(),
+            2,
+            "stderr: {}",
+            out.stderr
+        );
+    }
+);
+
+shell_test!(
+    double_bracket_refuses_two_operands_without_an_operator,
+    "[[ a b ]]",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 2);
+        assert!(out.stderr.contains("[[:"), "stderr: {}", out.stderr);
+    }
+);
+
+shell_test!(
+    double_bracket_refuses_a_semicolon_inside,
+    "[[ a && ; b ]] && echo ok",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("unexpected ';'"),
+            "stderr: {}",
+            out.stderr
+        );
+    }
+);
+
+shell_test!(
+    double_bracket_refuses_an_unclosed_group,
+    "[[ ( -n a ]]; echo rc=$?",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "rc=2\n");
+        assert!(
+            out.stderr.contains("expected `)`"),
+            "stderr: {}",
+            out.stderr
+        );
+    }
+);
+
+shell_test!(
+    double_bracket_without_its_close_is_an_error,
+    "[[ -n a && -n b",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(out.stderr.contains("`]]`"), "stderr: {}", out.stderr);
+    }
+);
+
+shell_test!(
+    a_file_test_on_an_empty_path_is_false,
+    "e=; for op in -a -b -c -d -e -f -g -h -k -L -p -r -s -S -u -w -x -O -G; do \
+     [ $op \"$e\" ] && echo \"[ $op\"; test $op \"$e\" && echo \"test $op\"; \
+     eval \"[[ $op \\\"\\$e\\\" ]]\" && echo \"[[ $op\"; done; echo done",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "done\n");
+        assert_eq!(out.stderr, "");
     }
 );
