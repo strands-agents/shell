@@ -75,3 +75,12 @@ test -f "$empty" || echo test-empty-file
 [[ "" -ef "" ]] || echo empty-ef
 [[ . -nt "" ]] && echo exists-newer-than-empty
 [[ "" -ot . ]] && echo empty-older-than-exists
+if true; then [[ -n a
+  && -n b ]] && echo break-after-then; fi
+true && [[ -n a
+  || -n b ]] && echo break-after-and-list
+l='log [x] done'
+[[ "$l" == *"[x]"* ]] && echo contains-quoted-bracket
+[[ nosuch -nt "" ]] || echo missing-not-newer-than-empty
+[[ "" -nt "" ]] || echo empty-not-newer-than-empty
+[[ "" -ot "" ]] || echo empty-not-older-than-empty

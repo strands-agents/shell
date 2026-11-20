@@ -56,3 +56,9 @@ three-args-or
 empty-ef
 exists-newer-than-empty
 empty-older-than-exists
+break-after-then
+break-after-and-list
+contains-quoted-bracket
+missing-not-newer-than-empty
+empty-not-newer-than-empty
+empty-not-older-than-empty

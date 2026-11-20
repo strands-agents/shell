@@ -209,8 +209,8 @@ pub(crate) async fn eval_binary(
     proc: &Process,
 ) -> bool {
     if matches!(op, "-nt" | "-ot" | "-ef") && (left.is_empty() || right.is_empty()) {
-        return op == "-nt" && right.is_empty() && os.stat(proc, left).await.exists
-            || op == "-ot" && left.is_empty() && os.stat(proc, right).await.exists;
+        return op == "-nt" && !left.is_empty() && os.stat(proc, left).await.exists
+            || op == "-ot" && !right.is_empty() && os.stat(proc, right).await.exists;
     }
     match op {
         "=" | "==" => left == right,
