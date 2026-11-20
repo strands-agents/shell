@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::os::FdWriter;
 use crate::prelude::*;
 
@@ -21,6 +23,17 @@ impl Errors {
         let ew = self.0.as_mut().expect("stderr was just taken");
         wprintln!(ew, "rm: {}: {}", path, e)
     }
+}
+
+/// Whether the last component of `path`, ignoring trailing slashes, is `.`
+/// or `..`.
+fn is_dot_or_dot_dot(path: &str) -> bool {
+    let base = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    matches!(base, "." | "..")
 }
 
 /// Remove `path` and everything under it, reporting each failure by its own
@@ -93,6 +106,24 @@ async fn cmd_rm(os: &dyn Kernel, args: &[String]) -> CommandResult {
         if st.is_dir && !st.is_symlink {
             if !recursive {
                 errors.report(path, "is a directory").await?;
+                code = 1;
+                continue;
+            }
+            // POSIX: refuse `.`, `..` and the root, and do nothing more with them.
+            if is_dot_or_dot_dot(path) {
+                errors
+                    .report(path, "refusing to remove '.' or '..'")
+                    .await?;
+                code = 1;
+                continue;
+            }
+            if io::canonicalize(os, path)
+                .await
+                .is_ok_and(|p| p == Path::new("/"))
+            {
+                errors
+                    .report(path, "refusing to remove the root directory")
+                    .await?;
                 code = 1;
                 continue;
             }

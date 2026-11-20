@@ -4771,6 +4771,28 @@ shell_test!(
         );
     }
 );
+expect_output!(
+    rm_refuses_root,
+    "mkdir /tmp/w; touch /tmp/w/f; rm -rf / //; echo $?; ls /tmp/w",
+    "1\nf\n",
+    "rm: /: refusing to remove the root directory\n\
+     rm: //: refusing to remove the root directory\n",
+    0
+);
+expect_output!(
+    rm_refuses_dot_and_dot_dot,
+    "mkdir -p /tmp/w/a; touch /tmp/w/a/f; cd /tmp/w/a; rm -rf . ../ /tmp/w/a/..; echo $?; ls",
+    "1\nf\n",
+    "rm: .: refusing to remove '.' or '..'\n\
+     rm: ../: refusing to remove '.' or '..'\n\
+     rm: /tmp/w/a/..: refusing to remove '.' or '..'\n",
+    0
+);
+expect!(
+    rm_removes_link_to_root,
+    "touch /tmp/f; ln -s / /tmp/L; rm -rf /tmp/L; echo $?; [ -L /tmp/L ] || echo gone; ls /tmp",
+    "0\ngone\nf"
+);
 
 // ── head coverage ───────────────────────────────────────────────────
 
