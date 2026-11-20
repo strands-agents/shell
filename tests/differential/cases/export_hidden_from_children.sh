@@ -1,4 +1,3 @@
-# known-difference: every variable reaches the commands the shell runs, exported or not; fixed by #285
 plain=1
 env | grep '^plain=' || echo "plain hidden"
 export gone=1

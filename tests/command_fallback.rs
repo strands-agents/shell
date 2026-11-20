@@ -390,6 +390,25 @@ fn the_handler_sees_expanded_args_cwd_and_command_local_env() {
 }
 
 #[test]
+fn the_handler_sees_only_exported_variables() {
+    block_on(async {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut shell = recording_shell(calls.clone());
+        let out = shell
+            .run("MODE=plain; cargo context; export MODE; cargo context")
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        let modes: Vec<_> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.mode.clone())
+            .collect();
+        assert_eq!(modes, [None, Some("plain".to_string())]);
+    });
+}
+
+#[test]
 fn a_decline_matches_a_shell_without_a_handler() {
     block_on(async {
         let mut plain = Shell::builder().build().unwrap();
