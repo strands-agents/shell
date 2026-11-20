@@ -1318,6 +1318,9 @@ impl CommandRequest {
 }
 
 /// The core kernel abstraction. All methods take &self — the kernel is shared.
+///
+/// A path that is empty names no file, as in POSIX, so a method given one treats it as missing
+/// instead of acting on the cwd. [`crate::vfs::absolute`] applies that rule.
 #[async_trait]
 pub trait Kernel: Send + Sync {
     fn new_process(&self) -> Process;

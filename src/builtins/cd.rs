@@ -32,6 +32,8 @@ pub fn builtin_cd<'a>(
         } else {
             args[0].clone()
         };
+        // An empty directory is `.`, as in bash; the kernel refuses an empty path.
+        let dir = if dir.is_empty() { ".".to_string() } else { dir };
 
         let oldpwd = proc.cwd.to_string_lossy().to_string();
         if let Err(e) = os.change_dir(proc, &dir).await {

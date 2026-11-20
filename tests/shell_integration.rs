@@ -228,6 +228,7 @@ expect!(test_int_gt, "[ 5 -gt 3 ] && echo yes", "yes");
 expect!(test_int_lt, "[ 3 -lt 5 ] && echo yes", "yes");
 expect!(test_z_empty, "[ -z '' ] && echo yes", "yes");
 expect!(test_n_nonempty, "[ -n hello ] && echo yes", "yes");
+expect!(test_binary_op_missing_right, "[ a != ] || echo no", "no");
 expect!(
     test_file_exists,
     "touch /tmp/tf; [ -f /tmp/tf ] && echo yes",

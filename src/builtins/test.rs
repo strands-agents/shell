@@ -99,7 +99,7 @@ async fn parse_primary<'a>(
         return result;
     }
 
-    if *pos + 2 <= args.len()
+    if *pos + 2 < args.len()
         && let Some(next) = args.get(*pos + 1)
         && is_binary_op(next)
     {

@@ -882,8 +882,12 @@ fn normalize_dotdot_past_root() {
 #[test]
 fn absolute_against_cwd() {
     let cwd = std::path::Path::new("/home/lash");
-    assert_eq!(absolute(cwd, "a/../b"), "/home/lash/b");
-    assert_eq!(absolute(cwd, "/tmp/./x"), "/tmp/x");
+    assert_eq!(absolute(cwd, "a/../b").unwrap(), "/home/lash/b");
+    assert_eq!(absolute(cwd, "/tmp/./x").unwrap(), "/tmp/x");
+    assert_eq!(
+        absolute(cwd, "").unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
 }
 
 // ── create_dev_nodes ────────────────────────────────────────────────
