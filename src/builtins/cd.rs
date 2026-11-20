@@ -29,12 +29,11 @@ pub fn builtin_cd<'a>(
                     return Ok(1);
                 }
             }
-        } else if args[0].is_empty() {
-            // An empty operand is `.`, as in bash; the kernel refuses an empty path.
-            ".".to_string()
         } else {
             args[0].clone()
         };
+        // An empty directory is `.`, as in bash; the kernel refuses an empty path.
+        let dir = if dir.is_empty() { ".".to_string() } else { dir };
 
         let oldpwd = proc.cwd.to_string_lossy().to_string();
         if let Err(e) = os.change_dir(proc, &dir).await {

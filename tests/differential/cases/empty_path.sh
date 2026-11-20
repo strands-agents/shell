@@ -12,6 +12,10 @@ mv "$e" x
 echo "mv=$?"
 ln -s "$e" l
 echo "ln=$?"
+rmdir "$e"
+echo "rmdir=$?"
+chmod 600 "$e"
+echo "chmod=$?"
 [ -e "$e" ]
 echo "test=$?"
 cd "$e"

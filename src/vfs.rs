@@ -749,7 +749,7 @@ pub fn absolute(cwd: &std::path::Path, path: &str) -> io::Result<String> {
     if path.is_empty() {
         Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "no such file or directory",
+            "no such file or directory: ''",
         ))
     } else if path.starts_with('/') {
         Ok(normalize(path))

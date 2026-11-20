@@ -729,7 +729,7 @@ impl Kernel for VfsKernel {
             // An empty target names no file, as in symlink(2).
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                "no such file or directory",
+                "no such file or directory: ''",
             ));
         }
         let mut vfs = self.vfs.lock().await;
