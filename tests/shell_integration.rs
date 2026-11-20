@@ -6556,6 +6556,16 @@ expect!(
     "printf 'é 日本\\n' | { read a b; printf '%s|%s' \"$a\" \"$b\"; }",
     "é|日本"
 );
+expect!(
+    read_invalid_utf8_is_replaced,
+    "printf 'a\\351b caf\\303\\n' | { read x y; printf '%s|%s' \"$x\" \"$y\"; }",
+    "a\u{FFFD}b|caf\u{FFFD}"
+);
+expect!(
+    read_multibyte_ifs,
+    "printf 'a│日本│c\\n' | { IFS=│; read x y z; printf '%s,%s,%s' \"$x\" \"$y\" \"$z\"; }",
+    "a,日本,c"
+);
 
 // ── compound list with semicolons ─────────────────────────────────
 expect!(
