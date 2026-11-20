@@ -1,0 +1,7 @@
+status: 0
+stderr: non-empty
+--- stdout
+status 1
+status 1
+dir
+dir/x

@@ -277,3 +277,29 @@ fn return_and_exit_stop_only_the_piped_compound() {
         assert_eq!(out.stdout, "after 3\nafter 4\n");
     }));
 }
+
+#[test]
+fn a_command_runs_through_its_sourced_wrapper_function() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = shell_with_bashrc().await;
+        let created = shell.run(&snapshot_script()).await;
+        assert_eq!(created.status, 0, "stderr: {}", created.stderr);
+        let written = shell.run("printf 'one\\ntwo\\n' > /home/lash/notes").await;
+        assert_eq!(written.status, 0, "stderr: {}", written.stderr);
+
+        let grep = shell
+            .run(&wrapper(Some(SNAPSHOT_FILE), "grep two /home/lash/notes"))
+            .await;
+        assert_eq!(grep.stderr, "");
+        assert_eq!(grep.stdout, "two\n");
+        assert_eq!(grep.status, 0);
+
+        let find = shell
+            .run(&wrapper(Some(SNAPSHOT_FILE), "find /home/lash -name notes"))
+            .await;
+        assert_eq!(find.stderr, "");
+        assert_eq!(find.stdout, "/home/lash/notes\n");
+        assert_eq!(find.status, 0);
+    }));
+}
