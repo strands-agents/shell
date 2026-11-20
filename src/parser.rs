@@ -118,6 +118,17 @@ pub enum Item {
         name: String,
         body: CommandLine,
     },
+    /// `[[ ... ]]`: its operands stay unexpanded until the evaluation reaches them.
+    Conditional(Vec<CondTerm>),
+}
+
+/// One word of a `[[ ... ]]` expression.
+#[derive(Debug, PartialEq, Clone)]
+pub enum CondTerm {
+    /// An unquoted operator: `!`, `&&`, `||`, `(`, `)`, or a test operator.
+    Operator(String),
+    /// An operand, expanded without splitting or globbing.
+    Operand(Word),
 }
 
 /// A single arm in a case statement: patterns and body.
@@ -217,6 +228,15 @@ fn expand_aliases(tokens: &mut Vec<Token>, aliases: &std::collections::HashMap<S
     let mut cmd_pos = true;
 
     while i < tokens.len() {
+        // No alias expands inside `[[ ... ]]`.
+        if cmd_pos && tokens[i] == Token::Word("[[".into()) {
+            i += tokens[i..]
+                .iter()
+                .position(|tok| *tok == Token::Word("]]".into()))
+                .map_or(tokens.len() - i, |close| close + 1);
+            cmd_pos = false;
+            continue;
+        }
         if cmd_pos {
             let mut seen = std::collections::HashSet::new();
             let mut trail_space = false;
@@ -259,6 +279,62 @@ fn expand_aliases(tokens: &mut Vec<Token>, aliases: &std::collections::HashMap<S
         ));
         i += 1;
     }
+}
+
+/// Whether an unquoted word inside `[[` is an operator rather than an operand.
+fn is_conditional_operator(word: &str) -> bool {
+    matches!(word, "!" | "==" | "=" | "!=" | "=~" | "-v") || crate::builtins::is_test_operator(word)
+}
+
+/// Parse the words of `[[ ... ]]` after the opening `[[`, through the closing `]]`.
+fn parse_conditional(tokens: &[Token]) -> Result<(Item, &[Token]), String> {
+    let mut terms: Vec<CondTerm> = Vec::new();
+    let mut i = 0;
+    loop {
+        let Some(tok) = tokens.get(i) else {
+            return Err("syntax error: expected `]]`".into());
+        };
+        i += 1;
+        if *tok == Token::Word("]]".into()) {
+            break;
+        }
+        // The pattern of `=~` runs to `]]`, whatever it holds.
+        if matches!(terms.last(), Some(CondTerm::Operator(op)) if op == "=~") {
+            let mut text = String::new();
+            let mut j = i - 1;
+            while let Some(t) = tokens.get(j)
+                && *t != Token::Word("]]".into())
+            {
+                text.push_str(&match t {
+                    Token::Word(w) => w.clone(),
+                    Token::WordParts(w) => word_to_str(w).unwrap_or_default(),
+                    other => tok_name(other).to_string(),
+                });
+                j += 1;
+            }
+            terms.push(CondTerm::Operand(vec![WordPart::SingleQuoted(text)]));
+            i = j;
+            continue;
+        }
+        let term = match tok {
+            Token::And => CondTerm::Operator("&&".into()),
+            Token::Or => CondTerm::Operator("||".into()),
+            Token::LParen => CondTerm::Operator("(".into()),
+            Token::RParen => CondTerm::Operator(")".into()),
+            Token::RedirectIn => CondTerm::Operator("<".into()),
+            Token::RedirectOut => CondTerm::Operator(">".into()),
+            Token::Word(w) if is_conditional_operator(w) => CondTerm::Operator(w.clone()),
+            Token::Word(_) | Token::WordParts(_) => CondTerm::Operand(tok_to_word(tok)),
+            other => {
+                return Err(format!("unexpected '{}' in `[[`", tok_name(other)));
+            }
+        };
+        terms.push(term);
+    }
+    if terms.is_empty() {
+        return Err("unexpected ']]': `[[` needs an expression".into());
+    }
+    Ok((Item::Conditional(terms), &tokens[i..]))
 }
 
 /// Walk the AST and fill in here-doc bodies by reading lines from the reader.
@@ -304,6 +380,7 @@ fn resolve_heredocs(
                 }
             }
             Item::Function { body, .. } => resolve_heredocs(body, read_line)?,
+            Item::Conditional(_) => {}
             Item::CompoundPipeline { compound, tail, .. } => {
                 let mut inner_cl = vec![(*compound.clone(), None)];
                 resolve_heredocs(&mut inner_cl, read_line)?;
@@ -780,13 +857,65 @@ pub fn collect_dollar_pub(
     collect_dollar(chars)
 }
 
+/// Tracks whether the tokenizer is between a command-position `[[` and its `]]`.
+#[derive(Default)]
+struct ConditionalTracker {
+    seen: usize,
+    after_command: bool,
+    inside: bool,
+}
+
+impl ConditionalTracker {
+    fn observe(&mut self, tokens: &[Token]) {
+        for tok in &tokens[self.seen..] {
+            let command_start = !self.after_command;
+            self.seen += 1;
+            if self.inside {
+                if *tok == Token::Word("]]".into()) {
+                    self.inside = false;
+                }
+                continue;
+            }
+            self.after_command = match tok {
+                Token::Semi
+                | Token::DoubleSemi
+                | Token::And
+                | Token::Or
+                | Token::Pipe
+                | Token::Amp
+                | Token::LParen
+                | Token::RParen => false,
+                Token::Word(w) if command_start && w == "[[" => {
+                    self.inside = true;
+                    true
+                }
+                Token::Word(w)
+                    if command_start
+                        && matches!(
+                            w.as_str(),
+                            "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "{" | "!"
+                        ) =>
+                {
+                    false
+                }
+                _ => true,
+            };
+        }
+    }
+}
+
 /// Tokenize shell input, treating a final unquoted backslash as incomplete when `more_input` is true.
 fn tokenize(input: &str, more_input: bool) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
+    let mut conditional = ConditionalTracker::default();
 
     while let Some(&c) = chars.peek() {
+        conditional.observe(&tokens);
         match c {
+            '\n' if conditional.inside => {
+                chars.next();
+            }
             '#' => {
                 // comment — skip rest of line
                 while let Some(&c) = chars.peek() {
@@ -1342,6 +1471,15 @@ fn parse_command_line<'a>(
                 result.push((item, None));
                 continue;
             }
+            Token::Word(w) if w == "[[" && at_start => {
+                let (item, rest) = parse_conditional(&tokens[i + 1..])?;
+                i = tokens.len() - rest.len();
+                let item =
+                    collect_compound_pipe(tokens, &mut i, &mut pipeline_tokens, item, negated)?;
+                negated = false;
+                result.push((item, None));
+                continue;
+            }
             Token::Word(w) if w == "if" && at_start => {
                 let (item, rest) = parse_if(&tokens[i + 1..])?;
                 i = tokens.len() - rest.len();
@@ -1572,7 +1710,12 @@ pub(crate) fn is_array_literal(word: &[WordPart]) -> bool {
 fn opens_a_compound(tok: &Token) -> bool {
     match tok {
         Token::LParen => true,
-        Token::Word(w) => matches!(w.as_str(), "{" | "if" | "while" | "until" | "for" | "case"),
+        Token::Word(w) => {
+            matches!(
+                w.as_str(),
+                "{" | "if" | "while" | "until" | "for" | "case" | "[["
+            )
+        }
         _ => false,
     }
 }
@@ -1598,6 +1741,7 @@ fn parse_compound(tokens: &[Token]) -> Result<(Item, &[Token]), String> {
         Token::Word(w) if w == "until" => parse_while_until(&tokens[1..], true),
         Token::Word(w) if w == "for" => parse_for(&tokens[1..]),
         Token::Word(w) if w == "case" => parse_case(&tokens[1..]),
+        Token::Word(w) if w == "[[" => parse_conditional(&tokens[1..]),
         other => Err(format!("unexpected '{}'", tok_name(other))),
     }
 }
@@ -2305,6 +2449,8 @@ mod tests {
             "echo a; ;;",
             "echo *(N)",
             "echo a (",
+            "[[ a ; b ]]",
+            "[[ ]]",
         ] {
             let err = p(input).unwrap_err();
             assert!(is_definite_error(&err), "{input:?}: {err}");
@@ -2320,6 +2466,8 @@ mod tests {
             "echo 'a",
             "echo $(a",
             "f()",
+            "[[ -n a",
+            "[[ -n a\n&& -n b",
         ] {
             let err = p(input).unwrap_err();
             assert!(!is_definite_error(&err), "{input:?}: {err}");

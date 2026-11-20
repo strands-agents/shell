@@ -1,5 +1,7 @@
 use std::cell::RefCell;
+use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -12,7 +14,7 @@ use crate::io::{CURRENT_KERNEL, CURRENT_PROCESS};
 use crate::os::{
     self, CommandRequest, FdReader, Kernel, OpenFlags, Process, STDERR, STDIN, STDOUT, TakenFd,
 };
-use crate::parser::{self, Connector, Item, Redirect, Word, WordPart};
+use crate::parser::{self, CondTerm, Connector, Item, Redirect, Word, WordPart};
 
 /// Foreground tasks that abort on drop when the kernel has a command fallback or the
 /// process is a background job.
@@ -91,7 +93,23 @@ fn is_special(name: &str) -> bool {
 }
 
 async fn find_in_path(os: &dyn Kernel, proc: &Process, name: &str) -> Option<String> {
-    let path_var = proc.env.get("PATH")?;
+    find_all_in_path(os, proc, name, false)
+        .await
+        .into_iter()
+        .next()
+}
+
+/// Every executable named `name` in PATH order, stopping at the first unless `all`.
+pub(crate) async fn find_all_in_path(
+    os: &dyn Kernel,
+    proc: &Process,
+    name: &str,
+    all: bool,
+) -> Vec<String> {
+    let mut found = Vec::new();
+    let Some(path_var) = proc.env.get("PATH") else {
+        return found;
+    };
     for dir in path_var.split(':') {
         let full = if dir.is_empty() {
             format!("./{name}")
@@ -99,10 +117,56 @@ async fn find_in_path(os: &dyn Kernel, proc: &Process, name: &str) -> Option<Str
             format!("{dir}/{name}")
         };
         if os.is_executable(proc, &full).await {
-            return Some(full);
+            found.push(full);
+            if !all {
+                break;
+            }
         }
     }
-    None
+    found
+}
+
+/// What `command -v` finds for a name.
+pub(crate) enum CommandLookup {
+    /// A builtin, a registered command, or a name the command fallback serves.
+    Builtin,
+    /// A shell function.
+    Function,
+    /// An executable file, from the hash table or a PATH search.
+    Path(String),
+}
+
+/// Resolve `name` as `command -v` does: builtins and registered commands, then
+/// functions, then the hash table, then PATH. With `functions` false, shell
+/// functions are not consulted, as for `which`, which locates commands only.
+/// A name containing `/` is a path and is found only when it is executable.
+pub(crate) async fn lookup_command(
+    os: &dyn Kernel,
+    proc: &Process,
+    name: &str,
+    functions: bool,
+) -> Option<CommandLookup> {
+    if name.contains('/') {
+        return os
+            .is_executable(proc, name)
+            .await
+            .then(|| CommandLookup::Path(name.to_string()));
+    }
+    let function = functions && proc.get_function(name).is_some();
+    if is_special(name)
+        || crate::builtins::lookup(name).is_some()
+        || crate::commands::lookup(name).is_some()
+        || (!function && command_fallback::serves(os, name))
+    {
+        return Some(CommandLookup::Builtin);
+    }
+    if function {
+        return Some(CommandLookup::Function);
+    }
+    if let Some(path) = proc.hash_table.get(name) {
+        return Some(CommandLookup::Path(path.clone()));
+    }
+    find_in_path(os, proc, name).await.map(CommandLookup::Path)
 }
 
 /// Resolve an executable path to either a multicall command name or a shebang interpreter + script.
@@ -599,6 +663,14 @@ fn expand_part_split<'a>(
                 segments.last_mut().unwrap().push(&tmp, false, false);
             }
             WordPart::DoubleQuoted(parts) => {
+                // A quoted part makes a field even when it comes out empty, except
+                // when it holds "$@", which makes no field when there are no args.
+                if !parts
+                    .iter()
+                    .any(|p| matches!(p, WordPart::Var(n) if n == "@"))
+                {
+                    segments.last_mut().unwrap().push("", false, false);
+                }
                 for p in parts {
                     expand_part_split(os.clone(), proc, p, segments, ifs, true).await;
                 }
@@ -2044,6 +2116,10 @@ async fn run_capturing_status(
                     }
                     (exit, s)
                 }
+                Item::Conditional(terms) => (
+                    Box::pin(execute_conditional(os.clone(), proc, terms)).await,
+                    String::new(),
+                ),
                 Item::Case { word, arms } => {
                     let value = expand_word(os.clone(), proc, word).await;
                     let mut s = String::new();
@@ -2372,6 +2448,7 @@ async fn execute_item(
         }
         Item::For { var, words, body } => Box::pin(execute_for(os, proc, var, words, body)).await,
         Item::Case { word, arms } => Box::pin(execute_case(os, proc, word, arms)).await,
+        Item::Conditional(terms) => Ok(Box::pin(execute_conditional(os, proc, terms)).await),
         Item::Function { name, body } => {
             proc.set_function(name, body.clone());
             Ok(0)
@@ -2700,16 +2777,286 @@ async fn execute_case(
     Ok(0)
 }
 
+/// A syntax error in `[[ ... ]]`, reported with status 2.
+struct ConditionalSyntax(String);
+
+type ConditionalResult<'a> = Pin<Box<dyn Future<Output = Result<bool, ConditionalSyntax>> + 'a>>;
+
+/// Evaluate `[[ ... ]]`, expanding each operand only when the evaluation reaches it.
+async fn execute_conditional(os: Arc<dyn Kernel>, proc: &mut Process, terms: &[CondTerm]) -> i32 {
+    if terms.iter().any(|term| is_cond_operator(Some(term), "=~")) {
+        proc.err_msg("strands-shell: [[: `=~` is not supported");
+        return 2;
+    }
+    let mut pos = 0;
+    match conditional_or(os, proc, terms, &mut pos).await {
+        Ok(_) if pos < terms.len() => {
+            proc.err_msg(&format!(
+                "strands-shell: [[: unexpected `{}`",
+                cond_term_text(&terms[pos])
+            ));
+            2
+        }
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(ConditionalSyntax(message)) => {
+            proc.err_msg(&format!("strands-shell: [[: {message}"));
+            2
+        }
+    }
+}
+
+fn cond_term_text(term: &CondTerm) -> String {
+    match term {
+        CondTerm::Operator(op) => op.clone(),
+        CondTerm::Operand(word) => parser::word_to_str(word).unwrap_or_default(),
+    }
+}
+
+fn is_cond_operator(term: Option<&CondTerm>, operator: &str) -> bool {
+    matches!(term, Some(CondTerm::Operator(op)) if op == operator)
+}
+
+/// The text of an operand, or of an operator word read in operand position.
+async fn cond_operand(os: Arc<dyn Kernel>, proc: &mut Process, term: &CondTerm) -> String {
+    match term {
+        CondTerm::Operator(op) => op.clone(),
+        CondTerm::Operand(word) => expand_word(os, proc, word).await,
+    }
+}
+
+/// The right side of `==` or `!=` as a pattern, with its quoted parts escaped.
+async fn cond_pattern(os: Arc<dyn Kernel>, proc: &mut Process, term: &CondTerm) -> String {
+    let CondTerm::Operand(word) = term else {
+        return cond_operand(os, proc, term).await;
+    };
+    let mut pattern = String::new();
+    for part in word {
+        let mut text = String::new();
+        expand_part(os.clone(), proc, part, &mut text).await;
+        if matches!(part, WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)) {
+            for ch in text.chars() {
+                if matches!(ch, '\\' | '*' | '?' | '[') {
+                    pattern.push('\\');
+                }
+                pattern.push(ch);
+            }
+        } else {
+            pattern.push_str(&text);
+        }
+    }
+    pattern
+}
+
+fn conditional_or<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    terms: &'a [CondTerm],
+    pos: &'a mut usize,
+) -> ConditionalResult<'a> {
+    Box::pin(async move {
+        let mut result = conditional_and(os.clone(), proc, terms, pos).await?;
+        while is_cond_operator(terms.get(*pos), "||") {
+            *pos += 1;
+            if result {
+                skip_conditional_and(terms, pos)?;
+            } else {
+                result = conditional_and(os.clone(), proc, terms, pos).await?;
+            }
+        }
+        Ok(result)
+    })
+}
+
+fn conditional_and<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    terms: &'a [CondTerm],
+    pos: &'a mut usize,
+) -> ConditionalResult<'a> {
+    Box::pin(async move {
+        let mut result = conditional_not(os.clone(), proc, terms, pos).await?;
+        while is_cond_operator(terms.get(*pos), "&&") {
+            *pos += 1;
+            if result {
+                result = conditional_not(os.clone(), proc, terms, pos).await?;
+            } else {
+                skip_conditional_not(terms, pos)?;
+            }
+        }
+        Ok(result)
+    })
+}
+
+fn conditional_not<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    terms: &'a [CondTerm],
+    pos: &'a mut usize,
+) -> ConditionalResult<'a> {
+    Box::pin(async move {
+        if is_cond_operator(terms.get(*pos), "!") {
+            *pos += 1;
+            return Ok(!conditional_not(os, proc, terms, pos).await?);
+        }
+        conditional_primary(os, proc, terms, pos).await
+    })
+}
+
+/// The binary operator at `pos + 1`, when a primary there is binary.
+fn cond_binary_operator(terms: &[CondTerm], pos: usize) -> Option<&str> {
+    match terms.get(pos + 1) {
+        Some(CondTerm::Operator(op))
+            if terms.get(pos + 2).is_some()
+                && (matches!(op.as_str(), "==" | "=" | "!=" | "=~")
+                    || crate::builtins::is_binary_op(op)) =>
+        {
+            Some(op)
+        }
+        _ => None,
+    }
+}
+
+/// The unary operator at `pos`, when a primary there is unary.
+fn cond_unary_operator(terms: &[CondTerm], pos: usize) -> Option<&str> {
+    match terms.get(pos) {
+        Some(CondTerm::Operator(op))
+            if terms.get(pos + 1).is_some() && (op == "-v" || crate::builtins::is_unary_op(op)) =>
+        {
+            Some(op)
+        }
+        _ => None,
+    }
+}
+
+fn conditional_primary<'a>(
+    os: Arc<dyn Kernel>,
+    proc: &'a mut Process,
+    terms: &'a [CondTerm],
+    pos: &'a mut usize,
+) -> ConditionalResult<'a> {
+    Box::pin(async move {
+        let Some(first) = terms.get(*pos) else {
+            return Err(ConditionalSyntax("expected an operand".into()));
+        };
+        if is_cond_operator(Some(first), "(") {
+            *pos += 1;
+            let result = conditional_or(os, proc, terms, pos).await?;
+            if !is_cond_operator(terms.get(*pos), ")") {
+                return Err(ConditionalSyntax("expected `)`".into()));
+            }
+            *pos += 1;
+            return Ok(result);
+        }
+        if let Some(op) = cond_binary_operator(terms, *pos) {
+            let right = &terms[*pos + 2];
+            *pos += 3;
+            let left = cond_operand(os.clone(), proc, first).await;
+            if matches!(op, "==" | "=" | "!=") {
+                let pattern = cond_pattern(os.clone(), proc, right).await;
+                return Ok(escaped_glob_match(&pattern, &left) == (op != "!="));
+            }
+            let right = cond_operand(os.clone(), proc, right).await;
+            return Ok(match op {
+                "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
+                    let (a, b) = (eval_arith(proc, &left), eval_arith(proc, &right));
+                    crate::builtins::eval_binary(
+                        &a.to_string(),
+                        op,
+                        &b.to_string(),
+                        os.as_ref(),
+                        proc,
+                    )
+                    .await
+                }
+                _ => crate::builtins::eval_binary(&left, op, &right, os.as_ref(), proc).await,
+            });
+        }
+        if let Some(op) = cond_unary_operator(terms, *pos) {
+            let operand = cond_operand(os.clone(), proc, &terms[*pos + 1]).await;
+            *pos += 2;
+            return Ok(if op == "-v" {
+                proc.get_env(&operand).is_some()
+            } else {
+                crate::builtins::eval_unary(op, &operand, os.as_ref(), proc).await
+            });
+        }
+        *pos += 1;
+        Ok(!cond_operand(os, proc, first).await.is_empty())
+    })
+}
+
+/// Step past an `||` operand that the evaluation skips, expanding nothing.
+fn skip_conditional_and(terms: &[CondTerm], pos: &mut usize) -> Result<(), ConditionalSyntax> {
+    skip_conditional_not(terms, pos)?;
+    while is_cond_operator(terms.get(*pos), "&&") {
+        *pos += 1;
+        skip_conditional_not(terms, pos)?;
+    }
+    Ok(())
+}
+
+/// Step past an `&&` operand that the evaluation skips, expanding nothing.
+fn skip_conditional_not(terms: &[CondTerm], pos: &mut usize) -> Result<(), ConditionalSyntax> {
+    while is_cond_operator(terms.get(*pos), "!") {
+        *pos += 1;
+    }
+    if is_cond_operator(terms.get(*pos), "(") {
+        *pos += 1;
+        skip_conditional_and(terms, pos)?;
+        while is_cond_operator(terms.get(*pos), "||") {
+            *pos += 1;
+            skip_conditional_and(terms, pos)?;
+        }
+        if !is_cond_operator(terms.get(*pos), ")") {
+            return Err(ConditionalSyntax("expected `)`".into()));
+        }
+        *pos += 1;
+        return Ok(());
+    }
+    if terms.get(*pos).is_none() {
+        return Err(ConditionalSyntax("expected an operand".into()));
+    }
+    *pos += if cond_binary_operator(terms, *pos).is_some() {
+        3
+    } else if cond_unary_operator(terms, *pos).is_some() {
+        2
+    } else {
+        1
+    };
+    Ok(())
+}
+
 /// Simple glob-style pattern matching for case statements.
 fn case_match(pattern: &str, value: &str) -> bool {
     glob_match(pattern.as_bytes(), value.as_bytes())
 }
 
+/// Glob matching where a backslash makes the next pattern byte literal.
+fn escaped_glob_match(pattern: &str, value: &str) -> bool {
+    glob_match_with(pattern.as_bytes(), value.as_bytes(), true)
+}
+
 fn glob_match(pat: &[u8], val: &[u8]) -> bool {
+    glob_match_with(pat, val, false)
+}
+
+fn glob_match_with(pat: &[u8], val: &[u8], escapes: bool) -> bool {
     let (mut pi, mut vi) = (0, 0);
     let (mut star_p, mut star_v) = (usize::MAX, 0);
     while vi < val.len() {
-        if pi < pat.len() && pat[pi] == b'[' {
+        if escapes && pi + 1 < pat.len() && pat[pi] == b'\\' {
+            if pat[pi + 1] == val[vi] {
+                pi += 2;
+                vi += 1;
+            } else if star_p != usize::MAX {
+                pi = star_p + 1;
+                star_v += 1;
+                vi = star_v;
+            } else {
+                return false;
+            }
+        } else if pi < pat.len() && pat[pi] == b'[' {
             // Character class
             if let Some((matched, end)) = glob_bracket(pat, pi, val[vi]) {
                 if matched {
@@ -3139,34 +3486,28 @@ async fn execute_pipeline_checked(
                         let verbose = args[0] == "-V";
                         let mut status = 0;
                         for name in &args[1..] {
-                            if is_special(name)
-                                || crate::builtins::lookup(name).is_some()
-                                || crate::commands::lookup(name).is_some()
-                                || (proc.get_function(name).is_none()
-                                    && command_fallback::serves(&*os, name))
-                            {
-                                if verbose {
-                                    let label = if is_special(name) {
-                                        "a special shell builtin"
+                            match lookup_command(&*os, proc, name, true).await {
+                                Some(CommandLookup::Builtin) => {
+                                    if verbose {
+                                        let label = if is_special(name) {
+                                            "a special shell builtin"
+                                        } else {
+                                            "a shell builtin"
+                                        };
+                                        proc.out_msg(&format!("{name} is {label}"));
                                     } else {
-                                        "a shell builtin"
-                                    };
-                                    proc.out_msg(&format!("{name} is {label}"));
-                                } else {
-                                    proc.out_msg(name);
+                                        proc.out_msg(name);
+                                    }
                                 }
-                            } else if proc.get_function(name).is_some() {
-                                if verbose {
-                                    proc.out_msg(&format!("{name} is a shell function"));
-                                } else {
-                                    proc.out_msg(name);
+                                Some(CommandLookup::Function) => {
+                                    if verbose {
+                                        proc.out_msg(&format!("{name} is a shell function"));
+                                    } else {
+                                        proc.out_msg(name);
+                                    }
                                 }
-                            } else if let Some(path) = proc.hash_table.get(name.as_str()).cloned() {
-                                proc.out_msg(&path);
-                            } else if let Some(path) = find_in_path(&*os, proc, name).await {
-                                proc.out_msg(&path);
-                            } else {
-                                status = 1;
+                                Some(CommandLookup::Path(path)) => proc.out_msg(&path),
+                                None => status = 1,
                             }
                         }
                         return Ok(status);
@@ -3177,6 +3518,7 @@ async fn execute_pipeline_checked(
                         args: pipeline[0].args[1..].to_vec(),
                         redirects: pipeline[0].redirects.clone(),
                     };
+                    proc.skip_function = true;
                     let exit = execute_pipeline(os, proc, &[fake_cmd]).await;
                     proc.pending_exit = false;
                     stop_at_deadline(proc)?;
@@ -3273,9 +3615,9 @@ async fn settle_host_writes(proc: &mut Process, exit: i32) -> i32 {
 }
 
 /// Whether Shell runs `name` itself rather than through the command fallback.
-fn runs_in_shell(proc: &Process, name: &str) -> bool {
+fn runs_in_shell(proc: &Process, name: &str, skip_function: bool) -> bool {
     builtins::lookup(name).is_some()
-        || proc.get_function(name).is_some()
+        || (!skip_function && proc.get_function(name).is_some())
         || commands::lookup(name).is_some()
         || name == "lash"
         || name == "sh"
@@ -3364,6 +3706,7 @@ async fn run_pipeline(
     capture: bool,
 ) -> (i32, String) {
     shell_proc.deadline_stop = false;
+    let skip_function = std::mem::take(&mut shell_proc.skip_function);
     let len = pipeline.len();
     let mut tasks = ForegroundTasks::new(os.as_ref(), shell_proc);
 
@@ -3462,7 +3805,7 @@ async fn run_pipeline(
         }
         let cmd = &expanded_args[i][0];
         if builtins::lookup(cmd).is_some()
-            || shell_proc.get_function(cmd).is_some()
+            || (!skip_function && shell_proc.get_function(cmd).is_some())
             || commands::lookup(cmd).is_some()
             || command_fallback::serves(os.as_ref(), cmd)
         {
@@ -3514,7 +3857,7 @@ async fn run_pipeline(
         {
             (program, args) = (inner, rest);
         }
-        if !runs_in_shell(shell_proc, program) {
+        if !runs_in_shell(shell_proc, program, skip_function) {
             if os.command_fallback().is_some() {
                 let request = CommandRequest::new(program, args, &shell_proc.cwd);
                 if let Err(e) = os.check_fallback(&request).await {
@@ -3683,7 +4026,11 @@ async fn run_pipeline(
         }
 
         // Single command: check for functions
-        if let Some(func_body) = shell_proc.get_function(&expanded_args[0][0]).cloned() {
+        if let Some(func_body) = shell_proc
+            .get_function(&expanded_args[0][0])
+            .filter(|_| !skip_function)
+            .cloned()
+        {
             let saved_args =
                 std::mem::replace(&mut shell_proc.args, expanded_args[0][1..].to_vec());
             shell_proc.push_local_scope();
@@ -3757,10 +4104,11 @@ async fn run_pipeline(
     let (stdin_back, mut stdin_returned) = tokio::sync::oneshot::channel();
     let mut stdin_back = (!redirects_stdin).then_some(stdin_back);
 
-    // Apply per-command env prefixes
+    // Apply per-command env prefixes, which the command sees exported
     for (i, env) in expanded_env.iter().enumerate() {
         for (k, v) in env {
             procs[i].set_env(k, v);
+            procs[i].set_exported(k, true);
         }
     }
 
@@ -3824,7 +4172,10 @@ async fn run_pipeline(
 
         // Check for builtin, function, or script before spawning
         let builtin = builtins::lookup(&name);
-        let func_body = child.get_function(&name).cloned();
+        let func_body = child
+            .get_function(&name)
+            .filter(|_| !skip_function)
+            .cloned();
         let is_script = name == "lash" || name == "sh";
 
         if builtin.is_some() || func_body.is_some() || is_script {
@@ -3834,6 +4185,8 @@ async fn run_pipeline(
             if is_script {
                 // The child shell's argv[0], used as `$0` by `sh -c`.
                 state_proc.arg0 = name.clone();
+                // A child shell starts with only the exported variables.
+                state_proc.keep_exported_only();
             }
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
@@ -3935,7 +4288,9 @@ async fn run_pipeline(
             tasks.own(&handle);
             handles.push((i, handle));
         } else {
-            // External commands
+            // External commands see only the exported variables.
+            let mut child = child;
+            child.keep_exported_only();
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
                 run_stage(back, child, async move {

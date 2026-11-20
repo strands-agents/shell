@@ -228,6 +228,7 @@ expect!(test_int_gt, "[ 5 -gt 3 ] && echo yes", "yes");
 expect!(test_int_lt, "[ 3 -lt 5 ] && echo yes", "yes");
 expect!(test_z_empty, "[ -z '' ] && echo yes", "yes");
 expect!(test_n_nonempty, "[ -n hello ] && echo yes", "yes");
+expect!(test_binary_op_missing_right, "[ a != ] || echo no", "no");
 expect!(
     test_file_exists,
     "touch /tmp/tf; [ -f /tmp/tf ] && echo yes",
@@ -645,6 +646,47 @@ expect!(
     "export X=hello; env | grep '^X='",
     "X=hello"
 );
+
+expect!(
+    unexported_hidden_from_env,
+    "X=hello; env | grep '^X=' || echo hidden; echo $X",
+    "hidden\nhello"
+);
+
+expect!(
+    prefix_assignment_visible_to_env,
+    "X=hello env | grep '^X='",
+    "X=hello"
+);
+
+expect!(
+    default_vars_exported,
+    "env | grep -E '^(HOME|PATH|PWD|USER)=' | wc -l",
+    "4"
+);
+
+expect!(
+    cd_exports_oldpwd,
+    "cd /tmp; env | grep -E '^(OLDPWD|PWD)='",
+    "OLDPWD=/home/lash\nPWD=/tmp"
+);
+
+expect!(
+    lua_sees_only_exported,
+    "X=1; lua -e 'print(os.getenv(\"X\"))'; export X; lua -e 'print(os.getenv(\"X\"))'",
+    "nil\n1"
+);
+
+#[test]
+fn embedder_vars_exported() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().env("BUILT", "1").build().unwrap();
+        shell.set_env("SET", "2");
+        let out = shell.run("env | grep -E '^(BUILT|SET)='").await;
+        assert_eq!(out.stdout, "BUILT=1\nSET=2\n");
+    }));
+}
 
 // ── State persistence across runs ───────────────────────────────────
 
@@ -2712,6 +2754,83 @@ expect!(
     "1"
 );
 
+// ── which ───────────────────────────────────────────────────────────
+
+expect_output!(
+    which_agrees_with_command_v,
+    "for n in ls cd echo; do [ \"$(which $n)\" = \"$(command -v $n)\" ] || echo differ $n; done; which ls cd",
+    "ls\ncd\n",
+    "",
+    0
+);
+expect_output!(
+    which_missing_prints_nothing,
+    "which nonexistent_cmd_xyz",
+    "",
+    "",
+    1
+);
+expect_output!(
+    which_some_missing_exits_one,
+    "which ls nonexistent_cmd_xyz cat",
+    "ls\ncat\n",
+    "",
+    1
+);
+expect_output!(
+    which_finds_a_script_on_path,
+    "mkdir -p /tmp/bin; printf '#!/bin/sh\\n' > /tmp/bin/tool; chmod +x /tmp/bin/tool; \
+     PATH=/tmp/bin:$PATH; which tool; command -v tool",
+    "/tmp/bin/tool\n/tmp/bin/tool\n",
+    "",
+    0
+);
+expect_output!(
+    which_all_lists_every_path_match,
+    "mkdir -p /tmp/bin; printf '#!/bin/sh\\n' > /tmp/bin/ls; chmod +x /tmp/bin/ls; \
+     PATH=/tmp/bin:$PATH; which -a ls; which ls",
+    "ls\n/tmp/bin/ls\n/bin/ls\nls\n",
+    "",
+    0
+);
+expect_output!(
+    which_skips_functions,
+    "f() { :; }; which f; echo $?; command -v f",
+    "1\nf\n",
+    "",
+    0
+);
+expect_output!(
+    which_rejects_unknown_option,
+    "which -x ls",
+    "",
+    "strands-shell: which: -x: invalid option\nusage: which [-a] name ...\n",
+    2
+);
+expect_output!(
+    which_without_names_prints_usage,
+    "which",
+    "",
+    "usage: which [-a] name ...\n",
+    1
+);
+expect_output!(
+    which_rejects_unknown_long_option,
+    "which --all ls",
+    "",
+    "strands-shell: which: --all: invalid option\nusage: which [-a] name ...\n",
+    2
+);
+expect_output!(
+    which_checks_a_name_with_a_slash_as_a_path,
+    "mkdir -p /tmp/b; printf '#!/bin/sh\\n' > /tmp/b/s; chmod +x /tmp/b/s; cd /tmp/b; \
+     which -a /bin/ls ./s; command -v ./s; cd /tmp; PATH=/tmp:$PATH which b/s ./missing; echo $?",
+    "/bin/ls\n./s\n./s\nb/s\n1\n",
+    "",
+    0
+);
+expect_output!(which_double_dash_ends_options, "which -- -a", "", "", 1);
+
 // ── builtin builtin ─────────────────────────────────────────────────
 
 expect!(builtin_runs_echo, "builtin echo hello", "hello");
@@ -3339,6 +3458,69 @@ expect!(
     "b\nc\nd\ne\nf\ng\nh\ni\nj\nk"
 );
 
+// ── uname ───────────────────────────────────────────────────────────
+
+expect!(uname_default, "uname", "Linux");
+expect!(uname_s, "uname -s", "Linux");
+expect!(uname_n_default, "uname -n", "localhost");
+expect!(uname_n_follows_hostname, "HOSTNAME=box uname -n", "box");
+expect!(uname_n_empty_hostname, "HOSTNAME= uname -n", "localhost");
+expect!(uname_r, "uname -r", env!("CARGO_PKG_VERSION"));
+expect!(uname_v, "uname -v", "#1");
+expect!(uname_m, "uname -m", std::env::consts::ARCH);
+expect!(uname_o, "uname -o", "Linux");
+expect!(uname_p_i_unknown, "uname -p; uname -i", "unknown\nunknown");
+expect!(
+    uname_p_i_order,
+    "uname -iopm",
+    format!("{} unknown unknown Linux", std::env::consts::ARCH)
+);
+expect!(
+    uname_fixed_order,
+    "uname -m -s; uname --machine --nodename",
+    format!("Linux {0}\nlocalhost {0}", std::env::consts::ARCH)
+);
+expect!(
+    uname_a,
+    "uname -a; uname -a -p -i; uname -snrvmpio",
+    format!(
+        "Linux localhost {0} #1 {1} Linux\nLinux localhost {0} #1 {1} Linux\nLinux localhost {0} #1 {1} unknown unknown Linux",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH
+    )
+);
+expect!(
+    uname_help,
+    "uname --help | head -1",
+    "Usage: uname [OPTION]..."
+);
+shell_test!(
+    uname_extra_operand,
+    "uname x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("uname: unexpected argument \"x\""),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    uname_bad_option,
+    "uname -z",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("uname: invalid option"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+
 // ── basename/dirname ────────────────────────────────────────────────
 
 expect!(basename_basic, "basename /usr/local/bin/foo", "foo");
@@ -3348,6 +3530,51 @@ expect!(
     "dirname /usr/local/bin/foo",
     "/usr/local/bin"
 );
+
+// ── whoami ──────────────────────────────────────────────────────────
+
+expect!(whoami_default, "whoami", "lash");
+expect!(whoami_follows_user, "USER=agent whoami", "agent");
+expect!(whoami_unset_user, "unset USER; whoami", "lash");
+expect!(whoami_empty_user, "USER= whoami", "lash");
+expect!(whoami_help, "whoami --help | head -1", "Usage: whoami");
+shell_test!(
+    whoami_extra_operand,
+    "whoami x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("whoami: unexpected argument \"x\""),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    whoami_bad_option,
+    "whoami -x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("whoami: invalid option"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+
+#[test]
+fn whoami_uses_builder_user() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().env("USER", "agent").build().unwrap();
+        let out = shell.run("whoami").await;
+        assert_eq!(out.stdout, "agent\n");
+        assert_eq!(out.status, 0);
+    }));
+}
 
 // ── cat options ─────────────────────────────────────────────────────
 
@@ -4124,6 +4351,83 @@ fn mktemp_template() {
     }));
 }
 
+// ── base64 coverage ─────────────────────────────────────────────────
+
+#[test]
+fn base64_round_trips_every_byte_value() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let data: Vec<u8> = (0..=255).collect();
+        shell.write_file("/tmp/bin", &data).await.unwrap();
+        let out = shell
+            .run("base64 /tmp/bin > /tmp/enc && base64 -d /tmp/enc > /tmp/dec")
+            .await;
+        assert_eq!((out.status, out.stderr.as_str()), (0, ""));
+        let enc = shell.read_file("/tmp/enc").await.unwrap();
+        let lines: Vec<&[u8]> = enc.split(|&b| b == b'\n').collect();
+        assert_eq!(lines.len(), 6, "five lines plus the empty tail");
+        assert!(lines[..4].iter().all(|line| line.len() == 76));
+        assert!(enc.starts_with(b"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygp"));
+        assert_eq!(shell.read_file("/tmp/dec").await.unwrap(), data);
+    }));
+}
+
+#[test]
+fn base64_decodes_non_utf8_bytes_from_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("echo //79AIA= | base64 -d > /tmp/out").await;
+        assert_eq!((out.status, out.stderr.as_str()), (0, ""));
+        assert_eq!(
+            shell.read_file("/tmp/out").await.unwrap(),
+            [0xff, 0xfe, 0xfd, 0x00, 0x80]
+        );
+    }));
+}
+
+#[test]
+fn base64_encodes_non_utf8_bytes_from_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .write_file("/tmp/bin", &[0xff, 0xfe, 0xfd, 0x00, 0x80])
+            .await
+            .unwrap();
+        let out = shell.run("base64 -w 0 < /tmp/bin").await;
+        assert_eq!((out.status, out.stdout.as_str()), (0, "//79AIA="));
+    }));
+}
+
+shell_test!(
+    base64_rejects_a_bad_wrap_size,
+    "echo hi | base64 -w x",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("invalid wrap size"), "{}", out.stderr);
+    }
+);
+
+shell_test!(
+    base64_reports_a_closed_stdin,
+    "base64 <&-",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert!(!out.stderr.is_empty(), "expected an error on stderr");
+    }
+);
+
+shell_test!(
+    base64_rejects_a_second_file,
+    "base64 a b",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("extra operand"), "{}", out.stderr);
+    }
+);
+
 // ── test builtin coverage ───────────────────────────────────────────
 
 expect!(
@@ -4403,6 +4707,46 @@ expect!(
 );
 
 // ── tail coverage ───────────────────────────────────────────────────
+
+#[test]
+fn tail_large_line_counts_preserve_small_input() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for count in [usize::MAX, usize::MAX / 2] {
+            for (cmd, expected) in [
+                (format!("printf 'a\\nb\\nc' | tail -n {count}"), "a\nb\nc"),
+                (
+                    format!(
+                        "printf 'a\\nb\\nc' > /tmp/tail-large; tail -n {count} /tmp/tail-large"
+                    ),
+                    "a\nb\nc",
+                ),
+                (format!("printf '' | tail -n {count}"), ""),
+            ] {
+                let out = shell.run(&cmd).await;
+                assert_eq!(out.status, 0, "{cmd}: {}", out.stderr);
+                assert_eq!(out.stdout, expected, "{cmd}");
+                assert!(out.stderr.is_empty(), "{cmd}: {}", out.stderr);
+            }
+        }
+    }));
+}
+
+#[test]
+fn tail_line_count_boundaries() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (count, expected) in [(0, ""), (1, "c"), (3, "a\nb\nc"), (4, "a\nb\nc")] {
+            let cmd = format!("printf 'a\\nb\\nc' | tail -n {count}");
+            let out = shell.run(&cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: {}", out.stderr);
+            assert_eq!(out.stdout, expected, "{cmd}");
+            assert!(out.stderr.is_empty(), "{cmd}: {}", out.stderr);
+        }
+    }));
+}
 
 expect!(
     tail_from_file,
@@ -6174,6 +6518,28 @@ fn printf_number_huge_field_is_capped() {
             let out = shell.run(cmd).await;
             assert_eq!(out.status, 0, "{cmd}: status");
             assert_eq!(out.stdout.len(), len, "{cmd}: length");
+        }
+    }));
+}
+
+// A huge `%s` width is clamped like the numeric ones (#300).
+#[test]
+fn printf_string_huge_width_is_capped() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        for (cmd, len, tail) in [
+            ("printf '%99999999999s|' a", 65536, " a|"),
+            ("printf '%99999999999999999999999s|' a", 65536, " a|"),
+            ("printf '%-99999999999s|' a", 65536, "  |"),
+            ("printf '%99999999999.1s|' ab", 65536, " a|"),
+            ("printf '%65535s|' a", 65536, " a|"),
+            ("printf '%5s|' a", 6, " a|"),
+        ] {
+            let out = shell.run(cmd).await;
+            assert_eq!(out.status, 0, "{cmd}: status");
+            assert_eq!(out.stdout.len(), len, "{cmd}: length");
+            assert!(out.stdout.ends_with(tail), "{cmd}: tail");
         }
     }));
 }
@@ -9317,6 +9683,181 @@ fn the_shells_own_stdin_reaches_a_substitution() {
         let out = shell.run(r#"input=$(cat); echo "[$input]""#).await;
         assert_eq!(out.stdout, "[{\"event\":1}]\n");
         assert_eq!(out.stderr, "");
+    }));
+}
+
+/// The ways to give the shell a stdin that stays open.
+#[derive(Clone, Copy, Debug)]
+enum OpenStdin {
+    Channel,
+    Outside,
+}
+
+/// Run `script` with a 500 ms timeout, on a stdin that got `input` and has no end-of-file.
+async fn run_on_open_stdin(
+    script: &str,
+    stdin: OpenStdin,
+    input: &'static [u8],
+) -> (Shell, strands_shell::Output) {
+    let mut shell = Shell::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .unwrap();
+    let (tx, rx) = strands_shell::os::pipe(4);
+    tx.send(bytes::Bytes::from_static(input)).await.unwrap();
+    match stdin {
+        OpenStdin::Channel => shell.proc.set_channel_reader(0, rx),
+        OpenStdin::Outside => shell.proc.set_outside_reader(0, rx),
+    }
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), shell.run(script))
+        .await
+        .unwrap_or_else(|_| panic!("{script} on {stdin:?} stdin: the deadline did not end it"));
+    drop(tx);
+    (shell, out)
+}
+
+#[test]
+fn a_read_from_stdin_with_no_end_stops_at_the_deadline() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for stdin in [OpenStdin::Channel, OpenStdin::Outside] {
+            for script in [
+                "cat",
+                "read x",
+                "x=$(cat)",
+                "x=$(read y)",
+                "(cat)",
+                "cat | cat",
+                "sleep 10 | cat",
+                "grep x",
+                "grep x; touch /tmp/after",
+                "lua -e 'io.write(\"ran\")'; touch /tmp/after",
+                "x=$(cat); touch /tmp/after",
+            ] {
+                if matches!(stdin, OpenStdin::Outside) && script.starts_with("lua") {
+                    continue;
+                }
+                let started = std::time::Instant::now();
+                let (mut shell, out) = run_on_open_stdin(script, stdin, b"first part").await;
+                assert!(
+                    !out.stdout.contains("ran"),
+                    "{script} on {stdin:?} stdin: ran after the deadline"
+                );
+                let (status, stderr) = (out.status, out.stderr);
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(3),
+                    "{script} on {stdin:?} stdin: {:?}",
+                    started.elapsed()
+                );
+                assert_eq!(status, 1, "{script} on {stdin:?} stdin: {stderr:?}");
+                let lines: Vec<&str> = stderr.lines().collect();
+                assert!(
+                    !lines.is_empty()
+                        && lines
+                            .iter()
+                            .all(|line| line.ends_with("execution timeout exceeded")),
+                    "{script} on {stdin:?} stdin: {stderr:?}"
+                );
+                assert!(
+                    lines
+                        .iter()
+                        .filter(|line| **line == "strands-shell: execution timeout exceeded")
+                        .count()
+                        <= 1,
+                    "{script} on {stdin:?} stdin: {stderr:?}"
+                );
+                let after = shell.run("test ! -e /tmp/after").await;
+                assert_eq!(
+                    after.status, 0,
+                    "{script} on {stdin:?} stdin: a later command ran"
+                );
+            }
+        }
+    }));
+}
+
+#[test]
+fn a_read_cut_off_by_the_deadline_leaves_its_partial_line_for_the_next_read() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, out) = run_on_open_stdin("read x", OpenStdin::Outside, b"abc").await;
+        assert_eq!(out.status, 1, "{}", out.stderr);
+        let next = shell.run("read y; echo \"[$y]\"").await;
+        assert_eq!(next.stdout, "[abc]\n", "{}", next.stderr);
+    }));
+}
+
+#[test]
+fn a_read_from_stdin_that_ends_in_time_is_unchanged() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            ("cat", "first\nsecond\n"),
+            ("read x; echo \"[$x]\"", "[first]\n"),
+            ("x=$(cat); echo \"[$x]\"", "[first\nsecond]\n"),
+            ("x=$(read y; echo \"$y\"); echo \"[$x]\"", "[first]\n"),
+            ("(cat)", "first\nsecond\n"),
+        ] {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let (tx, rx) = strands_shell::os::pipe(4);
+            shell.proc.set_outside_reader(0, rx);
+            let feed = tokio::task::spawn_local(async move {
+                tx.send(bytes::Bytes::from_static(b"first\n"))
+                    .await
+                    .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tx.send(bytes::Bytes::from_static(b"second\n"))
+                    .await
+                    .unwrap();
+            });
+            let out = shell.run(script).await;
+            feed.await.unwrap();
+            assert_eq!(out.stdout, expected, "{script}: {}", out.stderr);
+            assert_eq!(out.stderr, "", "{script}");
+            assert_eq!(out.status, 0, "{script}");
+        }
+    }));
+}
+
+#[test]
+fn a_closed_stdin_is_unchanged_by_the_deadline() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            ("cat", "first part"),
+            ("read x; echo \"[$x]\"", "[first part]\n"),
+            ("x=$(cat); echo \"[$x]\"", "[first part]\n"),
+            ("x=$(read y; echo \"$y\"); echo \"[$x]\"", "[first part]\n"),
+            ("(cat)", "first part"),
+            ("read x; cat; echo \"[$x]\"", "[first part]\n"),
+        ] {
+            for stdin in [OpenStdin::Channel, OpenStdin::Outside] {
+                let mut shell = Shell::builder()
+                    .timeout(std::time::Duration::from_millis(500))
+                    .build()
+                    .unwrap();
+                let (tx, rx) = strands_shell::os::pipe(4);
+                tx.send(bytes::Bytes::from_static(b"first part"))
+                    .await
+                    .unwrap();
+                drop(tx);
+                match stdin {
+                    OpenStdin::Channel => shell.proc.set_channel_reader(0, rx),
+                    OpenStdin::Outside => shell.proc.set_outside_reader(0, rx),
+                }
+                let out = shell.run(script).await;
+                assert_eq!(
+                    out.stdout, expected,
+                    "{script} on {stdin:?}: {}",
+                    out.stderr
+                );
+                assert_eq!(out.stderr, "", "{script} on {stdin:?}");
+                assert_eq!(out.status, 0, "{script} on {stdin:?}");
+            }
+        }
     }));
 }
 
@@ -13631,4 +14172,146 @@ expect!(
     errexit_ignores_a_negated_pipeline_into_a_compound,
     "set -e; ! true | { false; echo in; }; ! printf 'a\\n' | while read l; do [ \"$l\" = a ]; done; echo after",
     "in\nafter"
+);
+
+// ── id ──────────────────────────────────────────────────────────────
+
+expect!(
+    id_default,
+    "id",
+    "uid=1000(lash) gid=1000(lash) groups=1000(lash)"
+);
+expect!(id_u, "id -u", "1000");
+expect!(id_g, "id -g", "1000");
+expect!(
+    id_un,
+    "id -un; id -nu; id -u -n; id --user --name",
+    "lash\nlash\nlash\nlash"
+);
+expect!(id_gn, "id -gn", "lash");
+expect!(id_repeated_choice, "id -u -u", "1000");
+expect!(
+    id_follows_user,
+    "USER=agent id; USER=agent id -un",
+    "uid=1000(agent) gid=1000(agent) groups=1000(agent)\nagent"
+);
+expect!(id_unset_user, "unset USER; id -un", "lash");
+expect!(id_empty_user, "USER= id -un", "lash");
+expect!(id_help, "id --help | head -1", "Usage: id [OPTION]...");
+shell_test!(
+    id_n_alone,
+    "id -n",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+        assert!(out.stderr.contains("default format"), "{}", out.stderr);
+    }
+);
+shell_test!(
+    id_user_and_group,
+    "id -u -g",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_eq!(out.status, 1);
+        assert!(
+            out.stderr.contains("more than one choice"),
+            "{}",
+            out.stderr
+        );
+    }
+);
+shell_test!(
+    id_bad_option,
+    "id -z",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(out.stderr.contains("id: invalid option"), "{}", out.stderr);
+    }
+);
+shell_test!(
+    id_operand,
+    "id someone",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("id: unexpected argument \"someone\""),
+            "{}",
+            out.stderr
+        );
+    }
+);
+
+// ── [[ ]] refusals ──────────────────────────────────────────────────
+
+shell_test!(
+    double_bracket_refuses_a_regex_even_when_short_circuited,
+    "[[ -z x && abc =~ b || -n y ]]; echo rc=$?; [[ -n x || ( x =~ ^a ) ]]; echo rc=$?",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "rc=2\nrc=2\n");
+        assert_eq!(
+            out.stderr.matches("`=~` is not supported").count(),
+            2,
+            "stderr: {}",
+            out.stderr
+        );
+    }
+);
+
+shell_test!(
+    double_bracket_refuses_two_operands_without_an_operator,
+    "[[ a b ]]",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 2);
+        assert!(out.stderr.contains("[[:"), "stderr: {}", out.stderr);
+    }
+);
+
+shell_test!(
+    double_bracket_refuses_a_semicolon_inside,
+    "[[ a && ; b ]] && echo ok",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(
+            out.stderr.contains("unexpected ';'"),
+            "stderr: {}",
+            out.stderr
+        );
+    }
+);
+
+shell_test!(
+    double_bracket_refuses_an_unclosed_group,
+    "[[ ( -n a ]]; echo rc=$?",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "rc=2\n");
+        assert!(
+            out.stderr.contains("expected `)`"),
+            "stderr: {}",
+            out.stderr
+        );
+    }
+);
+
+shell_test!(
+    double_bracket_without_its_close_is_an_error,
+    "[[ -n a && -n b",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "");
+        assert_ne!(out.status, 0);
+        assert!(out.stderr.contains("`]]`"), "stderr: {}", out.stderr);
+    }
+);
+
+shell_test!(
+    a_file_test_on_an_empty_path_is_false,
+    "e=; for op in -a -b -c -d -e -f -g -h -k -L -p -r -s -S -u -w -x -O -G; do \
+     [ $op \"$e\" ] && echo \"[ $op\"; test $op \"$e\" && echo \"test $op\"; \
+     eval \"[[ $op \\\"\\$e\\\" ]]\" && echo \"[[ $op\"; done; echo done",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "done\n");
+        assert_eq!(out.stderr, "");
+    }
 );

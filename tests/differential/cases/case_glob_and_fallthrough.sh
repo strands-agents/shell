@@ -1,4 +1,3 @@
-# known-difference: a case pattern of "" never matches an empty word
 for v in yes Y no maybe "" ; do
   case "$v" in
     [Yy]|[Yy]es) echo "[$v] yes" ;;

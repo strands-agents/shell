@@ -26,15 +26,6 @@ impl VfsKernel {
         }
     }
 
-    /// Resolve a path relative to the process cwd, producing an absolute virtual path.
-    fn abs(proc: &Process, path: &str) -> String {
-        if path.starts_with('/') {
-            vfs::normalize(path)
-        } else {
-            vfs::normalize(&format!("{}/{}", proc.cwd.display(), path))
-        }
-    }
-
     /// Check that the user has write permission on the parent directory of `abs_path`.
     fn check_parent_write(vfs: &Vfs, abs_path: &str) -> io::Result<()> {
         let parent = match abs_path.rfind('/') {
@@ -293,7 +284,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn open(&self, proc: &mut Process, path: &str, flags: OpenFlags) -> io::Result<Fd> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
 
         // Check for host-backed path (bind_direct passthrough)
         {
@@ -411,6 +402,7 @@ impl Kernel for VfsKernel {
                 return Err(io::Error::other("file size limit exceeded"));
             }
             let (tx, rx) = crate::os::pipe(8192);
+            let writers = tx.downgrade();
             let size_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let fd = proc.alloc_fd(FdKind::ChannelWriter {
                 tx,
@@ -418,7 +410,7 @@ impl Kernel for VfsKernel {
             })?;
             let append = flags.append;
             // Spawn a task to collect writes and flush to VFS
-            tokio::task::spawn_local(async move {
+            let drain = tokio::task::spawn_local(async move {
                 let mut rx = rx;
                 let mut buf = if append {
                     let v = vfs_ref.lock().await;
@@ -435,7 +427,11 @@ impl Kernel for VfsKernel {
                 }
                 let mut v = vfs_ref.lock().await;
                 let _ = v.write_file(ino, buf);
+                Ok(())
             });
+            // Tracked so that a command can wait for the content, as for a host write. The drain
+            // ignores a failed VFS write, so settling it reports no error.
+            proc.track_host_write(abs.clone(), writers, drain);
             Ok(fd)
         } else {
             Err(io::Error::new(
@@ -446,7 +442,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn list_dir(&self, proc: &Process, path: &str) -> io::Result<Vec<DirEntry>> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -478,7 +474,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn change_dir(&self, proc: &mut Process, path: &str) -> io::Result<()> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -507,7 +503,9 @@ impl Kernel for VfsKernel {
     }
 
     async fn stat(&self, proc: &Process, path: &str) -> FileStat {
-        let abs = Self::abs(proc, path);
+        let Ok(abs) = vfs::absolute(&proc.cwd, path) else {
+            return FileStat::default();
+        };
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -525,7 +523,9 @@ impl Kernel for VfsKernel {
     }
 
     async fn lstat(&self, proc: &Process, path: &str) -> FileStat {
-        let abs = Self::abs(proc, path);
+        let Ok(abs) = vfs::absolute(&proc.cwd, path) else {
+            return FileStat::default();
+        };
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -543,7 +543,9 @@ impl Kernel for VfsKernel {
     }
 
     async fn access(&self, proc: &Process, path: &str, mode: i32) -> bool {
-        let abs = Self::abs(proc, path);
+        let Ok(abs) = vfs::absolute(&proc.cwd, path) else {
+            return false;
+        };
         let vfs = self.vfs.lock().await;
 
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -578,7 +580,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
         // Resolve to verify the path exists and follow symlinks
         let _ = vfs.resolve(&abs, true)?;
@@ -586,7 +588,9 @@ impl Kernel for VfsKernel {
     }
 
     async fn is_executable(&self, proc: &Process, path: &str) -> bool {
-        let abs = Self::abs(proc, path);
+        let Ok(abs) = vfs::absolute(&proc.cwd, path) else {
+            return false;
+        };
         let vfs = self.vfs.lock().await;
 
         if let Some((_host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
@@ -614,7 +618,9 @@ impl Kernel for VfsKernel {
     }
 
     async fn glob(&self, proc: &Process, pattern: &str) -> Vec<String> {
-        let abs_pattern = Self::abs(proc, pattern);
+        let Ok(abs_pattern) = vfs::absolute(&proc.cwd, pattern) else {
+            return Vec::new();
+        };
         let vfs = self.vfs.lock().await;
         let mut results = Vec::new();
         glob_vfs(&vfs, &abs_pattern, &mut results);
@@ -635,7 +641,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn remove_file(&self, proc: &Process, path: &str) -> io::Result<()> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -653,7 +659,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn remove_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -671,7 +677,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn create_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -693,8 +699,8 @@ impl Kernel for VfsKernel {
     }
 
     async fn rename(&self, proc: &Process, from: &str, to: &str) -> io::Result<()> {
-        let abs_from = Self::abs(proc, from);
-        let abs_to = Self::abs(proc, to);
+        let abs_from = vfs::absolute(&proc.cwd, from)?;
+        let abs_to = vfs::absolute(&proc.cwd, to)?;
         let vfs = self.vfs.lock().await;
         let host_from = Self::resolve_host(&vfs, &abs_from);
         let host_to = Self::resolve_host(&vfs, &abs_to);
@@ -718,7 +724,14 @@ impl Kernel for VfsKernel {
     }
 
     async fn symlink(&self, proc: &Process, target: &str, link: &str) -> io::Result<()> {
-        let abs_link = Self::abs(proc, link);
+        let abs_link = vfs::absolute(&proc.cwd, link)?;
+        if target.is_empty() {
+            // An empty target names no file, as in symlink(2).
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "no such file or directory: ''",
+            ));
+        }
         let mut vfs = self.vfs.lock().await;
         Self::check_parent_write(&vfs, &abs_link)?;
         vfs.symlink(&abs_link, target, LASH_UID, LASH_GID)?;
@@ -726,7 +739,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
         if let Some((host_path, _ro)) = Self::resolve_host_nofollow(&vfs, &abs) {
             drop(vfs);
@@ -745,7 +758,7 @@ impl Kernel for VfsKernel {
     }
 
     async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()> {
-        let abs = Self::abs(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         let mut vfs = self.vfs.lock().await;
         if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -768,6 +781,46 @@ impl Kernel for VfsKernel {
         }
         // Preserve the file type bits, replace permission bits
         inode.mode = (inode.mode & 0o170000) | (mode & 0o7777);
+        Ok(())
+    }
+
+    async fn set_times(&self, proc: &Process, path: &str, times: FileTimes) -> io::Result<()> {
+        let abs = vfs::absolute(&proc.cwd, path)?;
+        let mut vfs = self.vfs.lock().await;
+        if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
+            drop(vfs);
+            if ro {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "read-only bind mount",
+                ));
+            }
+            return host_set_times(&host_path, times);
+        }
+        let ino = vfs.resolve(&abs, true)?;
+        // As `utimensat` does: the owner may set any time, and a writer may set the current time.
+        let explicit = [times.accessed, times.modified]
+            .iter()
+            .any(|change| matches!(change, TimeChange::To(_)));
+        let owner = vfs.get(ino)?.uid == LASH_UID || LASH_UID == 0;
+        if !owner && (explicit || !vfs.check_permission(ino, LASH_UID, LASH_GID, 2)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ));
+        }
+        let now = std::time::SystemTime::now();
+        let inode = vfs.get_mut(ino)?;
+        for (change, slot) in [
+            (times.accessed, &mut inode.atime),
+            (times.modified, &mut inode.mtime),
+        ] {
+            match change {
+                TimeChange::Keep => {}
+                TimeChange::Now => *slot = now,
+                TimeChange::To(time) => *slot = time,
+            }
+        }
         Ok(())
     }
 
@@ -1093,6 +1146,68 @@ impl Kernel for VfsKernel {
     }
 }
 
+/// Set a host file's times with `utimensat`, following a symbolic link as `touch` does.
+#[cfg(unix)]
+fn host_set_times(path: &std::path::Path, times: FileTimes) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    let specification = [
+        host_timespec(times.accessed)?,
+        host_timespec(times.modified)?,
+    ];
+    // SAFETY: path is a valid NUL-terminated string, and specification holds the two timespec
+    // values utimensat reads.
+    let result =
+        unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), specification.as_ptr(), 0) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn host_set_times(_path: &std::path::Path, _times: FileTimes) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "touch cannot set times on this host",
+    ))
+}
+
+/// The `utimensat` value for one time change.
+#[cfg(unix)]
+fn host_timespec(change: TimeChange) -> io::Result<libc::timespec> {
+    let out_of_range = || io::Error::new(io::ErrorKind::InvalidInput, "time is out of range");
+    let (seconds, nanoseconds): (libc::time_t, libc::c_long) = match change {
+        TimeChange::Keep => (0, libc::UTIME_OMIT),
+        TimeChange::Now => (0, libc::UTIME_NOW),
+        TimeChange::To(time) => match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => (
+                libc::time_t::try_from(after.as_secs()).map_err(|_| out_of_range())?,
+                libc::c_long::from(after.subsec_nanos() as i32),
+            ),
+            Err(before) => {
+                let before = before.duration();
+                let seconds =
+                    libc::time_t::try_from(before.as_secs()).map_err(|_| out_of_range())?;
+                match before.subsec_nanos() {
+                    0 => (-seconds, 0),
+                    nanoseconds => (
+                        -seconds - 1,
+                        libc::c_long::from(1_000_000_000 - nanoseconds as i32),
+                    ),
+                }
+            }
+        },
+    };
+    // SAFETY: timespec is a plain C struct, and every field is set below.
+    let mut spec: libc::timespec = unsafe { std::mem::zeroed() };
+    spec.tv_sec = seconds;
+    spec.tv_nsec = nanoseconds;
+    Ok(spec)
+}
+
 // --- host stat helper ---
 
 #[cfg(unix)]
@@ -1139,6 +1254,7 @@ async fn host_stat(path: &std::path::Path) -> FileStat {
         dev: 0,
         ino: 0,
         modified: meta.modified().ok(),
+        accessed: meta.accessed().ok(),
     }
 }
 
@@ -1162,6 +1278,7 @@ fn host_stat_sync(path: &std::path::Path) -> FileStat {
         dev: 0,
         ino: 0,
         modified: meta.modified().ok(),
+        accessed: meta.accessed().ok(),
     }
 }
 

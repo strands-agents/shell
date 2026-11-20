@@ -1,0 +1,20 @@
+status: 0
+stderr: empty
+--- stdout
+plain hidden
+plain=1
+prefix=1
+prefix gone
+later=1
+early unset
+early=2
+dropped hidden
+dropped=1
+gone hidden
+fixed hidden
+kept=1
+inner=1
+child sees []
+child sees [1]
+subshell sees [1]
+substitution sees [1]

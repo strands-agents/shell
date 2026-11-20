@@ -173,8 +173,7 @@ impl CommandContext {
         &self.cwd
     }
 
-    /// The Shell variables, including command-local assignments, unexported
-    /// variables, and function locals.
+    /// The exported Shell variables, including command-local assignments.
     pub fn env(&self) -> &HashMap<String, String> {
         &self.env
     }

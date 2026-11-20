@@ -982,3 +982,32 @@ fn a_function_the_script_names_strands_compound_is_checked() {
         }
     });
 }
+
+#[test]
+fn command_past_a_function_asks_the_fallback_and_honors_its_refusal() {
+    block_on(async {
+        let (mut shell, _, ran) = fallback_shell(true, &["tool"]);
+        let out = shell.run("tool() { echo fn; }; command tool a").await;
+        assert_eq!(out.status, 126);
+        assert_eq!(out.stdout, "");
+        assert!(ran.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn command_past_a_function_runs_the_allowed_fallback_once() {
+    block_on(async {
+        let (mut shell, events, ran) = fallback_shell(true, &[]);
+        let out = shell.run("tool() { echo fn; }; command tool a").await;
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout, "");
+        assert_eq!(*ran.lock().unwrap(), ["tool"]);
+        let fallback_checks = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| **event == check_fallback("tool", &["a"]))
+            .count();
+        assert_eq!(fallback_checks, 1);
+    });
+}

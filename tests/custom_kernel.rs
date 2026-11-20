@@ -15,9 +15,10 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use bytes::Bytes;
 use strands_shell::os::{
-    DirEntry, Fd, FdKind, FileStat, HttpRequest, Kernel, OpenFlags, Process, pipe,
+    DirEntry, Fd, FdKind, FileStat, HttpRequest, Kernel, OpenFlags, Process, SystemInfo, pipe,
 };
 use strands_shell::parser::{self, CommandLine, Connector, Item, Redirect, WordPart};
+use strands_shell::vfs;
 use strands_shell::{
     BindInfo, CredInfo, CredKind, FileInfo, FileOpErrorKind, LimitsInfo, Output, Shell, ShellConfig,
 };
@@ -57,25 +58,6 @@ impl MemKernel {
     fn has_dir(&self, path: &str) -> bool {
         self.tree.lock().unwrap().dirs.contains(path)
     }
-}
-
-fn resolve(proc: &Process, path: &str) -> String {
-    let joined = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("{}/{}", proc.cwd.display(), path)
-    };
-    let mut parts: Vec<String> = Vec::new();
-    for part in joined.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            other => parts.push(other.to_string()),
-        }
-    }
-    format!("/{}", parts.join("/"))
 }
 
 fn parent(path: &str) -> &str {
@@ -124,7 +106,7 @@ impl Kernel for MemKernel {
     }
 
     async fn open(&self, proc: &mut Process, path: &str, flags: OpenFlags) -> io::Result<Fd> {
-        let abs = resolve(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         if flags.write {
             refuse_read_only(&abs)?;
             {
@@ -166,7 +148,7 @@ impl Kernel for MemKernel {
     }
 
     async fn list_dir(&self, proc: &Process, path: &str) -> io::Result<Vec<DirEntry>> {
-        let abs = resolve(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         let tree = self.tree.lock().unwrap();
         if !tree.dirs.contains(&abs) {
             return Err(not_found());
@@ -189,7 +171,7 @@ impl Kernel for MemKernel {
     }
 
     async fn change_dir(&self, proc: &mut Process, path: &str) -> io::Result<()> {
-        let abs = resolve(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         if !self.has_dir(&abs) {
             return Err(not_found());
         }
@@ -198,7 +180,9 @@ impl Kernel for MemKernel {
     }
 
     async fn stat(&self, proc: &Process, path: &str) -> FileStat {
-        let abs = resolve(proc, path);
+        let Ok(abs) = vfs::absolute(&proc.cwd, path) else {
+            return FileStat::default();
+        };
         let tree = self.tree.lock().unwrap();
         if lookup_refused(&abs) {
             FileStat::default()
@@ -231,7 +215,7 @@ impl Kernel for MemKernel {
     }
 
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf> {
-        let abs = resolve(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         if lookup_refused(&abs) {
             Err(refused(&abs))
         } else if self.stat(proc, &abs).await.exists {
@@ -254,14 +238,14 @@ impl Kernel for MemKernel {
     }
 
     async fn remove_file(&self, proc: &Process, path: &str) -> io::Result<()> {
-        let abs = resolve(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         refuse_read_only(&abs)?;
         let mut tree = self.tree.lock().unwrap();
         tree.files.remove(&abs).map(|_| ()).ok_or_else(not_found)
     }
 
     async fn remove_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
-        let abs = resolve(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         refuse_read_only(&abs)?;
         let mut tree = self.tree.lock().unwrap();
         if tree.dirs.remove(&abs) {
@@ -272,7 +256,7 @@ impl Kernel for MemKernel {
     }
 
     async fn create_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
-        let abs = resolve(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         refuse_read_only(&abs)?;
         if under(&abs, "/work/sealed") {
             return Err(refused(&abs));
@@ -289,7 +273,10 @@ impl Kernel for MemKernel {
     }
 
     async fn rename(&self, proc: &Process, from: &str, to: &str) -> io::Result<()> {
-        let (from, to) = (resolve(proc, from), resolve(proc, to));
+        let (from, to) = (
+            vfs::absolute(&proc.cwd, from)?,
+            vfs::absolute(&proc.cwd, to)?,
+        );
         refuse_read_only(&from)?;
         refuse_read_only(&to)?;
         let mut tree = self.tree.lock().unwrap();
@@ -313,6 +300,17 @@ impl Kernel for MemKernel {
     fn now(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
     }
+
+    fn uname(&self) -> SystemInfo {
+        SystemInfo {
+            kernel_name: "Darwin".into(),
+            node_name: "studio".into(),
+            kernel_release: "24.6.0".into(),
+            kernel_version: "Darwin Kernel Version 24.6.0".into(),
+            machine: "arm64".into(),
+            operating_system: "macOS".into(),
+        }
+    }
 }
 
 /// A `MemKernel` that records each path lookup, and answers [`Kernel::try_stat`]
@@ -331,7 +329,9 @@ impl CountingKernel {
     }
 
     fn record(&self, proc: &Process, path: &str) {
-        self.lookups.lock().unwrap().push(resolve(proc, path));
+        if let Ok(abs) = vfs::absolute(&proc.cwd, path) {
+            self.lookups.lock().unwrap().push(abs);
+        }
     }
 
     fn lookups_of(&self, path: &str) -> usize {
@@ -384,7 +384,7 @@ impl Kernel for CountingKernel {
 
     async fn try_stat(&self, proc: &Process, path: &str) -> io::Result<FileStat> {
         self.record(proc, path);
-        let abs = resolve(proc, path);
+        let abs = vfs::absolute(&proc.cwd, path)?;
         if lookup_refused(&abs) {
             return Err(refused(&abs));
         }
@@ -475,6 +475,19 @@ fn shell_starts_with_the_kernel_process() {
         assert_eq!(out.status, 0);
         assert_eq!(out.stdout, "/work\nfrom-kernel /work\n");
         assert_eq!(out.stderr, "");
+    });
+}
+
+#[test]
+fn uname_describes_the_kernel_system() {
+    let kernel = MemKernel::new();
+    let mut shell = shell_over(&kernel);
+    block_on(async {
+        let out = shell.run("uname -a").await;
+        assert_eq!(
+            out.stdout,
+            "Darwin studio 24.6.0 Darwin Kernel Version 24.6.0 arm64 macOS\n"
+        );
     });
 }
 
@@ -701,6 +714,28 @@ fn kernel_accessor_returns_the_supplied_trait_object() {
     assert_eq!(proc.cwd, PathBuf::from("/work"));
     assert_eq!(proc.get_env("GREETING"), Some("from-kernel"));
     assert_eq!(accessed.now(), kernel.now());
+}
+
+#[test]
+fn touch_on_a_kernel_without_set_times_creates_but_does_not_claim_success() {
+    let kernel = MemKernel::new();
+    let mut shell = shell_over(&kernel);
+    block_on(async {
+        let out = shell.run("touch new.txt").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert_eq!(
+            committed(&kernel, "/work/new.txt", b"").await,
+            Some(Vec::new())
+        );
+
+        let out = shell.run("touch notes.txt").await;
+        assert_eq!(out.status, 1);
+        assert!(
+            out.stderr.contains("this kernel cannot set file times"),
+            "stderr: {}",
+            out.stderr
+        );
+    });
 }
 
 #[test]
