@@ -36,6 +36,13 @@ pub type BuiltinFn =
         &'a [String],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CommandResult> + 'a>>;
 
+/// Whether `word` is a unary or binary operator of `test`.
+pub(crate) fn is_test_operator(word: &str) -> bool {
+    test::is_unary_op(word) || test::is_binary_op(word)
+}
+
+pub(crate) use test::{eval_binary, eval_unary, is_binary_op, is_unary_op};
+
 /// Look up a builtin by name.
 pub fn lookup(name: &str) -> Option<BuiltinFn> {
     match name {
