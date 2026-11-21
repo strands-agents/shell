@@ -133,15 +133,19 @@ impl VfsKernel {
         Some((host_parent.join(leaf), ro))
     }
 
-    /// The host path of `abs_path` when its last component is a host symlink, which
-    /// `resolve_host` would follow.
-    fn resolve_host_symlink(
-        vfs: &Vfs,
-        abs_path: &str,
-    ) -> Option<(PathBuf, bool, std::fs::Metadata)> {
+    /// The host path and metadata of an existing `abs_path`, without following its last
+    /// component. For anything but a symlink this is the path `resolve_host` gives.
+    fn resolve_host_leaf(vfs: &Vfs, abs_path: &str) -> Option<(PathBuf, bool, std::fs::Metadata)> {
         let (host_path, ro) = Self::resolve_host_nofollow(vfs, abs_path)?;
         let meta = std::fs::symlink_metadata(&host_path).ok()?;
-        meta.is_symlink().then_some((host_path, ro, meta))
+        Some((host_path, ro, meta))
+    }
+
+    /// The host path that removing `abs_path` acts on: a symlink itself, not its target.
+    fn resolve_host_unlink(vfs: &Vfs, abs_path: &str) -> Option<(PathBuf, bool)> {
+        Self::resolve_host_leaf(vfs, abs_path)
+            .map(|(host_path, ro, _)| (host_path, ro))
+            .or_else(|| Self::resolve_host(vfs, abs_path).map(|(host_path, ro, _)| (host_path, ro)))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -539,8 +543,11 @@ impl Kernel for VfsKernel {
         };
         let vfs = self.vfs.lock().await;
 
-        if let Some((_, _, meta)) = Self::resolve_host_symlink(&vfs, &abs) {
-            return host_symlink_stat(&meta);
+        // `link/` and `link/.` name the directory a link points at, not the link.
+        let names_leaf =
+            !path.ends_with('/') && !matches!(path.rsplit('/').next(), Some("." | ".."));
+        if names_leaf && let Some((_, _, meta)) = Self::resolve_host_leaf(&vfs, &abs) {
+            return host_meta_stat(&meta);
         }
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
@@ -657,11 +664,7 @@ impl Kernel for VfsKernel {
     async fn remove_file(&self, proc: &Process, path: &str) -> io::Result<()> {
         let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
-        // Act on a host symlink itself, not on the target `resolve_host` follows it to.
-        let host = Self::resolve_host_symlink(&vfs, &abs)
-            .map(|(host_path, ro, _)| (host_path, ro))
-            .or_else(|| Self::resolve_host(&vfs, &abs).map(|(host_path, ro, _)| (host_path, ro)));
-        if let Some((host_path, ro)) = host {
+        if let Some((host_path, ro)) = Self::resolve_host_unlink(&vfs, &abs) {
             drop(vfs);
             if ro {
                 return Err(io::Error::new(
@@ -679,11 +682,7 @@ impl Kernel for VfsKernel {
     async fn remove_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
         let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
-        // Act on a host symlink itself, not on the target `resolve_host` follows it to.
-        let host = Self::resolve_host_symlink(&vfs, &abs)
-            .map(|(host_path, ro, _)| (host_path, ro))
-            .or_else(|| Self::resolve_host(&vfs, &abs).map(|(host_path, ro, _)| (host_path, ro)));
-        if let Some((host_path, ro)) = host {
+        if let Some((host_path, ro)) = Self::resolve_host_unlink(&vfs, &abs) {
             drop(vfs);
             if ro {
                 return Err(io::Error::new(
@@ -1246,12 +1245,18 @@ fn host_set_permissions(_path: &std::path::Path, _mode: u32) -> io::Result<()> {
     ))
 }
 
-/// The `FileStat` of a host symlink itself, from its `symlink_metadata`.
-fn host_symlink_stat(meta: &std::fs::Metadata) -> FileStat {
+/// The `FileStat` for host metadata.
+fn host_meta_stat(meta: &std::fs::Metadata) -> FileStat {
     FileStat {
         exists: true,
-        is_symlink: true,
+        is_file: meta.is_file(),
+        is_dir: meta.is_dir(),
+        is_symlink: meta.is_symlink(),
         len: meta.len(),
+        is_socket: false,
+        is_fifo: false,
+        is_block_device: false,
+        is_char_device: false,
         mode: {
             #[cfg(unix)]
             {
@@ -1260,70 +1265,35 @@ fn host_symlink_stat(meta: &std::fs::Metadata) -> FileStat {
             }
             #[cfg(not(unix))]
             {
-                0o120777
+                if meta.is_symlink() {
+                    0o120777
+                } else if meta.is_dir() {
+                    0o040755
+                } else {
+                    0o100644
+                }
             }
         },
+        dev: 0,
+        ino: 0,
         modified: meta.modified().ok(),
         accessed: meta.accessed().ok(),
-        ..FileStat::default()
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn host_stat(path: &std::path::Path) -> FileStat {
-    let meta = match tokio::fs::metadata(path).await {
-        Ok(m) => m,
-        Err(_) => return FileStat::default(),
-    };
-    FileStat {
-        exists: true,
-        is_file: meta.is_file(),
-        is_dir: meta.is_dir(),
-        is_symlink: meta.is_symlink(),
-        len: meta.len(),
-        is_socket: false,
-        is_fifo: false,
-        is_block_device: false,
-        is_char_device: false,
-        mode: {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                meta.mode()
-            }
-            #[cfg(not(unix))]
-            {
-                if meta.is_dir() { 0o040755 } else { 0o100644 }
-            }
-        },
-        dev: 0,
-        ino: 0,
-        modified: meta.modified().ok(),
-        accessed: meta.accessed().ok(),
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => host_meta_stat(&meta),
+        Err(_) => FileStat::default(),
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 fn host_stat_sync(path: &std::path::Path) -> FileStat {
-    let meta = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(_) => return FileStat::default(),
-    };
-    FileStat {
-        exists: true,
-        is_file: meta.is_file(),
-        is_dir: meta.is_dir(),
-        is_symlink: meta.is_symlink(),
-        len: meta.len(),
-        is_socket: false,
-        is_fifo: false,
-        is_block_device: false,
-        is_char_device: false,
-        mode: if meta.is_dir() { 0o040755 } else { 0o100644 },
-        dev: 0,
-        ino: 0,
-        modified: meta.modified().ok(),
-        accessed: meta.accessed().ok(),
+    match std::fs::metadata(path) {
+        Ok(meta) => host_meta_stat(&meta),
+        Err(_) => FileStat::default(),
     }
 }
 
