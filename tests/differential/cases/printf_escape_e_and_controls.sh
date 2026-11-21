@@ -1,0 +1,5 @@
+printf 'A\e[0mB\n'
+printf 'A\E[0mB\n'
+printf '%b\n' 'A\eB'
+printf 'a\ab\bc\fd\ve\n' | wc -c | tr -d ' '
+printf 'a\ab\bc\fd\ve\n'
