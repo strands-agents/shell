@@ -1,0 +1,9 @@
+status: 0
+stderr: empty
+--- stdout
+first world
+second world
+tabs world
+quoted $name
+PIPED $NAME
+after
