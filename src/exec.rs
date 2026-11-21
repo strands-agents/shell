@@ -2358,13 +2358,20 @@ async fn execute_command_line_inner(
 
             // Determine if this item is in a "tested" context (suppresses errexit).
             // Tested = followed by && or ||, or inverted by `!`.
-            let tested = matches!(connector, Some(Connector::And) | Some(Connector::Or))
+            let and_or = matches!(connector, Some(Connector::And) | Some(Connector::Or));
+            let tested = and_or
                 || matches!(
                     item,
                     Item::Pipeline(_, true) | Item::CompoundPipeline { negated: true, .. }
                 );
 
-            last_exit = execute_item(os.clone(), proc, item).await?;
+            // Like `!`, a left side of && or || ignores errexit throughout its
+            // body, including function, group and eval bodies it runs.
+            let ignored = u32::from(and_or);
+            proc.errexit_ignored += ignored;
+            let result = execute_item(os.clone(), proc, item).await;
+            proc.errexit_ignored -= ignored;
+            last_exit = result?;
             proc.last_exit = last_exit;
             if last_exit == 0
                 && let Some(msg) = proc.check_limits()
