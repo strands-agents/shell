@@ -3460,8 +3460,38 @@ async fn execute_pipeline_checked(
                 "exec" => {
                     let args = expand_words(os.clone(), proc, &pipeline[0].args[1..]).await;
                     if args.is_empty() {
-                        // `exec` with no args — just apply redirects
-                        // TODO: apply redirects to the shell process
+                        // `exec` with no command applies redirects to this shell, so later
+                        // commands see them. The session process has no fd 1 or 2 of its
+                        // own, so output redirects stay no-ops until that is supported.
+                        // Only stdin is applied (`exec < file`, `exec <<EOF`).
+                        let mut redirs = Vec::new();
+                        for r in &pipeline[0].redirects {
+                            let (word, expanded) = match r {
+                                Redirect::Write(_, w)
+                                | Redirect::Append(_, w)
+                                | Redirect::Read(_, w)
+                                | Redirect::ReadWrite(_, w)
+                                | Redirect::Clobber(_, w)
+                                | Redirect::DupWrite(_, w)
+                                | Redirect::DupRead(_, w) => {
+                                    (r.clone(), expand_word(os.clone(), proc, w).await)
+                                }
+                                Redirect::HereDoc(..) => (r.clone(), String::new()),
+                            };
+                            redirs.push((word, expanded));
+                        }
+                        redirs.retain(|(r, _)| {
+                            matches!(
+                                r,
+                                Redirect::Read(0, _)
+                                    | Redirect::ReadWrite(0, _)
+                                    | Redirect::HereDoc(0, ..)
+                            )
+                        });
+                        if let Err(msg) = apply_redirects(&os, proc, &redirs).await {
+                            proc.err_msg(&format!("strands-shell: exec: {msg}"));
+                            return Ok(1);
+                        }
                         return Ok(0);
                     }
                     // exec with args — try to run as a command

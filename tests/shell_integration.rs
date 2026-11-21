@@ -14235,6 +14235,141 @@ expect!(
     "in\nafter"
 );
 
+async fn run_with_stdin(cmd: &str, stdin: &'static [u8]) -> strands_shell::Output {
+    let mut shell = Shell::builder().build().unwrap();
+    let (tx, rx) = strands_shell::os::pipe(4);
+    shell.proc.set_channel_reader(0, rx);
+    tx.send(bytes::Bytes::from_static(stdin)).await.unwrap();
+    drop(tx);
+    shell.run(cmd).await
+}
+
+/// `head -c` must not drop the rest of stdin, including inside a substitution.
+#[test]
+fn head_bytes_in_a_substitution_leaves_the_rest_of_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(r#"x=$(head -c 1); printf "[%s]" "$x"; cat"#, b"abc\n").await;
+        assert_eq!(out.stdout, "[a]bc\n", "stderr={}", out.stderr);
+        assert_eq!(out.status, 0);
+    }));
+}
+
+/// `exec < file` with no command replaces the shell's stdin for later commands.
+#[test]
+fn exec_without_a_command_replaces_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(r#"exec < /dev/null; cat; echo end"#, b"abc\n").await;
+        assert_eq!(out.stdout, "end\n", "stderr={}", out.stderr);
+        assert_eq!(out.status, 0);
+    }));
+}
+
+/// `read -d ''` reads until EOF (NUL delimiter), keeps the data, and returns 1.
+#[test]
+fn read_empty_delimiter_takes_all_input_until_eof() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(r##"read -d '' x; printf "[%s] %s" "$x" "$?" "##, b"a\nb\n").await;
+        assert_eq!(out.stdout, "[a\nb] 1", "stderr={}", out.stderr);
+    }));
+}
+/// Output redirects on a no-command `exec` stay no-ops (`exec 2>&1` must not fail).
+#[test]
+fn exec_dup_without_a_command_is_a_noop() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell.run("exec 2>&1; echo $?").await;
+        assert_eq!(out.stdout, "0\n", "stderr={}", out.stderr);
+        assert_eq!(out.status, 0);
+    }));
+}
+
+/// `exec >file` with no command must not steal later output or create the file.
+#[test]
+fn exec_stdout_without_a_command_is_a_noop() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let out = shell
+            .run("exec > /tmp/exec_out; echo hi; test -f /tmp/exec_out && echo exists || echo missing")
+            .await;
+        assert_eq!(out.stdout, "hi\nmissing\n", "stderr={}", out.stderr);
+        assert_eq!(out.status, 0);
+    }));
+}
+
+/// `read -d` trims only IFS whitespace, not other IFS characters such as `:`.
+#[test]
+fn read_custom_delim_does_not_trim_non_whitespace_ifs() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(r##"IFS=:; read -d '' x; printf "[%s]" "$x" "##, b"a:b:").await;
+        assert_eq!(out.stdout, "[a:b:]", "stderr={}", out.stderr);
+    }));
+}
+
+/// With no variable names, bash leaves REPLY untrimmed.
+#[test]
+fn read_custom_delim_does_not_trim_reply() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(
+            r##"read -d ''; printf "[%s] %s" "$REPLY" "$?" "##,
+            b"a\nb\n",
+        )
+        .await;
+        assert_eq!(out.stdout, "[a\nb\n] 1", "stderr={}", out.stderr);
+    }));
+}
+
+/// A CR before a custom delimiter is kept.
+#[test]
+fn read_custom_delim_keeps_carriage_return() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(r##"read -r -d '' x; printf "[%s]" "$x" "##, b"a\r\0").await;
+        assert_eq!(out.stdout, "[a\r]", "stderr={}", out.stderr);
+    }));
+}
+
+/// `read -rd ''` is the usual spelling: combined short flags, empty NUL delimiter.
+#[test]
+fn read_combined_short_flags_empty_delimiter() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out =
+            run_with_stdin(r##"read -rd '' x; printf "[%s] %s" "$x" "$?" "##, b"a\nb\n").await;
+        assert_eq!(out.stdout, "[a\nb] 1", "stderr={}", out.stderr);
+    }));
+}
+
+/// `-d:` attaches the delimiter to the flag.
+#[test]
+fn read_attached_delimiter() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(r##"read -d: x; printf "[%s] %s" "$x" "$?" "##, b"a:b\n").await;
+        assert_eq!(out.stdout, "[a] 0", "stderr={}", out.stderr);
+    }));
+}
+
+/// An empty IFS does not trim a trailing newline from a custom-delimiter record.
+#[test]
+fn read_custom_delim_empty_ifs_keeps_trailing_newline() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(
+            r##"IFS=; read -r -d '' x; printf "[%s] %s" "$x" "$?" "##,
+            b"one\ntwo\n",
+        )
+        .await;
+        assert_eq!(out.stdout, "[one\ntwo\n] 1", "stderr={}", out.stderr);
+    }));
+}
+
 // ── id ──────────────────────────────────────────────────────────────
 
 expect!(
