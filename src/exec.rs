@@ -3927,9 +3927,10 @@ async fn run_pipeline(
             let args: Vec<String> = expanded_args[0][1..].to_vec();
 
             // A regular builtin sees its prefix assignments, exported, for this command
-            // only; the previous values come back when it ends.
+            // only; the previous values come back when it ends. `local` is left out, since
+            // it would save the temporary value as the one to restore when the function returns.
             let mut saved_env = Vec::new();
-            if !is_special(&name) {
+            if !is_special(&name) && name != "local" {
                 for (k, v) in &expanded_env[0] {
                     let prev = (
                         shell_proc.get_env(k).map(str::to_string),
