@@ -3153,7 +3153,7 @@ fn compound_pipe_into_function_cli(name: &str, script: &str) -> String {
 }
 
 // In process, since a function call inside `$( )` overflows the 1 MiB main
-// thread stack of a Windows debug build of the CLI, with or without this fix.
+// thread stack of a Windows debug build of the CLI.
 #[test]
 fn compound_pipe_into_function_in_substitution_from_execute() {
     let (rt, local) = rt();
@@ -13988,6 +13988,12 @@ expect_writers!(
     group_stderr_to_file_leaves_stdout_on_writer,
     "{ echo out; ls /nope; } 2>/tmp/group_err.txt; grep -c nope /tmp/group_err.txt",
     "out\n1\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    writer_receives_function_piped_from_group_in_order,
+    "g() { cat; }; { echo m1; { echo a; } | g; echo m2; } 2>/dev/null",
+    "m1\na\nm2\n",
     |stderr: &str| assert_eq!(stderr, "")
 );
 expect_writers!(
