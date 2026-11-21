@@ -1,0 +1,8 @@
+status: 0
+stderr: empty
+--- stdout
+A[0mB
+A[0mB
+AB
+10
+abcde

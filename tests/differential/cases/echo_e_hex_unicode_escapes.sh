@@ -1,0 +1,6 @@
+echo -e 'A\x41B'
+echo -e 'A\x414B|\x4|\xg'
+echo -e 'A\e[0mB'
+echo -e 'A\E[0mB'
+echo -e 'A\uB|\UZ'
+echo -e 'A\101B'

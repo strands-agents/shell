@@ -12617,6 +12617,9 @@ expect!(echo_esc_octal, "echo '\\0101'", "A");
 expect!(echo_esc_c_stops, "echo 'ab\\cde'", "ab");
 expect!(echo_trailing_bslash, "echo 'test\\'", "test\\");
 expect!(echo_esc_unknown, "echo '\\z'", "\\z");
+// bash in a UTF-8 locale; the differential cases run under LC_ALL=C, where
+// bash prints `\u` escapes past ASCII literally.
+expect!(echo_esc_unicode, r"echo -e 'A\u00e9B\U0001F600'", "AéB😀");
 
 // ── echo (builtin) options ──────────────────────────────────────────
 
