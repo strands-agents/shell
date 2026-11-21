@@ -34,10 +34,20 @@ pub fn builtin_test<'a>(
             };
             return Ok(if result { 0 } else { 1 });
         }
+        // With three arguments a binary operator in the middle wins, even
+        // when the left operand is `!` or `(`.
+        if let [left, op, right] = args
+            && is_binary_op(op)
+        {
+            let result = eval_binary(left, op, right, os, proc).await;
+            return Ok(if result { 0 } else { 1 });
+        }
         let mut pos = 0;
         let result = parse_or(args, &mut pos, os, proc).await;
         // Words left over, such as a binary operator with no right operand.
-        if pos < args.len() && args.len() > 2 {
+        // The parser also stops after an operator it does not implement, which
+        // stays a quiet false as before.
+        if pos < args.len() && !is_unsupported_unary_op(&args[pos - 1]) {
             proc.err_msg(&format!("strands-shell: {name}: too many arguments"));
             return Ok(2);
         }
@@ -53,12 +63,16 @@ fn missing_unary_operator(args: &[String]) -> Option<&str> {
         [bang, first, _] if bang == "!" && !is_binary_op(first) => {
             missing_unary_operator(&args[1..])
         }
-        [first, _] if first != "!" && !is_unary_op(first) => {
-            // Unary operators bash knows but this shell does not implement.
-            (!matches!(first.as_str(), "-v" | "-R" | "-N" | "-o")).then_some(first.as_str())
+        [first, _] if first != "!" && !is_unary_op(first) && !is_unsupported_unary_op(first) => {
+            Some(first.as_str())
         }
         _ => None,
     }
+}
+
+/// Unary operators bash knows but this shell does not implement.
+fn is_unsupported_unary_op(s: &str) -> bool {
+    matches!(s, "-v" | "-R" | "-N" | "-o")
 }
 
 fn parse_or<'a>(
