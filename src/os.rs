@@ -221,7 +221,8 @@ pub struct Process {
     pub opt_xtrace: bool,
     /// `set -o pipefail`: a pipeline fails with its rightmost failing stage.
     pub opt_pipefail: bool,
-    /// How many commands inverted by `!` enclose the current command, which `set -e` ignores.
+    /// How many tested contexts (`!`, or the left of `&&`/`||`) enclose the current command,
+    /// which `set -e` ignores.
     pub(crate) errexit_ignored: u32,
     /// Set when a nounset error occurs during expansion.
     pub nounset_error: bool,
