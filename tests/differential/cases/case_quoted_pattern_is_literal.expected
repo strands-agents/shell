@@ -12,3 +12,15 @@ mixed-prefix
 backslash
 sub: nomatch
 sub: same
+has-backslash
+no-backslash
+match
+escape
+sub: has-backslash
+plain
+plain
+has-glob
+not-star
+var-escape
+var-nomatch
+tilde
