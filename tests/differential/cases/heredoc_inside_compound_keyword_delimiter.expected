@@ -1,0 +1,10 @@
+status: 0
+stderr: empty
+--- stdout
+bang
+next
+do body
+do done
+then body
+then done
+after

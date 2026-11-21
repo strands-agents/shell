@@ -1,0 +1,15 @@
+status: 0
+stderr: empty
+--- stdout
+then body
+more
+in a
+in b
+cond
+yes
+nested 1
+)
+fi
+}
+[sub]
+after
