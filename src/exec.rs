@@ -2837,16 +2837,26 @@ async fn cond_pattern(os: Arc<dyn Kernel>, proc: &mut Process, term: &CondTerm) 
 /// so they match literally under [`escaped_glob_match`].
 async fn expand_pattern(os: Arc<dyn Kernel>, proc: &mut Process, word: &Word) -> String {
     let mut pattern = String::new();
+    if parser::is_array_literal(word) {
+        refuse_array(proc);
+        return pattern;
+    }
     for part in word {
         let mut text = String::new();
         expand_part(os.clone(), proc, part, &mut text).await;
-        if matches!(part, WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)) {
+        if matches!(
+            part,
+            WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_) | WordPart::Tilde(_)
+        ) {
             for ch in text.chars() {
                 if matches!(ch, '\\' | '*' | '?' | '[') {
                     pattern.push('\\');
                 }
                 pattern.push(ch);
             }
+        } else if matches!(part, WordPart::Literal(_)) {
+            // The parser already consumed escapes here, so any backslash left is literal.
+            pattern.push_str(&text.replace('\\', "\\\\"));
         } else {
             pattern.push_str(&text);
         }
@@ -3064,7 +3074,7 @@ fn glob_match_with(pat: &[u8], val: &[u8], escapes: bool) -> bool {
             }
         } else if pi < pat.len() && pat[pi] == b'[' {
             // Character class
-            if let Some((matched, end)) = glob_bracket(pat, pi, val[vi]) {
+            if let Some((matched, end)) = glob_bracket(pat, pi, val[vi], escapes) {
                 if matched {
                     pi = end;
                     vi += 1;
@@ -3112,7 +3122,7 @@ fn glob_match_with(pat: &[u8], val: &[u8], escapes: bool) -> bool {
 /// Parse a bracket expression `[...]` starting at `pat[start]`.
 /// Returns `Some((matched, end_index))` where `end_index` is past the `]`,
 /// or `None` if the bracket is malformed (no closing `]`).
-fn glob_bracket(pat: &[u8], start: usize, ch: u8) -> Option<(bool, usize)> {
+fn glob_bracket(pat: &[u8], start: usize, ch: u8, escapes: bool) -> Option<(bool, usize)> {
     let mut i = start + 1;
     let negate = i < pat.len() && (pat[i] == b'!' || pat[i] == b'^');
     if negate {
@@ -3126,6 +3136,11 @@ fn glob_bracket(pat: &[u8], start: usize, ch: u8) -> Option<(bool, usize)> {
             return Some((matched ^ negate, i + 1));
         }
         first = false;
+        if escapes && pat[i] == b'\\' && i + 1 < pat.len() {
+            matched |= pat[i + 1] == ch;
+            i += 2;
+            continue;
+        }
         // Range: a-z
         if i + 2 < pat.len() && pat[i + 1] == b'-' && pat[i + 2] != b']' {
             let lo = pat[i];
