@@ -809,6 +809,48 @@ fn curl_protocol_relative_redirect_keeps_https_scheme() {
     }));
 }
 
+/// A server whose `/` and `/dir/page` answer with the relative `Location: hello`.
+async fn start_relative_redirect_server() -> String {
+    let app = Router::new()
+        .route("/", get(|| async { Redirect::temporary("hello") }))
+        .route("/hello", get(|| async { "root hello" }))
+        .route("/dir/page", get(|| async { Redirect::temporary("hello") }))
+        .route("/dir/hello", get(|| async { "dir hello" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::task::spawn_local(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[test]
+fn curl_relative_redirect_resolves_against_the_current_path() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let target = start_relative_redirect_server().await;
+        // A protocol-relative hop to the bare target leaves a URL with no path.
+        let source = start_redirect_server(target.strip_prefix("http:").unwrap().into()).await;
+        let mut shell = Shell::builder()
+            .allow_url(&source)
+            .allow_url(&target)
+            .build()
+            .unwrap();
+
+        for (url, body) in [
+            (target.clone(), "root hello"),
+            (format!("{target}/"), "root hello"),
+            (format!("{target}/dir/page?next=/x/y"), "dir hello"),
+            (format!("{target}/dir/page#a/b"), "dir hello"),
+            (format!("{source}/redirect"), "root hello"),
+        ] {
+            let out = shell.run(&format!("curl -sSL '{url}'")).await;
+            assert_eq!(out.status, 0, "{url}: {}", out.stderr);
+            assert_eq!(out.stdout, body, "{url}");
+        }
+    }));
+}
+
 #[test]
 fn curl_no_follow_redirect() {
     let (rt, local) = rt();
