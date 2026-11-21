@@ -25,17 +25,17 @@ pub fn builtin_printf<'a>(
     })
 }
 
-/// printf output: raw bytes, since `\xHH` and octal escapes can emit
-/// bytes that are not valid UTF-8.
+/// printf and `echo -e` output: raw bytes, since `\xHH` and octal escapes
+/// can emit bytes that are not valid UTF-8.
 #[derive(Default)]
-struct Out(Vec<u8>);
+pub(crate) struct Out(pub(crate) Vec<u8>);
 
 impl Out {
-    fn push(&mut self, c: char) {
+    pub(crate) fn push(&mut self, c: char) {
         self.0
             .extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
     }
-    fn push_str(&mut self, s: &str) {
+    pub(crate) fn push_str(&mut self, s: &str) {
         self.0.extend_from_slice(s.as_bytes());
     }
 }
@@ -50,7 +50,7 @@ fn format_string(fmt: &str, params: &[String]) -> Vec<u8> {
 
         while let Some(c) = chars.next() {
             if c == '\\' {
-                escape(&mut chars, false, &mut out);
+                escape(&mut chars, Escapes::Format, &mut out);
             } else if c == '%' {
                 match chars.peek() {
                     Some('%') => {
@@ -165,7 +165,7 @@ fn format_string(fmt: &str, params: &[String]) -> Vec<u8> {
                             'b' => {
                                 // %b — interpret backslash escapes in the argument;
                                 // `\c` stops all further output.
-                                if escape_all(param, &mut out) {
+                                if escape_all(param, Escapes::B, &mut out) {
                                     return out.0;
                                 }
                             }
@@ -368,13 +368,25 @@ fn general(a: f64, p: usize, alt: bool) -> String {
     format!("{mantissa}{exp}")
 }
 
-/// Expand every backslash escape in a `%b` argument. Returns true on `\c`.
-fn escape_all(s: &str, out: &mut Out) -> bool {
+/// Which rules backslash escapes follow.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Escapes {
+    /// A printf format string.
+    Format,
+    /// A `%b` argument: `\0` takes up to three more octal digits and `\c`
+    /// stops output.
+    B,
+    /// `echo -e`: like `%b`, but an octal escape must start with `\0`.
+    Echo,
+}
+
+/// Expand every backslash escape in `s`. Returns true on `\c`.
+pub(crate) fn escape_all(s: &str, mode: Escapes, out: &mut Out) -> bool {
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '\\' {
             out.push(c);
-        } else if escape(&mut chars, true, out) {
+        } else if escape(&mut chars, mode, out) {
             return true;
         }
     }
@@ -382,9 +394,8 @@ fn escape_all(s: &str, out: &mut Out) -> bool {
 }
 
 /// Interpret one escape, `chars` positioned just after the backslash, the
-/// way bash's printf does. `in_b` selects `%b` rules: `\0` takes up to
-/// three more octal digits and `\c` stops output (returns true).
-fn escape(chars: &mut Peekable<Chars<'_>>, in_b: bool, out: &mut Out) -> bool {
+/// way bash's printf and echo do. Returns true on a `\c` that stops output.
+fn escape(chars: &mut Peekable<Chars<'_>>, mode: Escapes, out: &mut Out) -> bool {
     let Some(c) = chars.next() else {
         out.push('\\');
         return false;
@@ -393,11 +404,20 @@ fn escape(chars: &mut Peekable<Chars<'_>>, in_b: bool, out: &mut Out) -> bool {
         'n' => out.push('\n'),
         't' => out.push('\t'),
         'r' => out.push('\r'),
+        'a' => out.push('\x07'),
+        'b' => out.push('\x08'),
+        'f' => out.push('\x0c'),
+        'v' => out.push('\x0b'),
+        'e' | 'E' => out.push('\x1b'),
         '\\' => out.push('\\'),
-        'c' if in_b => return true,
-        '0'..='7' => {
+        'c' if mode != Escapes::Format => return true,
+        '0'..='7' if mode != Escapes::Echo || c == '0' => {
             let mut val = c as u32 - '0' as u32;
-            let more = if in_b && c == '0' { 3 } else { 2 };
+            let more = if mode != Escapes::Format && c == '0' {
+                3
+            } else {
+                2
+            };
             for _ in 0..more {
                 match chars.peek().and_then(|d| d.to_digit(8)) {
                     Some(d) => {
