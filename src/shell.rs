@@ -467,7 +467,10 @@ impl Shell {
     ///
     /// This is equivalent to running `export KEY=VALUE` inside the shell.
     pub fn set_env(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.proc.set_env(key, value);
+        let key = key.into();
+        if self.proc.set_env(key.as_str(), value) {
+            self.proc.set_exported(&key, true);
+        }
     }
 
     /// Get an environment variable from the shell.
@@ -1208,6 +1211,7 @@ impl ShellBuilder {
         }
 
         for (k, v) in self.env {
+            proc.set_exported(&k, true);
             proc.set_env(k, v);
         }
 

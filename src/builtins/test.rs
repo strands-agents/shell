@@ -15,6 +15,17 @@ pub fn builtin_test<'a>(
         } else {
             args
         };
+        if let [left, op, right] = args
+            && matches!(op.as_str(), "-a" | "-o")
+        {
+            let (left, right) = (!left.is_empty(), !right.is_empty());
+            let result = if op == "-a" {
+                left && right
+            } else {
+                left || right
+            };
+            return Ok(if result { 0 } else { 1 });
+        }
         let mut pos = 0;
         let result = parse_or(args, &mut pos, os, proc).await;
         Ok(if result && pos == args.len() { 0 } else { 1 })
@@ -88,7 +99,7 @@ async fn parse_primary<'a>(
         return result;
     }
 
-    if *pos + 2 <= args.len()
+    if *pos + 2 < args.len()
         && let Some(next) = args.get(*pos + 1)
         && is_binary_op(next)
     {
@@ -111,7 +122,7 @@ async fn parse_primary<'a>(
     !s.is_empty()
 }
 
-fn is_unary_op(s: &str) -> bool {
+pub(crate) fn is_unary_op(s: &str) -> bool {
     matches!(
         s,
         "-n" | "-z"
@@ -138,7 +149,7 @@ fn is_unary_op(s: &str) -> bool {
     )
 }
 
-fn is_binary_op(s: &str) -> bool {
+pub(crate) fn is_binary_op(s: &str) -> bool {
     matches!(
         s,
         "=" | "=="
@@ -157,7 +168,11 @@ fn is_binary_op(s: &str) -> bool {
     )
 }
 
-async fn eval_unary(op: &str, arg: &str, os: &dyn Kernel, proc: &Process) -> bool {
+pub(crate) async fn eval_unary(op: &str, arg: &str, os: &dyn Kernel, proc: &Process) -> bool {
+    // An empty path names no file.
+    if arg.is_empty() && !matches!(op, "-n" | "-z" | "-t") {
+        return false;
+    }
     match op {
         "-n" => !arg.is_empty(),
         "-z" => arg.is_empty(),
@@ -186,7 +201,17 @@ async fn eval_unary(op: &str, arg: &str, os: &dyn Kernel, proc: &Process) -> boo
     }
 }
 
-async fn eval_binary(left: &str, op: &str, right: &str, os: &dyn Kernel, proc: &Process) -> bool {
+pub(crate) async fn eval_binary(
+    left: &str,
+    op: &str,
+    right: &str,
+    os: &dyn Kernel,
+    proc: &Process,
+) -> bool {
+    if matches!(op, "-nt" | "-ot" | "-ef") && (left.is_empty() || right.is_empty()) {
+        return op == "-nt" && !left.is_empty() && os.stat(proc, left).await.exists
+            || op == "-ot" && !right.is_empty() && os.stat(proc, right).await.exists;
+    }
     match op {
         "=" | "==" => left == right,
         "!=" => left != right,

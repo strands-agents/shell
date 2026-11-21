@@ -87,7 +87,9 @@ pub fn builtin_read<'a>(
 
         let stop = delim.unwrap_or(b'\n');
         let mut reader = io::stdin()?;
-        let mut line = String::new();
+        // Collect raw bytes and decode once at the end so multi-byte UTF-8
+        // sequences are not split into per-byte characters.
+        let mut bytes: Vec<u8> = Vec::new();
         // Read byte-by-byte to avoid BufReader consuming extra data
         let mut byte = [0u8; 1];
         let mut n = 0usize;
@@ -102,12 +104,12 @@ pub fn builtin_read<'a>(
                         found_delim = true;
                         break;
                     }
-                    line.push(byte[0] as char);
+                    bytes.push(byte[0]);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                     let mut kind = reader.into_fd_kind();
                     if let crate::os::FdKind::ChannelReader { buf, .. } = &mut kind {
-                        buf.splice(0..0, line.chars().map(|c| c as u8));
+                        buf.splice(0..0, bytes.iter().copied());
                     }
                     io::with_process(|p| p.restore_fd(0, kind));
                     return Err(e.into());
@@ -120,6 +122,7 @@ pub fn builtin_read<'a>(
         if n == 0 {
             return Ok(1); // EOF
         }
+        let mut line = String::from_utf8_lossy(&bytes).into_owned();
         // With a custom delimiter, bash trims only trailing IFS whitespace
         // (space, tab, newline) and only when a variable name was given.
         if delim.is_some() && named_vars {

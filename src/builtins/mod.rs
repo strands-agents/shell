@@ -9,6 +9,7 @@ mod getopts;
 mod hash;
 mod local;
 pub mod lua;
+mod lua_pattern;
 mod printf;
 mod pwd;
 mod read;
@@ -21,6 +22,7 @@ mod type_cmd;
 mod umask;
 mod unset;
 mod wait;
+mod which;
 mod xargs;
 
 use crate::commands::CommandResult;
@@ -33,6 +35,13 @@ pub type BuiltinFn =
         &'a mut Process,
         &'a [String],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CommandResult> + 'a>>;
+
+/// Whether `word` is a unary or binary operator of `test`.
+pub(crate) fn is_test_operator(word: &str) -> bool {
+    test::is_unary_op(word) || test::is_binary_op(word)
+}
+
+pub(crate) use test::{eval_binary, eval_unary, is_binary_op, is_unary_op};
 
 /// Look up a builtin by name.
 pub fn lookup(name: &str) -> Option<BuiltinFn> {
@@ -63,6 +72,7 @@ pub fn lookup(name: &str) -> Option<BuiltinFn> {
         "unalias" => Some(alias::builtin_unalias),
         "unset" => Some(unset::builtin_unset),
         "wait" => Some(wait::builtin_wait),
+        "which" => Some(which::builtin_which),
         "xargs" => Some(xargs::builtin_xargs),
         _ => None,
     }

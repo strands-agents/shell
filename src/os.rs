@@ -63,6 +63,60 @@ pub struct FileStat {
     pub ino: u64,
     /// Modification time as duration since epoch.
     pub modified: Option<std::time::SystemTime>,
+    /// Access time, where the backing store records one.
+    pub accessed: Option<std::time::SystemTime>,
+}
+
+/// One time that [`Kernel::set_times`] sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeChange {
+    /// Keep the current time.
+    Keep,
+    /// Set the time to the current time, with the permission a write needs.
+    Now,
+    /// Set the time to this value, with the permission the owner has.
+    To(std::time::SystemTime),
+}
+
+/// The access and modification times that [`Kernel::set_times`] sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileTimes {
+    /// The access time.
+    pub accessed: TimeChange,
+    /// The modification time.
+    pub modified: TimeChange,
+}
+
+/// The `uname` fields that a kernel reports, returned by [`Kernel::uname`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemInfo {
+    /// The kernel name, for `uname -s`.
+    pub kernel_name: String,
+    /// The node name, for `uname -n` when `$HOSTNAME` is unset or empty.
+    pub node_name: String,
+    /// The kernel release, for `uname -r`.
+    pub kernel_release: String,
+    /// The kernel version, for `uname -v`.
+    pub kernel_version: String,
+    /// The machine hardware name, for `uname -m`.
+    pub machine: String,
+    /// The operating system, for `uname -o`.
+    pub operating_system: String,
+}
+
+impl Default for SystemInfo {
+    /// The virtual system, which never shows the host: `Linux` on `localhost`, with the Strands
+    /// Shell version as its release and the architecture Shell was built for as its machine.
+    fn default() -> Self {
+        Self {
+            kernel_name: "Linux".into(),
+            node_name: "localhost".into(),
+            kernel_release: env!("CARGO_PKG_VERSION").into(),
+            kernel_version: "#1".into(),
+            machine: std::env::consts::ARCH.into(),
+            operating_system: "Linux".into(),
+        }
+    }
 }
 
 /// Access permission modes for Kernel::access().
@@ -177,6 +231,8 @@ pub struct Process {
     pub(crate) pending_exit: bool,
     /// An unsupported array aborts its function without requesting a shell exit.
     pub(crate) refused_array: bool,
+    /// The next pipeline runs its command without a shell function of that name, as `command` asks.
+    pub(crate) skip_function: bool,
     /// Exit status of the last command substitution performed, for commands with no name.
     pub(crate) last_subst_status: Option<i32>,
     /// PID of last background job (for $!).
@@ -184,8 +240,9 @@ pub struct Process {
     /// Background job handles.
     pub bg_jobs: Vec<tokio::task::JoinHandle<(i32, String, String)>>,
     /// Stack of local variable scopes (for shell functions).
-    /// Each entry maps variable names to their previous value (None = was unset).
-    local_scopes: Vec<HashMap<String, Option<String>>>,
+    /// Each entry maps variable names to their previous value (None = was unset)
+    /// and whether they were exported.
+    local_scopes: Vec<HashMap<String, (Option<String>, bool)>>,
     fds: HashMap<Fd, FdKind>,
     /// Fds that read input fed from outside the shell, which can stay open.
     outside_fds: std::collections::HashSet<Fd>,
@@ -195,6 +252,8 @@ pub struct Process {
     pub optoff: i32,
     /// Set of readonly variable names.
     pub readonly_vars: Arc<std::collections::HashSet<String>>,
+    /// Names of the variables that programs the shell runs can see.
+    exported: Arc<std::collections::HashSet<String>>,
     /// Shell aliases.
     pub aliases: Arc<HashMap<String, String>>,
     /// Shell options turned on with `shopt -s`.
@@ -352,7 +411,9 @@ impl Process {
             }
         }
     }
+    /// Every variable in `env` is exported.
     pub fn new(cwd: PathBuf, env: HashMap<String, String>) -> Self {
+        let exported = Arc::new(env.keys().cloned().collect());
         Self {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
             cwd,
@@ -370,6 +431,7 @@ impl Process {
             deadline_stop: false,
             pending_exit: false,
             refused_array: false,
+            skip_function: false,
             last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
@@ -380,6 +442,7 @@ impl Process {
             bg_counter: 0,
             optoff: -1,
             readonly_vars: Arc::new(std::collections::HashSet::new()),
+            exported,
             aliases: Arc::new(HashMap::new()),
             shopts: std::collections::BTreeSet::new(),
             hash_table: Arc::new(HashMap::new()),
@@ -422,6 +485,7 @@ impl Process {
             deadline_stop: false,
             pending_exit: false,
             refused_array: false,
+            skip_function: false,
             last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
@@ -432,6 +496,7 @@ impl Process {
             bg_counter: 0,
             optoff: -1,
             readonly_vars: Arc::new(std::collections::HashSet::new()),
+            exported: Arc::new(std::collections::HashSet::new()),
             aliases: Arc::new(HashMap::new()),
             shopts: std::collections::BTreeSet::new(),
             hash_table: Arc::new(HashMap::new()),
@@ -534,6 +599,7 @@ impl Process {
             deadline_stop: false,
             pending_exit: false,
             refused_array: false,
+            skip_function: false,
             last_subst_status: None,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
@@ -544,6 +610,7 @@ impl Process {
             bg_counter: 0,
             optoff: self.optoff,
             readonly_vars: self.readonly_vars.clone(),
+            exported: self.exported.clone(),
             aliases: self.aliases.clone(),
             shopts: self.shopts.clone(),
             hash_table: self.hash_table.clone(),
@@ -829,7 +896,8 @@ impl Process {
         }
     }
 
-    /// Set an environment variable (COW — clones map on first write if shared).
+    /// Set a shell variable (COW — clones map on first write if shared). It stays
+    /// unexported unless it already is; see [`Self::set_exported`].
     /// Returns false if the variable is readonly.
     pub fn set_env(&mut self, key: impl Into<String>, value: impl Into<String>) -> bool {
         let key = key.into();
@@ -841,14 +909,44 @@ impl Process {
         true
     }
 
-    /// Remove an environment variable. Returns false if readonly.
+    /// Remove an environment variable and its export. Returns false if readonly.
     pub fn unset_env(&mut self, key: &str) -> bool {
         if self.readonly_vars.contains(key) {
             self.err_msg(&format!("strands-shell: {key}: readonly variable"));
             return false;
         }
         Arc::make_mut(&mut self.env).remove(key);
+        self.set_exported(key, false);
         true
+    }
+
+    /// Set whether programs the shell runs see the variable `key`.
+    pub fn set_exported(&mut self, key: &str, exported: bool) {
+        if self.exported.contains(key) != exported {
+            let names = Arc::make_mut(&mut self.exported);
+            if exported {
+                names.insert(key.to_string());
+            } else {
+                names.remove(key);
+            }
+        }
+    }
+
+    /// Keep only the variables that are both set and exported, the environment
+    /// a program the shell runs receives.
+    pub(crate) fn keep_exported_only(&mut self) {
+        if self.env.keys().any(|key| !self.exported.contains(key)) {
+            // Clone only the exported entries, not the whole shared map.
+            let env = self
+                .env
+                .iter()
+                .filter(|(key, _)| self.exported.contains(*key));
+            self.env = Arc::new(env.map(|(k, v)| (k.clone(), v.clone())).collect());
+        }
+        if self.exported.len() != self.env.len() {
+            let env = &self.env;
+            Arc::make_mut(&mut self.exported).retain(|key| env.contains_key(key));
+        }
     }
 
     /// Mark a variable as readonly.
@@ -900,7 +998,7 @@ impl Process {
     /// Pop the top local scope, restoring all localized variables.
     pub fn pop_local_scope(&mut self) {
         if let Some(scope) = self.local_scopes.pop() {
-            for (name, prev) in scope {
+            for (name, (prev, exported)) in scope {
                 match prev {
                     Some(val) => {
                         self.set_env(&name, &val);
@@ -909,6 +1007,7 @@ impl Process {
                         self.unset_env(&name);
                     }
                 }
+                self.set_exported(&name, exported);
             }
         }
     }
@@ -919,7 +1018,7 @@ impl Process {
         if let Some(scope) = self.local_scopes.last_mut() {
             scope
                 .entry(name.to_string())
-                .or_insert_with(|| self.env.get(name).cloned());
+                .or_insert_with(|| (self.env.get(name).cloned(), self.exported.contains(name)));
         }
         self.set_env(name, value);
     }
@@ -929,7 +1028,7 @@ impl Process {
         if let Some(scope) = self.local_scopes.last_mut() {
             scope
                 .entry(name.to_string())
-                .or_insert_with(|| self.env.get(name).cloned());
+                .or_insert_with(|| (self.env.get(name).cloned(), self.exported.contains(name)));
         }
     }
 }
@@ -1259,6 +1358,9 @@ impl CommandRequest {
 }
 
 /// The core kernel abstraction. All methods take &self — the kernel is shared.
+///
+/// A path that is empty names no file, as in POSIX, so a method given one treats it as missing
+/// instead of acting on the cwd. [`crate::vfs::absolute`] applies that rule.
 #[async_trait]
 pub trait Kernel: Send + Sync {
     fn new_process(&self) -> Process;
@@ -1275,6 +1377,8 @@ pub trait Kernel: Send + Sync {
     ///
     /// The default [`Kernel::try_stat`] reports a missing path as refused when this fails with
     /// [`io::ErrorKind::PermissionDenied`].
+    ///
+    /// `rm -r` relies on this returning `/` for the root, and treats an error as "not root".
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf>;
     /// Stat a path, following symlinks. `Ok` means the path exists,
     /// `Err(PermissionDenied)` means the kernel refuses to look it up, and any other error
@@ -1313,8 +1417,25 @@ pub trait Kernel: Send + Sync {
     async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String>;
     /// Set Unix permission mode bits on a path.
     async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()>;
+    /// Set the access and modification times of the file a path names, following a symlink as
+    /// [`Kernel::stat`] does.
+    ///
+    /// Permission follows `utimensat`: [`TimeChange::Now`] needs write access, [`TimeChange::To`]
+    /// needs ownership, and [`TimeChange::Keep`] leaves that time alone. A kernel that wraps
+    /// another must forward this. The default refuses with `Unsupported`, so a kernel that
+    /// predates this method still builds; `touch` of an existing file then fails on it.
+    async fn set_times(&self, _proc: &Process, _path: &str, _times: FileTimes) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this kernel cannot set file times",
+        ))
+    }
     /// Return the current wall-clock time.
     fn now(&self) -> std::time::SystemTime;
+    /// Return the `uname` fields that this kernel reports. The default is [`SystemInfo::default`].
+    fn uname(&self) -> SystemInfo {
+        SystemInfo::default()
+    }
     /// Check whether a URL is allowed for network access.
     /// Returns Ok(()) if allowed, Err with a message if blocked.
     fn check_url(&self, _url: &str) -> io::Result<()> {
