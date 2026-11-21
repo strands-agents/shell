@@ -6,7 +6,13 @@ use axum::{
     routing::{any, get},
 };
 use std::collections::HashMap;
+use std::io;
+use std::path::PathBuf;
+use std::time::SystemTime;
 use strands_shell::Shell;
+use strands_shell::os::{
+    DirEntry, Fd, FileStat, HttpRequest, HttpResponse, Kernel, OpenFlags, Process,
+};
 
 fn rt() -> (tokio::runtime::Runtime, tokio::task::LocalSet) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -665,6 +671,141 @@ fn curl_protocol_relative_redirect_respects_proto_redir() {
             "{}",
             out.stderr
         );
+    }));
+}
+
+/// Forwards everything to the default kernel except HTTP, which it answers
+/// from a script and records, so a test can use an `https://` origin
+/// without a TLS server.
+struct ScriptedHttpKernel {
+    inner: std::sync::Arc<dyn Kernel>,
+    routes: Vec<(&'static str, &'static str)>,
+    requested: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Kernel for ScriptedHttpKernel {
+    async fn http_request(&self, req: HttpRequest) -> io::Result<HttpResponse> {
+        self.requested.lock().unwrap().push(req.url.clone());
+        let location = self.routes.iter().find(|(url, _)| *url == req.url);
+        let (status, headers, body) = match location {
+            Some((_, loc)) => (302, vec![("location".into(), loc.to_string())], Vec::new()),
+            None => (200, Vec::new(), b"ok".to_vec()),
+        };
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+            version: "1.1".into(),
+            reason: String::new(),
+        })
+    }
+
+    fn new_process(&self) -> Process {
+        self.inner.new_process()
+    }
+
+    async fn open(&self, proc: &mut Process, path: &str, flags: OpenFlags) -> io::Result<Fd> {
+        self.inner.open(proc, path, flags).await
+    }
+
+    async fn list_dir(&self, proc: &Process, path: &str) -> io::Result<Vec<DirEntry>> {
+        self.inner.list_dir(proc, path).await
+    }
+
+    async fn change_dir(&self, proc: &mut Process, path: &str) -> io::Result<()> {
+        self.inner.change_dir(proc, path).await
+    }
+
+    async fn stat(&self, proc: &Process, path: &str) -> FileStat {
+        self.inner.stat(proc, path).await
+    }
+
+    async fn lstat(&self, proc: &Process, path: &str) -> FileStat {
+        self.inner.lstat(proc, path).await
+    }
+
+    async fn access(&self, proc: &Process, path: &str, mode: i32) -> bool {
+        self.inner.access(proc, path, mode).await
+    }
+
+    async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf> {
+        self.inner.canonicalize(proc, path).await
+    }
+
+    async fn is_executable(&self, proc: &Process, path: &str) -> bool {
+        self.inner.is_executable(proc, path).await
+    }
+
+    async fn glob(&self, proc: &Process, pattern: &str) -> Vec<String> {
+        self.inner.glob(proc, pattern).await
+    }
+
+    fn isatty(&self, fd: i32) -> bool {
+        self.inner.isatty(fd)
+    }
+
+    async fn remove_file(&self, proc: &Process, path: &str) -> io::Result<()> {
+        self.inner.remove_file(proc, path).await
+    }
+
+    async fn remove_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
+        self.inner.remove_dir(proc, path).await
+    }
+
+    async fn create_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
+        self.inner.create_dir(proc, path).await
+    }
+
+    async fn rename(&self, proc: &Process, from: &str, to: &str) -> io::Result<()> {
+        self.inner.rename(proc, from, to).await
+    }
+
+    async fn symlink(&self, proc: &Process, target: &str, link: &str) -> io::Result<()> {
+        self.inner.symlink(proc, target, link).await
+    }
+
+    async fn read_link(&self, proc: &Process, path: &str) -> io::Result<String> {
+        self.inner.read_link(proc, path).await
+    }
+
+    async fn set_permissions(&self, proc: &Process, path: &str, mode: u32) -> io::Result<()> {
+        self.inner.set_permissions(proc, path, mode).await
+    }
+
+    fn now(&self) -> SystemTime {
+        self.inner.now()
+    }
+}
+
+#[test]
+fn curl_protocol_relative_redirect_keeps_https_scheme() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let kernel = std::sync::Arc::new(ScriptedHttpKernel {
+            inner: Shell::builder().build().unwrap().kernel().clone(),
+            routes: vec![
+                ("https://source.test/redirect", "//target.test/hello"),
+                ("https://source.test/chain", "/redirect"),
+            ],
+            requested: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut shell = Shell::with_kernel(kernel.clone());
+
+        for path in ["redirect", "chain"] {
+            kernel.requested.lock().unwrap().clear();
+            let out = shell
+                .run(&format!("curl -sSL https://source.test/{path}"))
+                .await;
+            assert_eq!(out.status, 0, "{path}: {}", out.stderr);
+            assert_eq!(out.stdout, "ok", "{path}");
+            let requested = kernel.requested.lock().unwrap();
+            assert_eq!(
+                requested.last().map(String::as_str),
+                Some("https://target.test/hello"),
+                "{path}: {requested:?}"
+            );
+        }
     }));
 }
 
