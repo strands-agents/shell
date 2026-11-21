@@ -9602,6 +9602,30 @@ expect_output!(
     "sh: -c: option requires an argument\n",
     2
 );
+expect_output!(
+    lash_long_option_is_not_a_script,
+    "lash --help",
+    "",
+    "lash: --help: option not supported; use sh FILE or sh -c CMD, with set -e/-x inside\n",
+    2
+);
+expect_output!(
+    sh_short_option_is_not_a_script,
+    "sh -x a",
+    "",
+    "sh: -x: option not supported; use sh FILE or sh -c CMD, with set -e/-x inside\n",
+    2
+);
+expect!(
+    sh_double_dash_ends_options,
+    "echo 'echo hi $1' > /tmp/s; sh -- /tmp/s a",
+    "hi a"
+);
+expect!(
+    sh_double_dash_dash_named_script,
+    "cd /tmp; echo 'echo hi $1' > ./-s; sh -- -s b",
+    "hi b"
+);
 
 #[test]
 fn script_args_and_isolation_unchanged() {
