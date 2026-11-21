@@ -291,4 +291,6 @@ def test_run_releases_the_gil(shell):
         stop.set()
         worker.join()
 
-    assert during > 50
+    # A held GIL gives ~1 tick. Before Python 3.11, time.sleep on Windows
+    # rounds up to the ~15.6 ms timer tick, so 0.5 s yields only ~30-45 ticks.
+    assert during > 10
