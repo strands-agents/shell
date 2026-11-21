@@ -3378,6 +3378,15 @@ fn xtrace(proc: &mut Process, args: &[String]) {
     proc.err_msg(&format!("{prefix}{}", args.join(" ")));
 }
 
+/// Whether `name` is a builtin that [`execute_pipeline_checked`] runs, rather than one in
+/// [`builtins::lookup`].
+fn runs_in_executor(name: &str) -> bool {
+    matches!(
+        name,
+        "break" | "continue" | "exit" | "return" | "eval" | "." | "source" | "exec" | "command"
+    )
+}
+
 /// Execute a pipeline, checking for break/continue/exit builtins.
 async fn execute_pipeline_checked(
     os: Arc<dyn Kernel>,
@@ -3394,20 +3403,7 @@ async fn execute_pipeline_checked(
                     .args
                     .get(1)
                     .and_then(parser::word_to_str)
-                    .is_some_and(|inner| {
-                        matches!(
-                            inner.as_str(),
-                            "break"
-                                | "continue"
-                                | "exit"
-                                | "return"
-                                | "eval"
-                                | "."
-                                | "source"
-                                | "exec"
-                                | "command"
-                        )
-                    })
+                    .is_some_and(|inner| runs_in_executor(&inner))
             {
                 let unprefixed = parser::Command {
                     env: pipeline[0].env.clone(),
@@ -3835,6 +3831,7 @@ async fn run_pipeline(
         }
         let cmd = &expanded_args[i][0];
         if builtins::lookup(cmd).is_some()
+            || runs_in_executor(cmd)
             || (!skip_function && shell_proc.get_function(cmd).is_some())
             || commands::lookup(cmd).is_some()
             || command_fallback::serves(os.as_ref(), cmd)
@@ -3875,8 +3872,9 @@ async fn run_pipeline(
             requests.push(None);
             continue;
         };
-        // The commands inside the compound are checked when they run.
-        if parser::is_compound_stage_call(cmd) {
+        // The commands inside the compound, or that `command` or `eval` runs, are checked
+        // when they run.
+        if parser::is_compound_stage_call(cmd) || runs_in_executor(program) {
             requests.push(None);
             continue;
         }
@@ -4207,6 +4205,23 @@ async fn run_pipeline(
             .filter(|_| !skip_function)
             .cloned();
         let is_script = name == "lash" || name == "sh";
+        // `command`, `eval`, and the like run as a one-command body in the stage's subshell,
+        // with the words already expanded.
+        let is_function = func_body.is_some();
+        let func_body = if runs_in_executor(&name) {
+            let args = expanded_args[i]
+                .iter()
+                .map(|word| vec![parser::WordPart::SingleQuoted(word.clone())])
+                .collect();
+            let command = parser::Command {
+                env: Vec::new(),
+                args,
+                redirects: Vec::new(),
+            };
+            Some(vec![(parser::Item::Pipeline(vec![command], false), None)])
+        } else {
+            func_body
+        };
 
         if builtin.is_some() || func_body.is_some() || is_script {
             // Builtins/functions: child has pipe fds (for I/O via CURRENT_PROCESS),
@@ -4272,9 +4287,11 @@ async fn run_pipeline(
                         };
                     }
                     if let Some(body) = func_body {
-                        state_proc.args = args;
-                        state_proc.push_local_scope();
-                        state_proc.depth += 1;
+                        if is_function {
+                            state_proc.args = args;
+                            state_proc.push_local_scope();
+                            state_proc.depth += 1;
+                        }
                         state_proc.capture = true;
                         // Transfer stdin from child (CURRENT_PROCESS) so the
                         // function body's commands can read pipeline input.
@@ -4293,7 +4310,9 @@ async fn run_pipeline(
                             Err(ControlFlow::Exit(code)) => code,
                             Err(_) => state_proc.last_exit,
                         };
-                        state_proc.pop_local_scope();
+                        if is_function {
+                            state_proc.pop_local_scope();
+                        }
                         CURRENT_PROCESS.with(|p| {
                             state_proc.transfer_fd(STDIN, &mut p.borrow_mut());
                         });
