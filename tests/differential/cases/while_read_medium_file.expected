@@ -1,0 +1,9 @@
+status: 0
+stderr: empty
+--- stdout
+lines=3000 empty=6 last=
+line 3
+line 4
+line 2998
+line 2999
+

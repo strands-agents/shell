@@ -109,7 +109,8 @@ pub fn builtin_read<'a>(
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                     let mut kind = reader.into_fd_kind();
                     if let crate::os::FdKind::ChannelReader { buf, .. } = &mut kind {
-                        buf.splice(0..0, bytes.iter().copied());
+                        bytes.extend_from_slice(buf);
+                        *buf = bytes.into();
                     }
                     io::with_process(|p| p.restore_fd(0, kind));
                     return Err(e.into());

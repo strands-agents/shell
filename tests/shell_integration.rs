@@ -1508,6 +1508,38 @@ fn heredoc_preserves_blank_lines() {
     }));
 }
 
+// ── while read over a large redirected file ─────────────────────────
+
+#[test]
+fn while_read_over_a_large_redirected_file_takes_linear_time() {
+    // Eight times the lines should take about eight times as long; the quadratic read took about
+    // forty. Comparing two sizes in one run keeps the bound independent of machine speed.
+    async fn time_to_read(lines: usize) -> std::time::Duration {
+        let mut shell = Shell::builder().build().unwrap();
+        let data = format!("{}\n", "a".repeat(76)).repeat(lines);
+        shell.write_file("/tmp/big", data.as_bytes()).await.unwrap();
+        let started = std::time::Instant::now();
+        let out = shell
+            .run("n=0; while read -r l; do n=$((n+1)); done < /tmp/big; echo $n")
+            .await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            (out.status, out.stdout, out.stderr),
+            (0, format!("{lines}\n"), String::new())
+        );
+        elapsed
+    }
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let short = time_to_read(2_500).await;
+        let long = time_to_read(20_000).await;
+        assert!(
+            long < short * 16 + std::time::Duration::from_secs(1),
+            "20000 lines took {long:?}, 2500 took {short:?}"
+        );
+    }));
+}
+
 // ── Compound command redirects ──────────────────────────────────────
 
 #[test]
