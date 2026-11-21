@@ -103,20 +103,22 @@ async fn cmd_rm(os: &dyn Kernel, args: &[String]) -> CommandResult {
             }
             continue;
         }
-        if st.is_dir && !st.is_symlink {
-            if !recursive {
-                errors.report(path, "is a directory").await?;
-                code = 1;
-                continue;
-            }
-            // POSIX: refuse `.`, `..` and the root, and do nothing more with them.
-            if is_dot_or_dot_dot(path) {
-                errors
-                    .report(path, "refusing to remove '.' or '..'")
-                    .await?;
-                code = 1;
-                continue;
-            }
+        let is_dir = st.is_dir && !st.is_symlink;
+        if is_dir && !recursive {
+            errors.report(path, "is a directory").await?;
+            code = 1;
+            continue;
+        }
+        // POSIX: refuse `.`, `..` and the root, and do nothing more with them.
+        // The dot check also covers a `.` that resolves to a symlink or a file.
+        if is_dot_or_dot_dot(path) {
+            errors
+                .report(path, "refusing to remove '.' or '..'")
+                .await?;
+            code = 1;
+            continue;
+        }
+        if is_dir {
             if io::canonicalize(os, path)
                 .await
                 .is_ok_and(|p| p == Path::new("/"))

@@ -124,7 +124,10 @@ pub(crate) async fn try_stat(os: &dyn Kernel, path: &str) -> std::io::Result<cra
 }
 
 /// Resolve a path to its absolute form with symlinks followed, via the kernel.
-pub async fn canonicalize(os: &dyn Kernel, path: &str) -> std::io::Result<std::path::PathBuf> {
+pub(crate) async fn canonicalize(
+    os: &dyn Kernel,
+    path: &str,
+) -> std::io::Result<std::path::PathBuf> {
     let proc = CURRENT_PROCESS.with(|p| p.replace(Process::empty()));
     let result = os.canonicalize(&proc, path).await;
     CURRENT_PROCESS.with(|p| p.replace(proc));

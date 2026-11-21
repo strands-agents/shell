@@ -4788,6 +4788,25 @@ expect_output!(
      rm: /tmp/w/a/..: refusing to remove '.' or '..'\n",
     0
 );
+expect_output!(
+    rm_refusal_order_matches_gnu,
+    "rm -rf /.; echo $?; rm -f / .; echo $?",
+    "1\n1\n",
+    "rm: /.: refusing to remove '.' or '..'\n\
+     rm: /: is a directory\n\
+     rm: .: is a directory\n",
+    0
+);
+expect_output!(
+    rm_refuses_dot_through_a_symlink_or_file,
+    "mkdir -p /tmp/real; touch /tmp/real/f /tmp/g; ln -s /tmp/real /tmp/cur; cd /tmp/cur; \
+     rm -rf . /tmp/cur/. /tmp/g/.; echo $?; [ -L /tmp/cur ] && echo link-kept; ls /tmp/real /tmp/g",
+    "1\nlink-kept\n/tmp/g\n\n/tmp/real:\nf\n",
+    "rm: .: refusing to remove '.' or '..'\n\
+     rm: /tmp/cur/.: refusing to remove '.' or '..'\n\
+     rm: /tmp/g/.: refusing to remove '.' or '..'\n",
+    0
+);
 expect!(
     rm_removes_link_to_root,
     "touch /tmp/f; ln -s / /tmp/L; rm -rf /tmp/L; echo $?; [ -L /tmp/L ] || echo gone; ls /tmp",

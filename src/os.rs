@@ -1337,6 +1337,8 @@ pub trait Kernel: Send + Sync {
     ///
     /// The default [`Kernel::try_stat`] reports a missing path as refused when this fails with
     /// [`io::ErrorKind::PermissionDenied`].
+    ///
+    /// `rm -r` relies on this returning `/` for the root, and treats an error as "not root".
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf>;
     /// Stat a path, following symlinks. `Ok` means the path exists,
     /// `Err(PermissionDenied)` means the kernel refuses to look it up, and any other error
