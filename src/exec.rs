@@ -1828,10 +1828,9 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
     let mut sub = proc.fork();
     sub.depth += 1;
     if let Some(msg) = sub.check_limits() {
-        // A deadline that has passed is reported once, by the command this feeds.
-        if !msg.ends_with("execution timeout exceeded") {
-            proc.err_msg(msg);
-        }
+        proc.captured_stderr.push_str(msg);
+        proc.captured_stderr.push('\n');
+        proc.err_msg(msg);
         proc.last_exit = 1;
         proc.last_subst_status = Some(1);
         return String::new();
