@@ -1,0 +1,13 @@
+status: 0
+stderr: empty
+--- stdout
+x
+once
+1 1
+a  b
+$HOME
+$n
+[]
+[]
+$(echo injected)
+*
