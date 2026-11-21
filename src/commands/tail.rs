@@ -1,4 +1,4 @@
-use super::head::legacy_line_count;
+use super::head::{legacy_line_count, signed_count};
 use crate::prelude::*;
 use std::collections::VecDeque;
 
@@ -17,13 +17,11 @@ async fn cmd_tail(os: &dyn Kernel, args: &[String]) -> CommandResult {
     while let Some(arg) = parser.next()? {
         match arg {
             Short('n') | Long("lines") => {
-                let val = parser.value()?.string()?;
-                if let Some(rest) = val.strip_prefix('+') {
-                    from_start = true;
-                    count = rest.parse().unwrap_or(1);
-                } else {
-                    count = val.parse().unwrap_or(10);
-                }
+                // `+N` starts at line N; `-N` means the same as `N`. `usize` parsing
+                // accepts the leading `+`, so only the flag needs reading here.
+                let val = parser.value()?;
+                from_start = val.to_str().is_some_and(|s| s.starts_with('+'));
+                (_, count) = signed_count(val)?;
             }
             Short('h') | Long("help") => {
                 let mut w = io::stdout()?;
