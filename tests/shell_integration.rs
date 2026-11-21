@@ -1508,6 +1508,34 @@ fn heredoc_preserves_blank_lines() {
     }));
 }
 
+// ── while read over a large redirected file ─────────────────────────
+
+#[test]
+fn while_read_over_a_large_redirected_file_takes_linear_time() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        // 20,000 lines of 77 bytes: about 1.5 MB, which took tens of seconds
+        // when each one-byte read shifted the rest of the file.
+        let line = format!("{}\n", "a".repeat(76));
+        let data = line.repeat(20_000);
+        shell.write_file("/tmp/big", data.as_bytes()).await.unwrap();
+        let started = std::time::Instant::now();
+        let out = shell
+            .run("n=0; while read -r l; do n=$((n+1)); done < /tmp/big; echo $n")
+            .await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            (out.status, out.stdout.as_str(), out.stderr.as_str()),
+            (0, "20000\n", "")
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "took {elapsed:?}"
+        );
+    }));
+}
+
 // ── Compound command redirects ──────────────────────────────────────
 
 #[test]
