@@ -2197,7 +2197,7 @@ async fn run_capturing_status(
                     let mut saved_stdout = Process::empty();
                     proc.transfer_fd(STDOUT, &mut saved_stdout);
                     let (mut exit, mut out) =
-                        execute_pipeline_capture(os.clone(), proc, tail).await;
+                        Box::pin(execute_pipeline_capture(os.clone(), proc, tail)).await;
                     proc.capture = saved_capture;
                     proc.close(STDOUT);
                     saved_stdout.transfer_fd(STDOUT, proc);

@@ -3152,13 +3152,19 @@ fn compound_pipe_into_function_cli(name: &str, script: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+// In process, since a function call inside `$( )` overflows the 1 MiB main
+// thread stack of a Windows debug build of the CLI, with or without this fix.
 #[test]
-fn compound_pipe_into_function_in_substitution_from_cli() {
-    let out = compound_pipe_into_function_cli(
-        "compound_pipe_fn_subst_cli",
-        "g() { cat; }; x=$( { echo a; } | g ); echo \"[$x]\"",
-    );
-    assert_eq!(out, "[a]\n");
+fn compound_pipe_into_function_in_substitution_from_execute() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .execute("g() { cat; }; x=$( { echo a; } | g ); y=$( (echo b) | g )")
+            .await;
+        let out = shell.run("echo \"[$x][$y]\"").await;
+        assert_eq!(out.stdout, "[a][b]\n");
+    }));
 }
 
 #[test]
