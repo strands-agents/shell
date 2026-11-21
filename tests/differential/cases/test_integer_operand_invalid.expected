@@ -1,0 +1,13 @@
+status: 0
+stderr: non-empty
+--- stdout
+empty: 2
+word: 2
+right: 2
+hex: 2
+decimal: 2
+overflow: 2
+after-and: 2
+negated: 2
+not-taken
+end
