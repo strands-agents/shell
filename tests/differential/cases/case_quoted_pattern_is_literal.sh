@@ -27,3 +27,11 @@ x='a\b'; case ab in $x) echo var-escape ;; *) echo nomatch ;; esac
 case 'a\b' in $x) echo matched ;; *) echo var-nomatch ;; esac
 # A tilde expands to a literal path.
 HOME='/tmp/a\b'; case '/tmp/a\b' in ~) echo tilde ;; *) echo nomatch ;; esac
+# A backslash or quoted character can be a range endpoint.
+case 'Z' in [A-\\]) echo in-range ;; *) echo out ;; esac
+case 'a' in [A-\\]) echo in-range ;; *) echo out ;; esac
+case ']' in [\\-_]) echo in-range ;; *) echo out ;; esac
+case 'a' in ["*"-z]) echo in-range ;; *) echo out ;; esac
+case '!' in ["*"-z]) echo in-range ;; *) echo out ;; esac
+case '\' in [\\/]) echo member ;; *) echo out ;; esac
+[[ Z == [A-\\] ]] && echo cond-in-range || echo cond-out

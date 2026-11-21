@@ -24,3 +24,10 @@ not-star
 var-escape
 var-nomatch
 tilde
+in-range
+out
+in-range
+in-range
+out
+member
+cond-in-range
