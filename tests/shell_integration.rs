@@ -4854,6 +4854,25 @@ expect!(
     "0\ngone\nf"
 );
 
+// ── cat and mkdir keep going past a failing operand (#335) ──────────
+
+expect_output!(
+    cat_reports_each_failing_operand_and_exits_one,
+    "echo body > f; cat missing f nope",
+    "body\n",
+    "strands-shell: cat: no such file or directory: /home/lash/missing\n\
+     strands-shell: cat: no such file or directory: /home/lash/nope\n",
+    1
+);
+expect_output!(
+    mkdir_reports_each_failing_operand_and_creates_the_rest,
+    "mkdir nodir/a b other/c; echo $?; ls",
+    "1\nb\n",
+    "strands-shell: mkdir: no such file or directory: /home/lash/nodir\n\
+     strands-shell: mkdir: no such file or directory: /home/lash/other\n",
+    0
+);
+
 // ── head coverage ───────────────────────────────────────────────────
 
 expect!(
