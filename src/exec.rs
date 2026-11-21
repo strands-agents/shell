@@ -2127,7 +2127,7 @@ async fn run_capturing_status(
                     for arm in arms {
                         let mut matched = false;
                         for pat in &arm.patterns {
-                            let p = expand_word(os.clone(), proc, pat).await;
+                            let p = expand_pattern(os.clone(), proc, pat).await;
                             if case_match(&p, &value) {
                                 matched = true;
                                 break;
@@ -2764,7 +2764,7 @@ async fn execute_case(
     for arm in arms {
         let mut matched = false;
         for pat in &arm.patterns {
-            let pattern = expand_word(os.clone(), proc, pat).await;
+            let pattern = expand_pattern(os.clone(), proc, pat).await;
             if case_match(&pattern, &value) {
                 matched = true;
                 break;
@@ -2830,6 +2830,12 @@ async fn cond_pattern(os: Arc<dyn Kernel>, proc: &mut Process, term: &CondTerm) 
     let CondTerm::Operand(word) = term else {
         return cond_operand(os, proc, term).await;
     };
+    expand_pattern(os, proc, word).await
+}
+
+/// Expand a pattern word, backslash-escaping glob characters that came from quotes
+/// so they match literally under [`escaped_glob_match`].
+async fn expand_pattern(os: Arc<dyn Kernel>, proc: &mut Process, word: &Word) -> String {
     let mut pattern = String::new();
     for part in word {
         let mut text = String::new();
@@ -3027,9 +3033,9 @@ fn skip_conditional_not(terms: &[CondTerm], pos: &mut usize) -> Result<(), Condi
     Ok(())
 }
 
-/// Simple glob-style pattern matching for case statements.
+/// Match a case pattern built by [`expand_pattern`].
 fn case_match(pattern: &str, value: &str) -> bool {
-    glob_match(pattern.as_bytes(), value.as_bytes())
+    escaped_glob_match(pattern, value)
 }
 
 /// Glob matching where a backslash makes the next pattern byte literal.
