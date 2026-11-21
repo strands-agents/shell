@@ -1,0 +1,8 @@
+status: 0
+stderr: empty
+--- stdout
+[a][b]
+[a b][]
+[a][b][c:d][e]
+[old]
+[unset]
