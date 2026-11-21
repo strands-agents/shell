@@ -9059,6 +9059,109 @@ fn bind_direct_rm_removes_symlinks_not_their_targets() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn bind_direct_trailing_slash_or_dot_follows_a_directory_link() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_link_dot");
+        std::fs::create_dir(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/keep"), "k").unwrap();
+        std::os::unix::fs::symlink("d", dir.join("ld")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        for (script, stdout) in [
+            ("cd /b/ld && find . -name keep", "./keep\n"),
+            ("find /b/ld/ -name keep", "/b/ld/keep\n"),
+            ("ls /b/ld/", "keep\n"),
+            ("cd /b/ld && ls .", "keep\n"),
+            ("test -L /b/ld/; echo $?", "1\n"),
+            ("test -L /b/ld/.; echo $?", "1\n"),
+        ] {
+            let out = shell.run(script).await;
+            assert_eq!(out.stdout, stdout, "{script}: {}", out.stderr);
+        }
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_readonly_keeps_symlinks() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_ro_symlink");
+        std::fs::create_dir_all(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/keep"), "keep").unwrap();
+        std::fs::create_dir(dir.join("w")).unwrap();
+        std::os::unix::fs::symlink("../d", dir.join("w/l")).unwrap();
+        std::fs::write(dir.join("f"), "f").unwrap();
+        std::os::unix::fs::symlink("f", dir.join("lf")).unwrap();
+        std::os::unix::fs::symlink("d", dir.join("ld")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct_readonly(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        for script in ["rm /b/lf", "rm /b/ld", "rmdir /b/ld", "rm -r /b/w"] {
+            let out = shell.run(script).await;
+            assert_ne!(out.status, 0, "{script}");
+        }
+        for link in ["lf", "ld", "w/l"] {
+            assert!(dir.join(link).symlink_metadata().unwrap().is_symlink());
+        }
+        assert_eq!(std::fs::read_to_string(dir.join("f")).unwrap(), "f");
+        assert_eq!(std::fs::read_to_string(dir.join("d/keep")).unwrap(), "keep");
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_rm_of_links_leaving_the_bind() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_rm_escape");
+        let mount = dir.join("mount");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&mount).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), "s").unwrap();
+        std::os::unix::fs::symlink("secret", outside.join("inner")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret"), mount.join("out")).unwrap();
+        std::os::unix::fs::symlink("nowhere", mount.join("dangling")).unwrap();
+        std::os::unix::fs::symlink(&outside, mount.join("escape")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(mount.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        for link in ["/b/out", "/b/dangling"] {
+            let out = shell.run(&format!("test -L {link} && rm {link}")).await;
+            assert_eq!(out.status, 0, "{link}: {}", out.stderr);
+        }
+        assert!(mount.join("out").symlink_metadata().is_err());
+        assert!(mount.join("dangling").symlink_metadata().is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("secret")).unwrap(),
+            "s"
+        );
+
+        let out = shell.run("test -L /b/escape/inner").await;
+        assert_eq!(out.status, 1);
+        for script in [
+            "rm /b/escape/inner",
+            "rm -rf /b/escape/inner",
+            "rmdir /b/escape/inner",
+        ] {
+            shell.run(script).await;
+            assert!(outside.join("inner").symlink_metadata().is_ok(), "{script}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.join("secret")).unwrap(),
+            "s"
+        );
+    }));
+}
+
 #[cfg(windows)]
 #[test]
 fn bind_direct_readlink_reads_only_one_host_name_on_windows() {
