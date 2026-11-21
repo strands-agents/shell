@@ -204,7 +204,7 @@ pub(crate) fn parse_source(
     aliases: &std::collections::HashMap<String, String>,
     more_input: bool,
 ) -> Result<CommandLine, String> {
-    let mut tokens = tokenize(input, more_input)?;
+    let (mut tokens, body_lines) = tokenize_source(input, more_input)?;
     if tokens.is_empty() {
         return Ok(vec![]);
     }
@@ -215,8 +215,12 @@ pub(crate) fn parse_source(
     if let Some(tok) = rest.first() {
         return Err(format!("unexpected token: {}", tok_name(tok)));
     }
-    // Resolve pending here-doc bodies
-    resolve_heredocs(&mut cl, read_line)?;
+    // Resolve pending here-doc bodies: first from the body lines the input
+    // itself held, then from the lines after it.
+    let mut body_lines = body_lines.into_iter();
+    resolve_heredocs(&mut cl, &mut |delim| {
+        body_lines.next().or_else(|| read_line(delim))
+    })?;
     Ok(cl)
 }
 
@@ -906,9 +910,31 @@ impl ConditionalTracker {
 
 /// Tokenize shell input, treating a final unquoted backslash as incomplete when `more_input` is true.
 fn tokenize(input: &str, more_input: bool) -> Result<Vec<Token>, String> {
+    tokenize_source(input, more_input).map(|(tokens, _)| tokens)
+}
+
+/// The here-docs (delimiter, strip tabs) redirected in `tokens`, in order.
+fn pending_heredocs(tokens: &[Token]) -> Vec<(String, bool)> {
+    tokens
+        .windows(2)
+        .filter_map(|pair| match &pair[0] {
+            Token::HereDoc | Token::HereDocStrip if is_word_token(&pair[1]) => Some((
+                word_to_str(&tok_to_word(&pair[1])).unwrap_or_default(),
+                pair[0] == Token::HereDocStrip,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// [`tokenize`], also returning the here-doc body lines that follow a newline
+/// inside `input`: they are set aside, delimiters included, rather than tokenized.
+fn tokenize_source(input: &str, more_input: bool) -> Result<(Vec<Token>, Vec<String>), String> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
     let mut conditional = ConditionalTracker::default();
+    let mut body_lines = Vec::new();
+    let mut line_start = 0;
 
     while let Some(&c) = chars.peek() {
         conditional.observe(&tokens);
@@ -927,6 +953,27 @@ fn tokenize(input: &str, more_input: bool) -> Result<Vec<Token>, String> {
             }
             '\n' => {
                 chars.next();
+                // A here-doc body starts on the line after the newline that ends its redirect.
+                for (delim, strip) in pending_heredocs(&tokens[line_start..]) {
+                    let mut closed = false;
+                    while chars.peek().is_some() {
+                        let line: String = chars.by_ref().take_while(|&c| c != '\n').collect();
+                        let check = if strip {
+                            line.trim_start_matches('\t')
+                        } else {
+                            &line
+                        };
+                        closed = check.trim_end_matches('\r') == delim;
+                        body_lines.push(line);
+                        if closed {
+                            break;
+                        }
+                    }
+                    if !closed && more_input {
+                        return Err(format!("here-document `{delim}` is not closed"));
+                    }
+                }
+                line_start = tokens.len();
                 // Emit semicolon for newline as command separator
                 // but collapse consecutive newlines / trailing newlines
                 // and don't emit after keywords where newlines are not separators
@@ -1166,7 +1213,7 @@ fn tokenize(input: &str, more_input: bool) -> Result<Vec<Token>, String> {
         }
     }
 
-    Ok(tokens)
+    Ok((tokens, body_lines))
 }
 
 /// Whether `text` is `name=`, `name+=`, or `name[index]=` — the spelling an array literal follows.
