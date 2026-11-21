@@ -264,7 +264,11 @@ fn num(s: &str) -> i64 {
     integer(s).unwrap_or(0)
 }
 
-/// Read an integer operand as bash does: decimal with an optional sign, blanks allowed around it.
+/// Read an integer operand as bash does: decimal with an optional sign, any
+/// whitespace before it and blanks after it.
 fn integer(s: &str) -> Option<i64> {
-    s.trim_matches([' ', '\t']).parse().ok()
+    s.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r'])
+        .trim_end_matches([' ', '\t'])
+        .parse()
+        .ok()
 }
