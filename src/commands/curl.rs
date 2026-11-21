@@ -373,7 +373,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
 
         // A redirect hop must pass both `--proto` and `--proto-redir`.
         let refused = proto.refuses(&current_url).or_else(|| {
-            (current_url != url)
+            (redirects_left != max_redirects)
                 .then(|| proto_redir.refuses(&current_url))
                 .flatten()
         });
@@ -392,7 +392,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
         }
 
         // Inject credentials (only for original URL, not redirects)
-        if current_url == url {
+        if redirects_left == max_redirects {
             // Query param credentials — modify URL
             let mut request_url = current_url.clone();
             for (name, value) in os.resolve_credential(&current_url, &method) {
@@ -475,6 +475,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("location"))
                     .map(|(_, v)| v.clone())
+                    .filter(|loc| !loc.is_empty())
             {
                 let next = if is_absolute(&loc) {
                     loc
@@ -548,6 +549,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("location"))
                     .map(|(_, v)| v.clone())
+                    .filter(|loc| !loc.is_empty())
             {
                 let next = if is_absolute(&loc) {
                     loc
