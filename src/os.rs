@@ -920,6 +920,11 @@ impl Process {
         true
     }
 
+    /// Whether programs the shell runs see the variable `key`.
+    pub(crate) fn is_exported(&self, key: &str) -> bool {
+        self.exported.contains(key)
+    }
+
     /// Set whether programs the shell runs see the variable `key`.
     pub fn set_exported(&mut self, key: &str, exported: bool) {
         if self.exported.contains(key) != exported {

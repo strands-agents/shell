@@ -3713,6 +3713,17 @@ fn give_stdin(proc: &mut Process, stdin: Option<TakenFd>) {
     }
 }
 
+/// Put back the variables a builtin's prefix assignments replaced, last first.
+fn restore_env(proc: &mut Process, saved: Vec<(String, (Option<String>, bool))>) {
+    for (key, (value, exported)) in saved.into_iter().rev() {
+        match value {
+            Some(value) => proc.set_env(&key, value),
+            None => proc.unset_env(&key),
+        };
+        proc.set_exported(&key, exported);
+    }
+}
+
 /// Run `body` as a pipeline stage on `child`, then send the stdin it left unread through `back`.
 fn run_stage(
     back: Option<tokio::sync::oneshot::Sender<Option<TakenFd>>>,
@@ -3915,6 +3926,23 @@ async fn run_pipeline(
             let name = expanded_args[0][0].clone();
             let args: Vec<String> = expanded_args[0][1..].to_vec();
 
+            // A regular builtin sees its prefix assignments, exported, for this command
+            // only; the previous values come back when it ends. `local` is left out, since
+            // it would save the temporary value as the one to restore when the function returns.
+            let mut saved_env = Vec::new();
+            if !is_special(&name) && name != "local" {
+                for (k, v) in &expanded_env[0] {
+                    let prev = (
+                        shell_proc.get_env(k).map(str::to_string),
+                        shell_proc.is_exported(k),
+                    );
+                    if shell_proc.set_env(k, v) {
+                        shell_proc.set_exported(k, true);
+                        saved_env.push((k.clone(), prev));
+                    }
+                }
+            }
+
             let mut io_proc = shell_proc.fork();
             // Inherit stdin from shell_proc if present (e.g. CompoundPipeline). A stdin
             // redirect sets the caller's stdin aside until the builtin ends.
@@ -3944,6 +3972,7 @@ async fn run_pipeline(
                 shell_proc.err_msg(&format!("strands-shell: {e}"));
                 shell_proc.clear_err_tx();
                 give_stdin(shell_proc, kept_stdin);
+                restore_env(shell_proc, saved_env);
                 return (1, String::new());
             }
             // Builtin diagnostics follow the command's own stderr redirection.
@@ -4027,6 +4056,7 @@ async fn run_pipeline(
                     }),
                 )
                 .await;
+            restore_env(shell_proc, saved_env);
             if let Err(e) = &result {
                 shell_proc.err_msg(&format!("strands-shell: {name}: {e}"));
             }
