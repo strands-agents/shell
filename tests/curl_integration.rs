@@ -851,6 +851,64 @@ fn curl_relative_redirect_resolves_against_the_current_path() {
     }));
 }
 
+/// A server whose `/items/new` answers `302` with `location`, counting the
+/// requests it gets.
+async fn start_counting_redirect_server(
+    location: &'static str,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let seen = std::sync::Arc::new(AtomicUsize::new(0));
+    let count = seen.clone();
+    let app = Router::new()
+        .route(
+            "/items/new",
+            any(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                async move { (StatusCode::FOUND, [("location", location)], "moved") }
+            }),
+        )
+        .fallback(|| async { "done" });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::task::spawn_local(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), seen)
+}
+
+#[test]
+fn curl_empty_redirect_location_is_not_followed() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (base, seen) = start_counting_redirect_server("").await;
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        let out = shell
+            .run(&format!(
+                "curl -sSL -d name=x -w '%{{http_code}}' {base}/items/new"
+            ))
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(out.stdout, "moved302");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }));
+}
+
+#[test]
+fn curl_redirect_back_to_the_same_url_is_a_redirect_hop() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (base, seen) = start_counting_redirect_server("./new").await;
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        let out = shell
+            .run(&format!(
+                "curl -sSL --proto-redir '=https' {base}/items/new"
+            ))
+            .await;
+        assert_eq!(out.status, 1, "{}", out.stderr);
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }));
+}
+
 #[test]
 fn curl_no_follow_redirect() {
     let (rt, local) = rt();
