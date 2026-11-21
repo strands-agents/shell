@@ -3823,6 +3823,20 @@ async fn run_pipeline(
         return (shell_proc.last_subst_status.unwrap_or(0), String::new());
     }
 
+    // In a pipeline, a `command NAME` stage runs NAME as an ordinary stage that skips
+    // functions, so it streams and is checked with the other stages.
+    let mut skip_functions = vec![skip_function; len];
+    if len > 1 {
+        for (words, skip) in expanded_args.iter_mut().zip(&mut skip_functions) {
+            while words.len() > 1 && words[0] == "command" && !words[1].starts_with('-') {
+                words.remove(0);
+                *skip = true;
+            }
+        }
+    }
+    // Other builtins `execute_pipeline_checked` runs, in a pipeline stage.
+    let in_executor = |name: &str| len > 1 && runs_in_executor(name);
+
     // Resolve executables: for each stage, if the command is not a builtin,
     // function, or registered command, try to resolve it as an executable file.
     for i in 0..len {
@@ -3831,8 +3845,8 @@ async fn run_pipeline(
         }
         let cmd = &expanded_args[i][0];
         if builtins::lookup(cmd).is_some()
-            || runs_in_executor(cmd)
-            || (!skip_function && shell_proc.get_function(cmd).is_some())
+            || in_executor(cmd)
+            || (!skip_functions[i] && shell_proc.get_function(cmd).is_some())
             || commands::lookup(cmd).is_some()
             || command_fallback::serves(os.as_ref(), cmd)
         {
@@ -3867,14 +3881,15 @@ async fn run_pipeline(
 
     // Ask the kernel about each command, before any stage starts.
     let mut requests: Vec<Option<CheckedCommand>> = Vec::with_capacity(len);
-    for (cmd, words) in pipeline.iter().zip(&expanded_args) {
+    for (i, (cmd, words)) in pipeline.iter().zip(&expanded_args).enumerate() {
         let Some((mut program, mut args)) = words.split_first() else {
             requests.push(None);
             continue;
         };
-        // The commands inside the compound, or that `command` or `eval` runs, are checked
-        // when they run.
-        if parser::is_compound_stage_call(cmd) || runs_in_executor(program) {
+        // The commands inside the compound, or that `eval` or `.` runs, are checked when
+        // they run.
+        let function = !skip_functions[i] && shell_proc.get_function(program).is_some();
+        if parser::is_compound_stage_call(cmd) || (in_executor(program) && !function) {
             requests.push(None);
             continue;
         }
@@ -3885,7 +3900,7 @@ async fn run_pipeline(
         {
             (program, args) = (inner, rest);
         }
-        if !runs_in_shell(shell_proc, program, skip_function) {
+        if !runs_in_shell(shell_proc, program, skip_functions[i]) {
             if os.command_fallback().is_some() {
                 let request = CommandRequest::new(program, args, &shell_proc.cwd);
                 if let Err(e) = os.check_fallback(&request).await {
@@ -4202,13 +4217,13 @@ async fn run_pipeline(
         let builtin = builtins::lookup(&name);
         let func_body = child
             .get_function(&name)
-            .filter(|_| !skip_function)
+            .filter(|_| !skip_functions[i])
             .cloned();
         let is_script = name == "lash" || name == "sh";
-        // `command`, `eval`, and the like run as a one-command body in the stage's subshell,
-        // with the words already expanded.
+        // Unless a function has the name, `eval`, `.`, and the like run as a one-command
+        // body in the stage's subshell, with the words already expanded.
         let is_function = func_body.is_some();
-        let func_body = if runs_in_executor(&name) {
+        let func_body = if !is_function && in_executor(&name) {
             let args = expanded_args[i]
                 .iter()
                 .map(|word| vec![parser::WordPart::SingleQuoted(word.clone())])
