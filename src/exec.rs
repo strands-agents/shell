@@ -1827,10 +1827,11 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
     };
     let mut sub = proc.fork();
     sub.depth += 1;
-    if sub.check_limits().is_some() {
-        proc.captured_stderr
-            .push_str("strands-shell: maximum recursion depth exceeded\n");
-        proc.err_msg("strands-shell: maximum recursion depth exceeded");
+    if let Some(msg) = sub.check_limits() {
+        // A deadline that has passed is reported once, by the command this feeds.
+        if !msg.ends_with("execution timeout exceeded") {
+            proc.err_msg(msg);
+        }
         proc.last_exit = 1;
         proc.last_subst_status = Some(1);
         return String::new();
