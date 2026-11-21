@@ -18,9 +18,10 @@ async fn cmd_tail(os: &dyn Kernel, args: &[String]) -> CommandResult {
         match arg {
             Short('n') | Long("lines") => {
                 // `+N` starts at line N; `-N` means the same as `N`. `usize` parsing
-                // accepts the leading `+`, so only the flag needs reading here.
+                // accepts the leading `+`, so only the flag needs reading here. Like GNU,
+                // once any count has a `+`, later counts are start lines too.
                 let val = parser.value()?;
-                from_start = val.to_str().is_some_and(|s| s.starts_with('+'));
+                from_start |= val.to_str().is_some_and(|s| s.starts_with('+'));
                 (_, count) = signed_count(val)?;
             }
             Short('h') | Long("help") => {
