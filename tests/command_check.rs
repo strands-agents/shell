@@ -1011,3 +1011,43 @@ fn command_past_a_function_runs_the_allowed_fallback_once() {
         assert_eq!(fallback_checks, 1);
     });
 }
+
+#[test]
+fn command_in_a_pipeline_stage_asks_about_the_command_it_runs() {
+    block_on(async {
+        let (mut shell, events, ran) = fallback_shell(true, &[]);
+        let out = shell.run("echo hi | command tool a").await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(*ran.lock().unwrap(), ["tool"]);
+        let asked: Vec<Event> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, Event::CheckFallback(..)))
+            .cloned()
+            .collect();
+        assert_eq!(asked, [check_fallback("tool", &["a"])]);
+    });
+}
+
+#[test]
+fn command_in_a_pipeline_stage_honors_a_refusal_of_the_command_it_runs() {
+    block_on(async {
+        let (mut shell, _, ran) = fallback_shell(true, &["tool"]);
+        let out = shell.run("echo hi | command tool a").await;
+        assert_eq!(out.status, 126);
+        assert_eq!(out.stderr, "strands-shell: tool: denied by policy\n");
+        assert!(ran.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn a_refused_command_stage_stops_the_pipeline_before_any_stage_runs() {
+    block_on(async {
+        let (mut shell, _, ran) = fallback_shell(true, &["tool"]);
+        let out = shell.run("touch /tmp/first | command tool a").await;
+        assert_eq!(out.status, 126);
+        assert!(ran.lock().unwrap().is_empty());
+        assert_eq!(shell.run("test -e /tmp/first").await.status, 1);
+    });
+}
