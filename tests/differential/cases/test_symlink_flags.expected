@@ -1,0 +1,10 @@
+status: 0
+stderr: empty
+--- stdout
+test -L ld: 0
+[ -h ld ]: 0
+test -L lf: 0
+[ -h dangling ]: 0
+test -L d: 1
+[ -h f ]: 1
+[ -h missing ]: 1
