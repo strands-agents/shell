@@ -3138,6 +3138,47 @@ fn compound_pipe_stderr_from_cli() {
     assert!(out.status.success());
 }
 
+/// Runs `script` through the CLI binary and returns its stdout (#383).
+fn compound_pipe_into_function_cli(name: &str, script: &str) -> String {
+    let dir = TestDir::new(name);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg(script)
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn compound_pipe_into_function_in_substitution_from_cli() {
+    let out = compound_pipe_into_function_cli(
+        "compound_pipe_fn_subst_cli",
+        "g() { cat; }; x=$( { echo a; } | g ); echo \"[$x]\"",
+    );
+    assert_eq!(out, "[a]\n");
+}
+
+#[test]
+fn compound_pipe_into_function_redirected_from_cli() {
+    let out = compound_pipe_into_function_cli(
+        "compound_pipe_fn_redirect_cli",
+        "g() { cat; }; { { echo a; } | g; } > f; echo \"file:$(cat f)\"",
+    );
+    assert_eq!(out, "file:a\n");
+}
+
+#[test]
+fn compound_pipe_into_function_piped_from_cli() {
+    let out = compound_pipe_into_function_cli(
+        "compound_pipe_fn_pipe_cli",
+        "g() { cat; }; { echo a; } | g | cat; for i in 1 2; do { echo $i; } | g; done | tr 12 xy",
+    );
+    assert_eq!(out, "a\nx\ny\n");
+}
+
 // ── Subshell stderr in captured paths ───────────────────────────────
 
 expect_streams!(subshell_stderr_plain, "( echo e >&2 )", "", "e\n");
