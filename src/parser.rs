@@ -1262,8 +1262,10 @@ fn is_stop(tok: &Token, stop: &[&str], at_command_start: bool) -> bool {
 }
 
 /// If the next token after a compound command is `|`, collect the trailing
-/// pipeline commands and wrap everything in a `CompoundPipeline`. A negated
-/// compound with no pipe becomes a `CompoundPipeline` with an empty tail.
+/// pipeline commands and wrap everything in a `CompoundPipeline`, or, when the
+/// pipeline reaches another compound, in the subshell that
+/// [`pipe_compound_into_compound`] builds. A negated compound with no pipe
+/// becomes a `CompoundPipeline` with an empty tail.
 fn collect_compound_pipe(
     tokens: &[Token],
     i: &mut usize,
@@ -1689,7 +1691,7 @@ fn pipe_compound_into_compound<'a>(
         ],
         redirects: Vec::new(),
     };
-    Ok(Item::Subshell(vec![
+    let item = Item::Subshell(vec![
         (
             Item::Function {
                 name: COMPOUND_STAGE.into(),
@@ -1701,11 +1703,20 @@ fn pipe_compound_into_compound<'a>(
             Item::CompoundPipeline {
                 compound: Box::new(compound),
                 tail: vec![call],
-                negated,
+                negated: false,
             },
             None,
         ),
-    ]))
+    ]);
+    if !negated {
+        return Ok(item);
+    }
+    // The negation goes outside the subshell, where `set -e` sees it.
+    Ok(Item::CompoundPipeline {
+        compound: Box::new(item),
+        tail: Vec::new(),
+        negated,
+    })
 }
 
 /// Whether `cl` is the subshell body that [`parse_pipeline_into_compound`] or
@@ -1753,7 +1764,12 @@ fn resolve_compound_stage_heredocs(
     for cmd in &mut stages[..call] {
         resolve_command_heredocs(cmd, read_line)?;
     }
-    resolve_heredocs(body, read_line)?;
+    // `cmd | compound | compound2` puts a `compound | compound2` stage in the body.
+    if is_compound_stage(body) {
+        resolve_compound_stage_heredocs(body, read_line)?;
+    } else {
+        resolve_heredocs(body, read_line)?;
+    }
     for cmd in &mut stages[call..] {
         resolve_command_heredocs(cmd, read_line)?;
     }
