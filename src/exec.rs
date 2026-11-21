@@ -3128,6 +3128,14 @@ fn glob_bracket(pat: &[u8], start: usize, ch: u8, escapes: bool) -> Option<(bool
     if negate {
         i += 1;
     }
+    // One set member at `i` and the index after it; `\x` is `x` when escapes are on.
+    let member = |i: usize| {
+        if escapes && pat[i] == b'\\' && i + 1 < pat.len() {
+            (pat[i + 1], i + 2)
+        } else {
+            (pat[i], i + 1)
+        }
+    };
     // First char after `[` (or `[!`) can be `]` as a literal
     let mut matched = false;
     let mut first = true;
@@ -3136,24 +3144,15 @@ fn glob_bracket(pat: &[u8], start: usize, ch: u8, escapes: bool) -> Option<(bool
             return Some((matched ^ negate, i + 1));
         }
         first = false;
-        if escapes && pat[i] == b'\\' && i + 1 < pat.len() {
-            matched |= pat[i + 1] == ch;
-            i += 2;
-            continue;
-        }
+        let (lo, next) = member(i);
         // Range: a-z
-        if i + 2 < pat.len() && pat[i + 1] == b'-' && pat[i + 2] != b']' {
-            let lo = pat[i];
-            let hi = pat[i + 2];
-            if ch >= lo && ch <= hi {
-                matched = true;
-            }
-            i += 3;
+        if next + 1 < pat.len() && pat[next] == b'-' && pat[next + 1] != b']' {
+            let (hi, end) = member(next + 1);
+            matched |= ch >= lo && ch <= hi;
+            i = end;
         } else {
-            if pat[i] == ch {
-                matched = true;
-            }
-            i += 1;
+            matched |= lo == ch;
+            i = next;
         }
     }
     None // no closing ]
