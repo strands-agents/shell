@@ -3318,6 +3318,17 @@ shell_test!(
         assert_eq!(out.status, 2);
     }
 );
+shell_test!(
+    test_int_error_names_the_operand_untrimmed,
+    "[ ' x ' -eq 0 ]",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(
+            out.stderr,
+            "strands-shell: [:  x : integer expression expected\n"
+        );
+        assert_eq!(out.status, 2);
+    }
+);
 
 // ── shift builtin ───────────────────────────────────────────────────
 

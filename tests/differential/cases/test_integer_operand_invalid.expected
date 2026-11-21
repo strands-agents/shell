@@ -9,5 +9,9 @@ decimal: 2
 overflow: 2
 after-and: 2
 negated: 2
+after-or: 2
+parens: 2
+blank: 2
+trailing-cr: 2
 not-taken
 end

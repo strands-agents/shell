@@ -10,3 +10,6 @@ leading-zero: 0
 max: 0
 double-bracket-empty: 0
 double-bracket-word: 0
+tabs: 0
+leading-newline: 0
+leading-cr: 0

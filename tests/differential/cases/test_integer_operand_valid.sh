@@ -7,3 +7,6 @@
 [ 9223372036854775807 -gt 0 ]; echo "max: $?"
 [[ "" -lt 3 ]]; echo "double-bracket-empty: $?"
 [[ abc -eq 0 ]]; echo "double-bracket-word: $?"
+[ "$(printf '\t3\t')" -eq 3 ]; echo "tabs: $?"
+[ "$(printf '\n3')" -eq 3 ]; echo "leading-newline: $?"
+[ "$(printf '\r3')" -eq 3 ]; echo "leading-cr: $?"

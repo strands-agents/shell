@@ -7,6 +7,10 @@ test 3 -gt x; echo "right: $?"
 [ 99999999999999999999 -ne 1 ]; echo "overflow: $?"
 [ 1 -eq 2 -a x -lt 2 ]; echo "after-and: $?"
 [ ! "" -le 0 ]; echo "negated: $?"
+[ 1 -eq 2 -o x -lt 2 ]; echo "after-or: $?"
+[ \( x -lt 2 \) ]; echo "parens: $?"
+[ " " -eq 0 ]; echo "blank: $?"
+[ "$(printf '3\r')" -eq 3 ]; echo "trailing-cr: $?"
 if [ "$e" -lt 3 ]; then echo taken; else echo not-taken; fi
 unset n
 while [ "$n" -lt 2 ]; do echo "loop [$n]"; n=$((n+1)); done
