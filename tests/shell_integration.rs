@@ -3294,6 +3294,42 @@ expect!(
 expect!(test_string_lt, "[ abc \\< def ] && echo yes", "yes");
 expect!(test_string_gt, "[ def \\> abc ] && echo yes", "yes");
 
+// ── test builtin: integer operands (#334) ───────────────────────────
+
+shell_test!(
+    test_int_empty_operand_is_an_error,
+    "[ '' -lt 3 ]",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(
+            out.stderr,
+            "strands-shell: [: : integer expression expected\n"
+        );
+        assert_eq!(out.status, 2);
+    }
+);
+shell_test!(
+    test_int_non_numeric_operand_is_an_error,
+    "test 0 -eq abc",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(
+            out.stderr,
+            "strands-shell: test: abc: integer expression expected\n"
+        );
+        assert_eq!(out.status, 2);
+    }
+);
+shell_test!(
+    test_int_error_names_the_operand_untrimmed,
+    "[ ' x ' -eq 0 ]",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(
+            out.stderr,
+            "strands-shell: [:  x : integer expression expected\n"
+        );
+        assert_eq!(out.status, 2);
+    }
+);
+
 // ── shift builtin ───────────────────────────────────────────────────
 
 expect!(shift_basic, "f() { shift; echo $1; }; f a b c", "b");
