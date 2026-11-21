@@ -1262,8 +1262,10 @@ fn is_stop(tok: &Token, stop: &[&str], at_command_start: bool) -> bool {
 }
 
 /// If the next token after a compound command is `|`, collect the trailing
-/// pipeline commands and wrap everything in a `CompoundPipeline`. A negated
-/// compound with no pipe becomes a `CompoundPipeline` with an empty tail.
+/// pipeline commands and wrap everything in a `CompoundPipeline`, or, when the
+/// pipeline reaches another compound, in the subshell that
+/// [`pipe_compound_into_compound`] builds. A negated compound with no pipe
+/// becomes a `CompoundPipeline` with an empty tail.
 fn collect_compound_pipe(
     tokens: &[Token],
     i: &mut usize,
@@ -1333,12 +1335,23 @@ fn collect_compound_pipe(
             match &tokens[*i] {
                 Token::Semi | Token::And | Token::Or | Token::Amp => break,
                 t if is_reserved(t) => break,
+                t if opens_a_compound(t)
+                    && (tail_tokens.is_empty() || tail_tokens.last() == Some(&&Token::Pipe)) =>
+                {
+                    break;
+                }
                 Token::LParen | Token::RParen => break,
                 _ => {
                     tail_tokens.push(&tokens[*i]);
                     *i += 1;
                 }
             }
+        }
+        // The tail reaches a compound command: `{ ...; } | [cmd |] while ...`
+        if (tail_tokens.is_empty() || tail_tokens.last() == Some(&&Token::Pipe))
+            && tokens.get(*i).is_some_and(opens_a_compound)
+        {
+            return pipe_compound_into_compound(tokens, i, tail_tokens, item, negated);
         }
         if tail_tokens.is_empty() {
             return Err("expected command after '|'".into());
@@ -1651,12 +1664,70 @@ fn parse_pipeline_into_compound<'a>(
     })
 }
 
-/// Whether `cl` is the subshell body that [`parse_pipeline_into_compound`] builds.
+/// Parse the rest of `compound | [cmd |] compound2 ...`, with `compound2` at `tokens[*i]`
+/// and `tail_tokens` holding `cmd |`.
+///
+/// Everything after the first `|` becomes the body of a function, called as the tail of
+/// a [`Item::CompoundPipeline`] in a subshell.
+fn pipe_compound_into_compound<'a>(
+    tokens: &'a [Token],
+    i: &mut usize,
+    mut tail_tokens: Vec<&'a Token>,
+    compound: Item,
+    negated: bool,
+) -> Result<Item, String> {
+    let rest = if tail_tokens.pop().is_some() {
+        parse_pipeline_into_compound(tokens, i, &mut tail_tokens, false)?
+    } else {
+        let (next, rest) = parse_compound(&tokens[*i..])?;
+        *i = tokens.len() - rest.len();
+        collect_compound_pipe(tokens, i, &mut tail_tokens, next, false)?
+    };
+    let call = Command {
+        env: Vec::new(),
+        args: vec![
+            compound_stage_word(),
+            vec![WordPart::DoubleQuoted(vec![WordPart::Var("@".into())])],
+        ],
+        redirects: Vec::new(),
+    };
+    let item = Item::Subshell(vec![
+        (
+            Item::Function {
+                name: COMPOUND_STAGE.into(),
+                body: vec![(rest, None)],
+            },
+            Some(Connector::Semi),
+        ),
+        (
+            Item::CompoundPipeline {
+                compound: Box::new(compound),
+                tail: vec![call],
+                negated: false,
+            },
+            None,
+        ),
+    ]);
+    if !negated {
+        return Ok(item);
+    }
+    // The negation goes outside the subshell, where `set -e` sees it.
+    Ok(Item::CompoundPipeline {
+        compound: Box::new(item),
+        tail: Vec::new(),
+        negated,
+    })
+}
+
+/// Whether `cl` is the subshell body that [`parse_pipeline_into_compound`] or
+/// [`pipe_compound_into_compound`] builds.
 fn is_compound_stage(cl: &CommandLine) -> bool {
     matches!(
         cl.as_slice(),
-        [(Item::Function { name, .. }, Some(Connector::Semi)), (Item::Pipeline(..), None)]
-            if name == COMPOUND_STAGE
+        [
+            (Item::Function { name, .. }, Some(Connector::Semi)),
+            (Item::Pipeline(..) | Item::CompoundPipeline { .. }, None)
+        ] if name == COMPOUND_STAGE
     )
 }
 
@@ -1665,6 +1736,20 @@ fn resolve_compound_stage_heredocs(
     cl: &mut CommandLine,
     read_line: &mut dyn FnMut(&str) -> Option<String>,
 ) -> Result<(), String> {
+    // `compound | compound2`: the first compound's here-documents come before the function's.
+    if let [
+        (Item::Function { body, .. }, _),
+        (Item::CompoundPipeline { compound, .. }, _),
+    ] = cl.as_mut_slice()
+    {
+        let mut first = vec![(
+            std::mem::replace(&mut **compound, Item::Group(Vec::new())),
+            None,
+        )];
+        resolve_heredocs(&mut first, read_line)?;
+        **compound = first.pop().unwrap().0;
+        return resolve_heredocs(body, read_line);
+    }
     let [
         (Item::Function { body, .. }, _),
         (Item::Pipeline(stages, _), _),
@@ -1679,7 +1764,12 @@ fn resolve_compound_stage_heredocs(
     for cmd in &mut stages[..call] {
         resolve_command_heredocs(cmd, read_line)?;
     }
-    resolve_heredocs(body, read_line)?;
+    // `cmd | compound | compound2` puts a `compound | compound2` stage in the body.
+    if is_compound_stage(body) {
+        resolve_compound_stage_heredocs(body, read_line)?;
+    } else {
+        resolve_heredocs(body, read_line)?;
+    }
     for cmd in &mut stages[call..] {
         resolve_command_heredocs(cmd, read_line)?;
     }

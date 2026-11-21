@@ -1,0 +1,11 @@
+status: 0
+stderr: empty
+--- stdout
+while:a
+while:b
+for:one:a
+for:two:b
+if:a
+case:a
+group:a
+subshell:a

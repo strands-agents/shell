@@ -1,0 +1,8 @@
+status: 0
+stderr: empty
+--- stdout
+a
+after:1
+after:1
+w:b
+after:1

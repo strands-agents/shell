@@ -1,0 +1,16 @@
+status: 0
+stderr: empty
+--- stdout
+w:one
+r:two
+three
+four
+a
+p q
+y=0
+pf:1
+f:in
+cond
+ml:a
+a
+redir:0
