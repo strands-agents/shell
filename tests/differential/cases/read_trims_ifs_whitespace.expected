@@ -1,0 +1,13 @@
+status: 0
+stderr: empty
+--- stdout
+[a b]
+[a][b]
+[a][b  c]
+eq
+[]
+[a]
+[a][b]
+[  a b  ]
+[  a b  ]
+[	a	]
