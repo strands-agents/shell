@@ -14,7 +14,7 @@ pub fn builtin_echo<'a>(
     Box::pin(async move {
         let mut start = 0;
         let mut newline = true;
-        let mut escapes = true;
+        let mut escapes = Some(Escapes::PlainEcho);
 
         // Like bash, leading words made only of the letters n, e and E are
         // options; anything else (e.g. `-x`, `--`, `-`) is printed literally.
@@ -25,8 +25,8 @@ pub fn builtin_echo<'a>(
             for c in flags.chars() {
                 match c {
                     'n' => newline = false,
-                    'e' => escapes = true,
-                    _ => escapes = false,
+                    'e' => escapes = Some(Escapes::Echo),
+                    _ => escapes = None,
                 }
             }
             start += 1;
@@ -34,8 +34,8 @@ pub fn builtin_echo<'a>(
 
         let text = args[start..].join(" ");
         let mut out = Out::default();
-        if escapes {
-            if escape_all(&text, Escapes::Echo, &mut out) {
+        if let Some(mode) = escapes {
+            if escape_all(&text, mode, &mut out) {
                 newline = false;
             }
         } else {

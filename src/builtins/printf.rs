@@ -25,7 +25,7 @@ pub fn builtin_printf<'a>(
     })
 }
 
-/// printf and `echo -e` output: raw bytes, since `\xHH` and octal escapes
+/// printf and echo output: raw bytes, since `\xHH` and octal escapes
 /// can emit bytes that are not valid UTF-8.
 #[derive(Default)]
 pub(crate) struct Out(pub(crate) Vec<u8>);
@@ -378,6 +378,10 @@ pub(crate) enum Escapes {
     B,
     /// `echo -e`: like `%b`, but an octal escape must start with `\0`.
     Echo,
+    /// `echo` with neither `-e` nor `-E`: like `Echo`, but `\x`, `\u`,
+    /// `\U`, `\e` and `\E` stay literal. bash expands nothing here; this
+    /// keeps the escapes plain echo expanded before #336.
+    PlainEcho,
 }
 
 /// Expand every backslash escape in `s`. Returns true on `\c`.
@@ -408,15 +412,16 @@ fn escape(chars: &mut Peekable<Chars<'_>>, mode: Escapes, out: &mut Out) -> bool
         'b' => out.push('\x08'),
         'f' => out.push('\x0c'),
         'v' => out.push('\x0b'),
-        'e' | 'E' => out.push('\x1b'),
+        'e' | 'E' if mode != Escapes::PlainEcho => out.push('\x1b'),
         '\\' => out.push('\\'),
         'c' if mode != Escapes::Format => return true,
-        '0'..='7' if mode != Escapes::Echo || c == '0' => {
+        '0'..='7' if c == '0' || matches!(mode, Escapes::Format | Escapes::B) => {
             let mut val = c as u32 - '0' as u32;
-            let more = if mode != Escapes::Format && c == '0' {
-                3
-            } else {
+            // `\0` in `%b` and echo takes up to three more digits.
+            let more = if mode == Escapes::Format || c != '0' {
                 2
+            } else {
+                3
             };
             for _ in 0..more {
                 match chars.peek().and_then(|d| d.to_digit(8)) {
@@ -429,7 +434,7 @@ fn escape(chars: &mut Peekable<Chars<'_>>, mode: Escapes, out: &mut Out) -> bool
             }
             out.0.push(val as u8); // bash keeps the low byte: `\400` is NUL
         }
-        'x' | 'u' | 'U' => {
+        'x' | 'u' | 'U' if mode != Escapes::PlainEcho => {
             let max = match c {
                 'x' => 2,
                 'u' => 4,
