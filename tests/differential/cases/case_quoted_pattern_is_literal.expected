@@ -1,0 +1,14 @@
+status: 0
+stderr: empty
+--- stdout
+nomatch
+nomatch
+nomatch
+unquoted-var-globs
+same
+literal-star
+mixed-nomatch
+mixed-prefix
+backslash
+sub: nomatch
+sub: same
