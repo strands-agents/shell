@@ -650,13 +650,21 @@ fn curl_protocol_relative_redirect_respects_proto_redir() {
             .build()
             .unwrap();
 
-        for path in ["redirect", "chain"] {
-            let out = shell
-                .run(&format!("curl -sSL --proto-redir '=https' {source}/{path}"))
-                .await;
-            assert_eq!(out.status, 1, "{path}: {}", out.stderr);
-            assert!(out.stderr.contains("Protocol \"http\" disabled"));
-        }
+        // `-v` names the resolved hop, so this fails if `//host` is not resolved to the target.
+        // Only `/redirect`: `--proto-redir` refuses `/chain` at its first, same-host hop.
+        let out = shell
+            .run(&format!(
+                "curl -sSLv --proto-redir '=https' {source}/redirect"
+            ))
+            .await;
+        assert_eq!(out.status, 1, "{}", out.stderr);
+        let hop = format!("Redirecting to {target}/hello");
+        assert!(out.stderr.contains(&hop), "{}", out.stderr);
+        assert!(
+            out.stderr.contains("Protocol \"http\" disabled"),
+            "{}",
+            out.stderr
+        );
     }));
 }
 
