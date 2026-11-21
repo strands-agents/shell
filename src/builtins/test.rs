@@ -10,11 +10,19 @@ pub fn builtin_test<'a>(
     args: &'a [String],
 ) -> Pin<Box<dyn Future<Output = CommandResult> + 'a>> {
     Box::pin(async move {
-        let args = if !args.is_empty() && args[args.len() - 1] == "]" {
+        let bracket = args.last().is_some_and(|a| a == "]");
+        let name = if bracket { "[" } else { "test" };
+        let args = if bracket {
             &args[..args.len() - 1]
         } else {
             args
         };
+        if let Some(operand) = missing_unary_operator(args) {
+            proc.err_msg(&format!(
+                "strands-shell: {name}: {operand}: unary operator expected"
+            ));
+            return Ok(2);
+        }
         if let [left, op, right] = args
             && matches!(op.as_str(), "-a" | "-o")
         {
@@ -26,10 +34,47 @@ pub fn builtin_test<'a>(
             };
             return Ok(if result { 0 } else { 1 });
         }
+        // With three arguments a binary operator in the middle wins, even
+        // when the left operand is `!` or `(`. Integer operators go through
+        // the parser, since `!` and `(` are never integers.
+        if let [left, op, right] = args
+            && is_binary_op(op)
+            && !matches!(op.as_str(), "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge")
+        {
+            let result = eval_binary(left, op, right, os, proc).await;
+            return Ok(if result { 0 } else { 1 });
+        }
         let mut pos = 0;
         let result = parse_or(args, &mut pos, os, proc).await;
+        // Words left over, such as a binary operator with no right operand.
+        // The parser also stops after an operator it does not implement, which
+        // stays a quiet false as before.
+        if pos < args.len() && !is_unsupported_unary_op(&args[pos - 1]) {
+            proc.err_msg(&format!("strands-shell: {name}: too many arguments"));
+            return Ok(2);
+        }
         Ok(if result && pos == args.len() { 0 } else { 1 })
     })
+}
+
+/// Bash reads two arguments as a unary operator and its operand, so a first
+/// word that is not one, as in `[ x = ]`, is a usage error. Returns that word.
+/// Also covers the same pair after a leading `!`.
+fn missing_unary_operator(args: &[String]) -> Option<&str> {
+    match args {
+        [bang, first, _] if bang == "!" && !is_binary_op(first) => {
+            missing_unary_operator(&args[1..])
+        }
+        [first, _] if first != "!" && !is_unary_op(first) && !is_unsupported_unary_op(first) => {
+            Some(first.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// Unary operators bash knows but this shell does not implement.
+fn is_unsupported_unary_op(s: &str) -> bool {
+    matches!(s, "-v" | "-R" | "-N" | "-o")
 }
 
 fn parse_or<'a>(
