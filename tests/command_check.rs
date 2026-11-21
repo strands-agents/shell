@@ -1040,3 +1040,14 @@ fn command_in_a_pipeline_stage_honors_a_refusal_of_the_command_it_runs() {
         assert!(ran.lock().unwrap().is_empty());
     });
 }
+
+#[test]
+fn a_refused_command_stage_stops_the_pipeline_before_any_stage_runs() {
+    block_on(async {
+        let (mut shell, _, ran) = fallback_shell(true, &["tool"]);
+        let out = shell.run("touch /tmp/first | command tool a").await;
+        assert_eq!(out.status, 126);
+        assert!(ran.lock().unwrap().is_empty());
+        assert_eq!(shell.run("test -e /tmp/first").await.status, 1);
+    });
+}

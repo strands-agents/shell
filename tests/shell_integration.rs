@@ -14501,6 +14501,33 @@ shell_test!(
     }
 );
 
+// #323: a single command that reaches `eval` or `.` through `command` or an expansion
+// either works or fails. It never reports success after discarding the effect.
+shell_test!(
+    command_eval_on_its_own_does_not_silently_discard_its_effect,
+    "command eval 'x=1'; echo \"rc=$? x=[$x]\"",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert!(
+            out.stdout == "rc=0 x=[1]\n" || !out.stdout.starts_with("rc=0"),
+            "stdout: {}",
+            out.stdout
+        );
+    }
+);
+
+shell_test!(
+    an_expanded_source_does_not_silently_discard_its_effect,
+    "echo 'VAR=loaded' > /tmp/env323.sh; run() { \"$@\"; }; run source /tmp/env323.sh; \
+     echo \"rc=$? VAR=[$VAR]\"",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert!(
+            out.stdout == "rc=0 VAR=[loaded]\n" || !out.stdout.starts_with("rc=0"),
+            "stdout: {}",
+            out.stdout
+        );
+    }
+);
+
 shell_test!(
     a_file_test_on_an_empty_path_is_false,
     "e=; for op in -a -b -c -d -e -f -g -h -k -L -p -r -s -S -u -w -x -O -G; do \

@@ -14,3 +14,7 @@ exit=3
 return=4
 loop 1
 loop 2
+a
+*
+cleanup
+rc=3

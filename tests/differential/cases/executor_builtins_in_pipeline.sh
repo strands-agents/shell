@@ -12,3 +12,6 @@ echo "exit=$?"
 f() { echo | return 4; echo "return=$?"; }
 f
 for i in 1 2; do echo | break; echo "loop $i"; done
+set -- a b; echo | eval 'echo $1'
+touch a.txt b.txt; echo | command echo '*'
+(exit() { echo cleanup; builtin exit "$@"; }; echo | exit 3; echo "rc=$?")
