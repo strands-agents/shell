@@ -8993,6 +8993,72 @@ fn bind_direct_readlink_does_not_follow_a_directory_out_of_the_bind() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn bind_direct_test_h_sees_symlinks() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_test_h");
+        std::fs::create_dir(dir.join("d")).unwrap();
+        std::fs::write(dir.join("f"), "x").unwrap();
+        std::os::unix::fs::symlink("d", dir.join("ld")).unwrap();
+        std::os::unix::fs::symlink("f", dir.join("lf")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        for (expr, status) in [
+            ("test -L /b/ld", 0),
+            ("[ -h /b/ld ]", 0),
+            ("test -L /b/lf", 0),
+            ("cd /b && [ -h ld ]", 0),
+            ("test -L /b/d", 1),
+            ("[ -h /b/f ]", 1),
+            ("test -L /b", 1),
+            ("[ -d /b/ld ]", 0),
+        ] {
+            let out = shell.run(expr).await;
+            assert_eq!(out.status, status, "{expr}: {}", out.stderr);
+        }
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_rm_removes_symlinks_not_their_targets() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_rm_symlink");
+        std::fs::create_dir_all(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/keep"), "keep").unwrap();
+        std::fs::create_dir(dir.join("w")).unwrap();
+        std::os::unix::fs::symlink("../d", dir.join("w/l")).unwrap();
+        std::fs::write(dir.join("f"), "f").unwrap();
+        std::os::unix::fs::symlink("f", dir.join("lf")).unwrap();
+        std::fs::create_dir(dir.join("e")).unwrap();
+        std::os::unix::fs::symlink("e", dir.join("le")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+
+        let out = shell.run("rm -r /b/w").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert!(!dir.join("w").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("d/keep")).unwrap(), "keep");
+
+        let out = shell.run("rm /b/lf").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert!(dir.join("lf").symlink_metadata().is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("f")).unwrap(), "f");
+
+        let out = shell.run("rmdir /b/le").await;
+        assert_ne!(out.status, 0);
+        assert!(dir.join("e").is_dir());
+        assert!(dir.join("le").symlink_metadata().is_ok());
+    }));
+}
+
 #[cfg(windows)]
 #[test]
 fn bind_direct_readlink_reads_only_one_host_name_on_windows() {
