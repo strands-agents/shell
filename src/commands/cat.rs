@@ -55,10 +55,23 @@ async fn cmd_cat(os: &dyn Kernel, args: &[String]) -> CommandResult {
         }
         return Ok(0);
     }
+    // Like GNU, report each file that can't be opened and go on with the
+    // rest. Stderr is taken once, on the first failure.
+    let mut ew = None;
     for path in &files {
-        let fd = io::open(os, path, OpenFlags::read()).await?;
+        let fd = match io::open(os, path, OpenFlags::read()).await {
+            Ok(fd) => fd,
+            Err(e) => {
+                if ew.is_none() {
+                    ew = Some(io::stderr()?);
+                }
+                let ew = ew.as_mut().expect("stderr was just taken");
+                wprintln!(ew, "strands-shell: cat: {}", e)?;
+                continue;
+            }
+        };
         let mut r = io::take_reader(fd)?;
         cat_stream(&mut r, &mut w, number, &mut lineno).await?;
     }
-    Ok(0)
+    Ok(i32::from(ew.is_some()))
 }
