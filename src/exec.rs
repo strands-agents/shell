@@ -3138,11 +3138,15 @@ fn glob_bracket(pat: &[u8], start: usize, ch: u8) -> Option<(bool, usize)> {
     None // no closing ]
 }
 
-/// A builtin that runs shell code in the current shell.
+/// A builtin that runs in the current shell, handled before normal dispatch.
 #[derive(Clone, Copy)]
 enum Special {
     Eval,
     Source,
+    /// `command -v` (`verbose: false`) or `command -V` (`verbose: true`).
+    CommandLookup {
+        verbose: bool,
+    },
 }
 
 async fn run_special(
@@ -3152,6 +3156,35 @@ async fn run_special(
     args: Vec<String>,
 ) -> Result<i32, ControlFlow> {
     match special {
+        Special::CommandLookup { verbose } => {
+            let mut status = 0;
+            for name in &args {
+                match lookup_command(&*os, proc, name, true).await {
+                    Some(CommandLookup::Builtin) => {
+                        if verbose {
+                            let label = if is_special(name) {
+                                "a special shell builtin"
+                            } else {
+                                "a shell builtin"
+                            };
+                            proc.out_msg(&format!("{name} is {label}"));
+                        } else {
+                            proc.out_msg(name);
+                        }
+                    }
+                    Some(CommandLookup::Function) => {
+                        if verbose {
+                            proc.out_msg(&format!("{name} is a shell function"));
+                        } else {
+                            proc.out_msg(name);
+                        }
+                    }
+                    Some(CommandLookup::Path(path)) => proc.out_msg(&path),
+                    None => status = 1,
+                }
+            }
+            Ok(status)
+        }
         Special::Eval => {
             let code = args.join(" ");
             if code.is_empty() {
@@ -3213,7 +3246,7 @@ async fn run_special(
     }
 }
 
-/// Run `eval` or `source` in the current shell with the command's redirections.
+/// Run a [`Special`] builtin in the current shell with the command's redirections.
 async fn run_special_redirected(
     os: Arc<dyn Kernel>,
     proc: &mut Process,
@@ -3514,33 +3547,10 @@ async fn execute_pipeline_checked(
                         || args.first().map(|s| s.as_str()) == Some("-V")
                     {
                         let verbose = args[0] == "-V";
-                        let mut status = 0;
-                        for name in &args[1..] {
-                            match lookup_command(&*os, proc, name, true).await {
-                                Some(CommandLookup::Builtin) => {
-                                    if verbose {
-                                        let label = if is_special(name) {
-                                            "a special shell builtin"
-                                        } else {
-                                            "a shell builtin"
-                                        };
-                                        proc.out_msg(&format!("{name} is {label}"));
-                                    } else {
-                                        proc.out_msg(name);
-                                    }
-                                }
-                                Some(CommandLookup::Function) => {
-                                    if verbose {
-                                        proc.out_msg(&format!("{name} is a shell function"));
-                                    } else {
-                                        proc.out_msg(name);
-                                    }
-                                }
-                                Some(CommandLookup::Path(path)) => proc.out_msg(&path),
-                                None => status = 1,
-                            }
-                        }
-                        return Ok(status);
+                        let names = args[1..].to_vec();
+                        let special = Special::CommandLookup { verbose };
+                        return run_special_redirected(os, proc, &pipeline[0], special, names)
+                            .await;
                     }
                     // `command name args...` — run name bypassing functions
                     let fake_cmd = parser::Command {
