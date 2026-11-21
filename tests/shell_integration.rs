@@ -6220,6 +6220,44 @@ fn timeout_in_substitution_reports_once_and_stops_the_list() {
     }
 }
 
+// A command substitution that starts after the deadline reports the timeout,
+// not the recursion limit, and only once (#260).
+#[test]
+fn substitution_after_the_deadline_reports_the_timeout_not_recursion() {
+    for command in [
+        "echo $(sleep 5) $(echo second)",
+        "echo \"$(sleep 5)\" \"$(echo second)\"",
+        "x=$(sleep 5) y=$(echo second)",
+        "exec echo hi $(sleep 5) $(echo second)",
+        "for i in $(sleep 5) $(echo second); do echo $i; done",
+    ] {
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert_eq!(out.status, 1, "{command}: stderr={:?}", out.stderr);
+            assert_eq!(out.stdout, "", "{command}: the command ran");
+            assert!(
+                !out.stderr.contains("recursion"),
+                "{command}: stderr={:?}",
+                out.stderr
+            );
+            assert_eq!(
+                out.stderr
+                    .lines()
+                    .filter(|line| *line == "strands-shell: execution timeout exceeded")
+                    .count(),
+                1,
+                "{command}: stderr={:?}",
+                out.stderr
+            );
+        }));
+    }
+}
+
 // A command substitution that ends in time still lets its command run.
 #[test]
 fn substitution_within_timeout_runs_the_command() {
