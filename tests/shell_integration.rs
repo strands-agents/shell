@@ -4854,6 +4854,50 @@ expect!(
     "0\ngone\nf"
 );
 
+// ── cat and mkdir keep going past a failing operand (#335) ──────────
+
+expect_output!(
+    cat_reports_each_failing_operand_and_exits_one,
+    "echo body > f; cat missing f nope",
+    "body\n",
+    "strands-shell: cat: no such file or directory: /home/lash/missing\n\
+     strands-shell: cat: no such file or directory: /home/lash/nope\n",
+    1
+);
+expect_output!(
+    mkdir_reports_each_failing_operand_and_creates_the_rest,
+    "mkdir nodir/a b other/c; echo $?; ls",
+    "1\nb\n",
+    "strands-shell: mkdir: no such file or directory: /home/lash/nodir\n\
+     strands-shell: mkdir: no such file or directory: /home/lash/other\n",
+    0
+);
+expect_output!(
+    cat_reports_a_read_error_after_an_open_error_and_goes_on,
+    "printf '\\377\\376\\n' > bin; echo ok > t; cat -n missing bin t",
+    "     1\tok\n",
+    "strands-shell: cat: no such file or directory: /home/lash/missing\n\
+     strands-shell: cat: invalid utf-8 sequence of 1 bytes from index 0\n",
+    1
+);
+
+#[test]
+fn cat_reports_a_write_error_after_an_open_error_and_stops() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().max_file_size(10).build().unwrap();
+        let out = shell
+            .run("printf 1234 > s; cat missing s s s nope > out; echo $?; cat out")
+            .await;
+        assert_eq!(out.stdout, "1\n12341234");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: cat: no such file or directory: /home/lash/missing\n\
+             strands-shell: cat: file size limit exceeded\n"
+        );
+    }));
+}
+
 // ── head coverage ───────────────────────────────────────────────────
 
 expect!(
