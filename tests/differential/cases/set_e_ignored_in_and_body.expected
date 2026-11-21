@@ -1,0 +1,12 @@
+status: 0
+stderr: empty
+--- stdout
+in-f
+ok-f
+in-g
+ok-g
+in-s
+ok-s
+in-e
+ok-e
+after

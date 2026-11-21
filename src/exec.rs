@@ -1964,6 +1964,12 @@ async fn run_capturing_status(
                 proc.err_msg(msg);
                 return (output, Err(ControlFlow::Exit(1)));
             }
+            // A left side of && or || ignores errexit throughout its body.
+            let ignored = u32::from(matches!(
+                connector,
+                Some(Connector::And) | Some(Connector::Or)
+            ));
+            proc.errexit_ignored += ignored;
             let (exit, out) = match item {
                 Item::Pipeline(pipeline, negated) if is_control_flow(pipeline) => {
                     match execute_captured_control_flow(os.clone(), proc, pipeline).await {
@@ -2197,6 +2203,7 @@ async fn run_capturing_status(
                     proc.close(STDIN);
                     give_stdin(proc, saved_stdin);
                     if let Err(flow) = stop_at_deadline(proc) {
+                        proc.errexit_ignored -= ignored;
                         output.push_str(&out);
                         return (output, Err(flow));
                     }
@@ -2228,6 +2235,7 @@ async fn run_capturing_status(
                         expanded.push((redir.clone(), target));
                     }
                     if let Some(msg) = proc.check_limits() {
+                        proc.errexit_ignored -= ignored;
                         proc.err_msg(msg);
                         return (output, Err(ControlFlow::Exit(1)));
                     }
@@ -2289,6 +2297,7 @@ async fn run_capturing_status(
                     }
                 }
             };
+            proc.errexit_ignored -= ignored;
             last_exit = exit;
             proc.last_exit = exit;
             output.push_str(&out);
@@ -2358,13 +2367,20 @@ async fn execute_command_line_inner(
 
             // Determine if this item is in a "tested" context (suppresses errexit).
             // Tested = followed by && or ||, or inverted by `!`.
-            let tested = matches!(connector, Some(Connector::And) | Some(Connector::Or))
+            let and_or = matches!(connector, Some(Connector::And) | Some(Connector::Or));
+            let tested = and_or
                 || matches!(
                     item,
                     Item::Pipeline(_, true) | Item::CompoundPipeline { negated: true, .. }
                 );
 
-            last_exit = execute_item(os.clone(), proc, item).await?;
+            // Like `!`, a left side of && or || ignores errexit throughout its
+            // body, including function, group and eval bodies it runs.
+            let ignored = u32::from(and_or);
+            proc.errexit_ignored += ignored;
+            let result = execute_item(os.clone(), proc, item).await;
+            proc.errexit_ignored -= ignored;
+            last_exit = result?;
             proc.last_exit = last_exit;
             if last_exit == 0
                 && let Some(msg) = proc.check_limits()
@@ -4217,6 +4233,8 @@ async fn run_pipeline(
                 state_proc.arg0 = name.clone();
                 // A child shell starts with only the exported variables.
                 state_proc.keep_exported_only();
+                // A tested context around `sh` doesn't reach the child's own `set -e`.
+                state_proc.errexit_ignored = 0;
             }
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
