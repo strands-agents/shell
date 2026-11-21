@@ -35,9 +35,11 @@ pub fn builtin_test<'a>(
             return Ok(if result { 0 } else { 1 });
         }
         // With three arguments a binary operator in the middle wins, even
-        // when the left operand is `!` or `(`.
+        // when the left operand is `!` or `(`. Integer operators go through
+        // the parser, since `!` and `(` are never integers.
         if let [left, op, right] = args
             && is_binary_op(op)
+            && !matches!(op.as_str(), "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge")
         {
             let result = eval_binary(left, op, right, os, proc).await;
             return Ok(if result { 0 } else { 1 });
