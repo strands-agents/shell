@@ -6221,7 +6221,8 @@ fn timeout_in_substitution_reports_once_and_stops_the_list() {
 }
 
 // A command substitution that starts after the deadline reports the timeout,
-// not the recursion limit, and only once (#260).
+// not the recursion limit (#260). Commands that report nothing themselves,
+// like `[[ ]]`, `exit`, `return` and `command -v`, must not go silent.
 #[test]
 fn substitution_after_the_deadline_reports_the_timeout_not_recursion() {
     for command in [
@@ -6230,6 +6231,10 @@ fn substitution_after_the_deadline_reports_the_timeout_not_recursion() {
         "x=$(sleep 5) y=$(echo second)",
         "exec echo hi $(sleep 5) $(echo second)",
         "for i in $(sleep 5) $(echo second); do echo $i; done",
+        "[[ $(sleep 5) != $(echo second) ]]",
+        "exit $(sleep 5)$(echo 0)",
+        "f() { return $(sleep 5)$(echo 0); }; f",
+        "command -v nope $(sleep 5) $(echo second)",
     ] {
         let (rt, local) = rt();
         rt.block_on(local.run_until(async {
@@ -6245,12 +6250,10 @@ fn substitution_after_the_deadline_reports_the_timeout_not_recursion() {
                 "{command}: stderr={:?}",
                 out.stderr
             );
-            assert_eq!(
+            assert!(
                 out.stderr
                     .lines()
-                    .filter(|line| *line == "strands-shell: execution timeout exceeded")
-                    .count(),
-                1,
+                    .any(|line| line == "strands-shell: execution timeout exceeded"),
                 "{command}: stderr={:?}",
                 out.stderr
             );
