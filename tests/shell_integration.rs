@@ -4872,6 +4872,31 @@ expect_output!(
      strands-shell: mkdir: no such file or directory: /home/lash/other\n",
     0
 );
+expect_output!(
+    cat_reports_a_read_error_after_an_open_error_and_goes_on,
+    "printf '\\377\\376\\n' > bin; echo ok > t; cat -n missing bin t",
+    "     1\tok\n",
+    "strands-shell: cat: no such file or directory: /home/lash/missing\n\
+     strands-shell: cat: invalid utf-8 sequence of 1 bytes from index 0\n",
+    1
+);
+
+#[test]
+fn cat_reports_a_write_error_after_an_open_error_and_stops() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().max_file_size(10).build().unwrap();
+        let out = shell
+            .run("printf 1234 > s; cat missing s s s nope > out; echo $?; cat out")
+            .await;
+        assert_eq!(out.stdout, "1\n12341234");
+        assert_eq!(
+            out.stderr,
+            "strands-shell: cat: no such file or directory: /home/lash/missing\n\
+             strands-shell: cat: file size limit exceeded\n"
+        );
+    }));
+}
 
 // ── head coverage ───────────────────────────────────────────────────
 
