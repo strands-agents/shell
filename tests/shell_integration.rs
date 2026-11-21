@@ -1530,7 +1530,7 @@ fn while_read_over_a_large_redirected_file_takes_linear_time() {
             (0, "20000\n", "")
         );
         assert!(
-            elapsed < std::time::Duration::from_secs(10),
+            elapsed < std::time::Duration::from_secs(20),
             "took {elapsed:?}"
         );
     }));

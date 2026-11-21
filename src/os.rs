@@ -175,7 +175,8 @@ impl OpenFlags {
 pub enum FdKind {
     ChannelReader {
         rx: mpsc::Receiver<Bytes>,
-        buf: Vec<u8>,
+        /// Bytes received but not read yet. A `Bytes`, so taking from the front is cheap.
+        buf: Bytes,
     },
     ChannelWriter {
         tx: mpsc::Sender<Bytes>,
@@ -642,7 +643,7 @@ impl Process {
             fd,
             FdKind::ChannelReader {
                 rx,
-                buf: Vec::new(),
+                buf: Bytes::new(),
             },
         );
     }
@@ -1143,7 +1144,7 @@ impl FdReader {
         Self {
             kind: FdKind::ChannelReader {
                 rx,
-                buf: Vec::new(),
+                buf: Bytes::new(),
             },
             done: false,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1188,8 +1189,7 @@ impl AsyncRead for FdReader {
                 }
                 if !remainder.is_empty() {
                     let n = remainder.len().min(buf.remaining());
-                    buf.put_slice(&remainder[..n]);
-                    remainder.drain(..n);
+                    buf.put_slice(&remainder.split_to(n));
                     return Poll::Ready(Ok(()));
                 }
                 match rx.poll_recv(cx) {
@@ -1197,7 +1197,7 @@ impl AsyncRead for FdReader {
                         let n = bytes.len().min(buf.remaining());
                         buf.put_slice(&bytes[..n]);
                         if n < bytes.len() {
-                            remainder.extend_from_slice(&bytes[n..]);
+                            *remainder = bytes.slice(n..);
                         }
                         Poll::Ready(Ok(()))
                     }
