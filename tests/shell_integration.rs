@@ -3138,6 +3138,53 @@ fn compound_pipe_stderr_from_cli() {
     assert!(out.status.success());
 }
 
+/// Runs `script` through the CLI binary and returns its stdout (#383).
+fn compound_pipe_into_function_cli(name: &str, script: &str) -> String {
+    let dir = TestDir::new(name);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg(script)
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+// In process, since a function call inside `$( )` overflows the 1 MiB main
+// thread stack of a Windows debug build of the CLI.
+#[test]
+fn compound_pipe_into_function_in_substitution_from_execute() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .execute("g() { cat; }; x=$( { echo a; } | g ); y=$( (echo b) | g )")
+            .await;
+        let out = shell.run("echo \"[$x][$y]\"").await;
+        assert_eq!(out.stdout, "[a][b]\n");
+    }));
+}
+
+#[test]
+fn compound_pipe_into_function_redirected_from_cli() {
+    let out = compound_pipe_into_function_cli(
+        "compound_pipe_fn_redirect_cli",
+        "g() { cat; }; { { echo a; } | g; } > f; echo \"file:$(cat f)\"",
+    );
+    assert_eq!(out, "file:a\n");
+}
+
+#[test]
+fn compound_pipe_into_function_piped_from_cli() {
+    let out = compound_pipe_into_function_cli(
+        "compound_pipe_fn_pipe_cli",
+        "g() { cat; }; { echo a; } | g | cat; for i in 1 2; do { echo $i; } | g; done | tr 12 xy",
+    );
+    assert_eq!(out, "a\nx\ny\n");
+}
+
 // ── Subshell stderr in captured paths ───────────────────────────────
 
 expect_streams!(subshell_stderr_plain, "( echo e >&2 )", "", "e\n");
@@ -13941,6 +13988,12 @@ expect_writers!(
     group_stderr_to_file_leaves_stdout_on_writer,
     "{ echo out; ls /nope; } 2>/tmp/group_err.txt; grep -c nope /tmp/group_err.txt",
     "out\n1\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
+    writer_receives_function_piped_from_group_in_order,
+    "g() { cat; }; { echo m1; { echo a; } | g; echo m2; } 2>/dev/null",
+    "m1\na\nm2\n",
     |stderr: &str| assert_eq!(stderr, "")
 );
 expect_writers!(

@@ -1,0 +1,8 @@
+status: 0
+stderr: empty
+--- stdout
+[a]
+file:b
+x
+y
+[c]

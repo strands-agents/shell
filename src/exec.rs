@@ -2190,7 +2190,18 @@ async fn run_capturing_status(
                     tasks.own(&handle);
                     let saved_stdin = take_stdin(proc);
                     proc.set_channel_reader(STDIN, rx);
-                    let (mut exit, out) = execute_pipeline_capture(os.clone(), proc, tail).await;
+                    // Capture the tail like `capture_pipeline_checked`, so a function call
+                    // there can't write past the enclosing `$( )`, redirect or pipe.
+                    let saved_capture = std::mem::replace(&mut proc.capture, true);
+                    let saved_output = std::mem::take(&mut proc.captured_output);
+                    let mut saved_stdout = Process::empty();
+                    proc.transfer_fd(STDOUT, &mut saved_stdout);
+                    let (mut exit, mut out) =
+                        Box::pin(execute_pipeline_capture(os.clone(), proc, tail)).await;
+                    proc.capture = saved_capture;
+                    proc.close(STDOUT);
+                    saved_stdout.transfer_fd(STDOUT, proc);
+                    out.push_str(&std::mem::replace(&mut proc.captured_output, saved_output));
                     // The tail is a pipeline stage, so `exit` in it ends only that stage.
                     proc.pending_exit = false;
                     let _ = handle.await;
