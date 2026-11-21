@@ -987,6 +987,9 @@ fn tokenize_source(input: &str, more_input: bool) -> Result<(Vec<Token>, Vec<Str
                             if matches!(
                                 w.as_str(),
                                 "in" | "do" | "then" | "else" | "elif" | "{" | "!"
+                            ) && !matches!(
+                                tokens.iter().rev().nth(1),
+                                Some(Token::HereDoc | Token::HereDocStrip)
                             ) => {}
                         _ => tokens.push(Token::Semi),
                     }
