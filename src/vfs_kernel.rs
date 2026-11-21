@@ -133,6 +133,17 @@ impl VfsKernel {
         Some((host_parent.join(leaf), ro))
     }
 
+    /// The host path of `abs_path` when its last component is a host symlink, which
+    /// `resolve_host` would follow.
+    fn resolve_host_symlink(
+        vfs: &Vfs,
+        abs_path: &str,
+    ) -> Option<(PathBuf, bool, std::fs::Metadata)> {
+        let (host_path, ro) = Self::resolve_host_nofollow(vfs, abs_path)?;
+        let meta = std::fs::symlink_metadata(&host_path).ok()?;
+        meta.is_symlink().then_some((host_path, ro, meta))
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     async fn open_host(
         &self,
@@ -528,6 +539,9 @@ impl Kernel for VfsKernel {
         };
         let vfs = self.vfs.lock().await;
 
+        if let Some((_, _, meta)) = Self::resolve_host_symlink(&vfs, &abs) {
+            return host_symlink_stat(&meta);
+        }
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
             #[cfg(not(target_arch = "wasm32"))]
@@ -643,7 +657,11 @@ impl Kernel for VfsKernel {
     async fn remove_file(&self, proc: &Process, path: &str) -> io::Result<()> {
         let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
-        if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
+        // Act on a host symlink itself, not on the target `resolve_host` follows it to.
+        let host = Self::resolve_host_symlink(&vfs, &abs)
+            .map(|(host_path, ro, _)| (host_path, ro))
+            .or_else(|| Self::resolve_host(&vfs, &abs).map(|(host_path, ro, _)| (host_path, ro)));
+        if let Some((host_path, ro)) = host {
             drop(vfs);
             if ro {
                 return Err(io::Error::new(
@@ -661,7 +679,11 @@ impl Kernel for VfsKernel {
     async fn remove_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
         let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
-        if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
+        // Act on a host symlink itself, not on the target `resolve_host` follows it to.
+        let host = Self::resolve_host_symlink(&vfs, &abs)
+            .map(|(host_path, ro, _)| (host_path, ro))
+            .or_else(|| Self::resolve_host(&vfs, &abs).map(|(host_path, ro, _)| (host_path, ro)));
+        if let Some((host_path, ro)) = host {
             drop(vfs);
             if ro {
                 return Err(io::Error::new(
@@ -1222,6 +1244,29 @@ fn host_set_permissions(_path: &std::path::Path, _mode: u32) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "chmod is not supported on this host",
     ))
+}
+
+/// The `FileStat` of a host symlink itself, from its `symlink_metadata`.
+fn host_symlink_stat(meta: &std::fs::Metadata) -> FileStat {
+    FileStat {
+        exists: true,
+        is_symlink: true,
+        len: meta.len(),
+        mode: {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                meta.mode()
+            }
+            #[cfg(not(unix))]
+            {
+                0o120777
+            }
+        },
+        modified: meta.modified().ok(),
+        accessed: meta.accessed().ok(),
+        ..FileStat::default()
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
