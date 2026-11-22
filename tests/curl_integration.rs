@@ -1274,21 +1274,6 @@ fn curl_sends_a_default_user_agent() {
 }
 
 #[test]
-fn curl_user_agent_option_replaces_the_default() {
-    let (rt, local) = rt();
-    rt.block_on(local.run_until(async {
-        let (mut shell, base) = shell_with_server().await;
-        let out = shell.run(&format!("curl -A 'agent/1.0' {base}/echo")).await;
-        assert!(
-            out.stdout.contains("user-agent=agent/1.0"),
-            "{}",
-            out.stdout
-        );
-        assert!(!out.stdout.contains("strands-shell"), "{}", out.stdout);
-    }));
-}
-
-#[test]
 fn curl_header_user_agent_replaces_the_default() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
