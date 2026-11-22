@@ -1256,6 +1256,11 @@ fn curl_user_agent_sets_header() {
             "{}",
             out.stdout
         );
+        let out = shell
+            .run(&format!("curl -v -A 'agent/1.0' {base}/echo"))
+            .await;
+        let sent = out.stderr.matches("> User-Agent:").count();
+        assert_eq!(sent, 1, "{}", out.stderr);
     }));
 }
 
