@@ -1,0 +1,8 @@
+status: 0
+stderr: empty
+--- stdout
+child-failed
+building
+build-failed
+building
+after

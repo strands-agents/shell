@@ -1,0 +1,14 @@
+status: 0
+stderr: empty
+--- stdout
+in-f
+then-f
+in-g
+then-g
+in-s
+then-s
+in-e
+then-e
+in-f
+in-f
+after
