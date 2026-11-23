@@ -1401,6 +1401,48 @@ fn curl_path_credential_stays_inside_its_prefix() {
     }));
 }
 
+#[test]
+fn curl_refuses_a_host_header_that_names_another_host() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let authority = base.strip_prefix("http://").unwrap();
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .credential(
+                format!("{base}/"),
+                strands_shell::CredKind::Bearer,
+                "host-token",
+            )
+            .build()
+            .unwrap();
+        for header in [
+            "Host: other.example.test",
+            "host: other.example.test",
+            "Host: 127.0.0.1:1",
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H '{header}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 1, "{header}: {}", out.stderr);
+            assert_eq!(out.stdout, "", "{header}");
+            assert!(
+                out.stderr.contains("does not name the host of the URL"),
+                "{header}: {}",
+                out.stderr
+            );
+        }
+        // A `Host` that names the URL's host goes out, with the credential.
+        let out = shell
+            .run(&format!("curl -s -H 'Host: {authority}' {base}/items"))
+            .await;
+        assert_eq!(
+            out.stdout,
+            format!("target=/items host={authority} authorization=Bearer host-token")
+        );
+    }));
+}
+
 // ── Options the Strands harness `web_fetch` tool sends ──────────────
 
 #[test]

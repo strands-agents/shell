@@ -886,6 +886,7 @@ impl Kernel for VfsKernel {
         {
             // 1. Check URL via self.check_url
             self.check_url(&req.url)?;
+            check_host_header(&req)?;
 
             // 2. Determine if URL is explicitly allowed (for SafeResolver decision)
             let url_explicitly_allowed = check_url_safe(&req.url).is_err();
@@ -978,6 +979,7 @@ impl Kernel for VfsKernel {
 
             // 1. Check URL
             self.check_url(&req.url)?;
+            check_host_header(&req)?;
 
             // 2. Parse URL
             let parsed = url::Url::parse(&req.url)
@@ -1648,6 +1650,44 @@ fn without_query(url: &str) -> &str {
     url.split(['?', '#']).next().unwrap_or(url)
 }
 
+/// Refuse a `Host` header that names another host than the URL. The SSRF guard,
+/// the allowlist, and the credential match all judge the URL's host, but a front
+/// end that serves several sites from one address picks the site by `Host`. A
+/// different `Host` would send the request, and any credential on it, to a site
+/// none of them judged.
+fn check_host_header(req: &HttpRequest) -> io::Result<()> {
+    let refused = |reason: String| io::Error::new(io::ErrorKind::PermissionDenied, reason);
+    let url = url::Url::parse(&req.url).map_err(|_| {
+        refused(format!(
+            "access denied: cannot parse host from {}",
+            without_query(&req.url)
+        ))
+    })?;
+    for (name, value) in &req.headers {
+        if name.eq_ignore_ascii_case("host") && !names_host(&url, value) {
+            return Err(refused(format!(
+                "access denied: Host header {value:?} does not name the host of the URL"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a `Host` header `value` names `url`'s host, and its port when it gives one.
+fn names_host(url: &url::Url, value: &str) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let value = value.trim();
+    // An IPv6 literal holds colons, so a port follows only the closing bracket.
+    let (name, port) = match value.rsplit_once(':') {
+        Some((name, port)) if !port.contains(']') => (name, Some(port)),
+        _ => (value, None),
+    };
+    name.eq_ignore_ascii_case(host)
+        && port.is_none_or(|port| port.parse::<u16>().ok() == url.port_or_known_default())
+}
+
 /// A reqwest error as an `io::Error`, without the URL reqwest puts in its text.
 /// That URL carries a `kind = "query"` credential, and the agent reads every
 /// error message.
@@ -1685,7 +1725,7 @@ impl reqwest::dns::Resolve for SafeResolver {
 
 #[cfg(test)]
 mod url_safety_tests {
-    use super::{check_url_safe, url_matches_prefix};
+    use super::{check_url_safe, names_host, url_matches_prefix};
 
     // A1: IPv6 literals (incl. IPv4-mapped IMDS) must be blocked by
     // `check_url_safe` ITSELF — not merely by the SafeResolver/connection
@@ -1762,6 +1802,37 @@ mod url_safety_tests {
             assert!(err.starts_with("access denied: "), "{u}: {err}");
             assert!(!err.contains("secret"), "{u}: {err}");
         }
+    }
+
+    #[test]
+    fn host_header_must_name_the_host_of_the_url() {
+        let url = |u: &str| url::Url::parse(u).unwrap();
+        let https = url("https://api.example.com/x");
+        for value in [
+            "api.example.com",
+            "API.example.com",
+            "api.example.com:443",
+            " api.example.com ",
+        ] {
+            assert!(names_host(&https, value), "{value:?}");
+        }
+        for value in [
+            "",
+            "other.example.com",
+            "api.example.com.evil.com",
+            "api.example.com:8443",
+            "api.example.com:x",
+        ] {
+            assert!(!names_host(&https, value), "{value:?}");
+        }
+        let port = url("http://127.0.0.1:8080/");
+        assert!(names_host(&port, "127.0.0.1:8080"));
+        assert!(names_host(&port, "127.0.0.1"));
+        assert!(!names_host(&port, "127.0.0.1:80"));
+        let v6 = url("http://[::1]:8080/");
+        assert!(names_host(&v6, "[::1]:8080"));
+        assert!(names_host(&v6, "[::1]"));
+        assert!(!names_host(&v6, "[::2]:8080"));
     }
 
     #[test]
