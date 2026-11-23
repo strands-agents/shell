@@ -133,6 +133,33 @@ async fn shell_with_server() -> (Shell, String) {
     (shell, base)
 }
 
+/// A server that answers every path with the request target, `Host`, and
+/// `Authorization` it received.
+async fn start_target_echo_server() -> String {
+    let app = Router::new().fallback(any(
+        |target: axum::http::Uri, headers: HeaderMap| async move {
+            let header = |name: &str| {
+                headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("none")
+                    .to_string()
+            };
+            format!(
+                "target={target} host={} authorization={}",
+                header("host"),
+                header("authorization")
+            )
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::task::spawn_local(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
 async fn start_redirect_server(location: String) -> String {
     let app = Router::new()
         .route(
@@ -1313,6 +1340,64 @@ fn curl_query_credential_stays_out_of_a_url_too_long_to_send() {
         let path = "a".repeat(70_000);
         let out = shell.run(&format!("curl -sS {base}/{path}")).await;
         assert_failed_without_secret(&out);
+    }));
+}
+
+#[test]
+fn curl_path_credential_stays_inside_its_prefix() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .credential(
+                format!("{base}/v1/projects/alpha/"),
+                strands_shell::CredKind::Bearer,
+                "alpha-token",
+            )
+            .build()
+            .unwrap();
+        let inside = shell
+            .run(&format!("curl -s {base}/v1/projects/alpha/items"))
+            .await;
+        assert!(
+            inside.stdout.ends_with("authorization=Bearer alpha-token"),
+            "{}",
+            inside.stdout
+        );
+        // Each path names a place outside `/v1/projects/alpha/`, once the client
+        // or a server that decodes `%2F` resolves its dot segments.
+        for (path, sent) in [
+            (
+                "/v1/projects/alpha/../beta/items",
+                "/v1/projects/beta/items",
+            ),
+            (
+                "/v1/projects/alpha/..\\beta/items",
+                "/v1/projects/beta/items",
+            ),
+            (
+                "/v1/projects/alpha/%2e%2e/%2e%2e/admin/keys",
+                "/v1/admin/keys",
+            ),
+            (
+                "/v1/projects/alpha/..%2Fbeta/items",
+                "/v1/projects/alpha/..%2Fbeta/items",
+            ),
+        ] {
+            let out = shell.run(&format!("curl -s '{base}{path}'")).await;
+            assert_eq!(out.status, 0, "{path}: {}", out.stderr);
+            assert!(
+                out.stdout.starts_with(&format!("target={sent} ")),
+                "{path}: {}",
+                out.stdout
+            );
+            assert!(
+                out.stdout.ends_with("authorization=none"),
+                "{path} carried the credential: {}",
+                out.stdout
+            );
+        }
     }));
 }
 

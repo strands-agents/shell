@@ -846,18 +846,18 @@ impl Kernel for VfsKernel {
     }
 
     fn resolve_credential(&self, url: &str, method: &str) -> Vec<(String, String)> {
+        // Match on the parsed URL, which is the one reqwest sends. The parser
+        // resolves `..`, `%2e%2e` and `\`, so `/alpha/../beta` is matched as
+        // `/beta`. A raw string prefix matched it against a credential for
+        // `/alpha/`, and the credential went to `/beta`. Parsed hosts also keep
+        // a credential for `api.example.com` off `api.example.com.evil.com`.
+        let Ok(parsed) = url::Url::parse(url) else {
+            return Vec::new();
+        };
         let method_upper = method.to_uppercase();
         for cred in &self.creds {
-            if !url.starts_with(&cred.url) {
+            if !url_matches_prefix(&parsed, &cred.url) || leaves_path_scope(&parsed, &cred.url) {
                 continue;
-            }
-            // Prevent prefix confusion: cred for https://api.example.com/
-            // must not match https://api.example.com.evil.com/
-            if url.len() > cred.url.len() && !cred.url.ends_with('/') {
-                let next = url.as_bytes()[cred.url.len()];
-                if next != b'/' && next != b'?' && next != b'#' {
-                    continue;
-                }
             }
             if !cred.methods.is_empty() && !cred.methods.contains(&method_upper) {
                 continue;
@@ -1443,7 +1443,8 @@ fn glob_match_chars(p: &[char], t: &[char]) -> bool {
     }
 }
 
-/// Whether a parsed request URL is covered by an allowlist `prefix` entry.
+/// Whether a parsed request URL is covered by a `prefix` entry: an allowlist
+/// URL or the URL a credential is bound to.
 ///
 /// Matches on parsed components (scheme + host + port + a path-segment prefix),
 /// never raw string prefixes — string matching is defeated by userinfo
@@ -1471,6 +1472,25 @@ fn url_matches_prefix(url: &url::Url, prefix: &str) -> bool {
     }
     let boundary = pre.strip_suffix('/').unwrap_or(pre);
     req.starts_with(boundary) && req.as_bytes().get(boundary.len()) == Some(&b'/')
+}
+
+/// Whether a server could read `url` as leaving the path of the credential bound
+/// to `prefix`. The URL parser keeps `/alpha/..%2Fbeta` as one segment under
+/// `/alpha/`, but a server that decodes `%2F` or `%5C` before it resolves dot
+/// segments serves `/beta`. A credential bound to a whole host has no path to
+/// leave.
+fn leaves_path_scope(url: &url::Url, prefix: &str) -> bool {
+    let bound_to_path = url::Url::parse(prefix).is_ok_and(|p| !matches!(p.path(), "" | "/"));
+    if !bound_to_path {
+        return false;
+    }
+    let decoded = url
+        .path()
+        .to_ascii_lowercase()
+        .replace("%2e", ".")
+        .replace("%2f", "/")
+        .replace("%5c", "/");
+    decoded.split('/').any(|segment| segment == "..")
 }
 
 /// Check if an IP address is private/loopback/link-local/IMDS.
