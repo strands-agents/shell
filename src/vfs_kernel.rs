@@ -899,7 +899,7 @@ impl Kernel for VfsKernel {
             }
             let client = builder
                 .build()
-                .map_err(|e| io::Error::other(e.to_string()))?;
+                .map_err(|e| transport_error(io::ErrorKind::Other, e))?;
 
             // 4. Build the request
             let method: reqwest::Method = req.method.parse().map_err(|_| {
@@ -924,7 +924,7 @@ impl Kernel for VfsKernel {
             let mut resp = http_req
                 .send()
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, e.to_string()))?;
+                .map_err(|e| transport_error(io::ErrorKind::ConnectionRefused, e))?;
 
             // 8. Build response
             let status = resp.status().as_u16();
@@ -945,7 +945,7 @@ impl Kernel for VfsKernel {
                 while let Some(chunk) = resp
                     .chunk()
                     .await
-                    .map_err(|e| io::Error::other(e.to_string()))?
+                    .map_err(|e| transport_error(io::ErrorKind::Other, e))?
                 {
                     if buf.len() + chunk.len() > req.max_response {
                         return Err(io::Error::other("response body too large"));
@@ -956,7 +956,7 @@ impl Kernel for VfsKernel {
             } else {
                 resp.bytes()
                     .await
-                    .map_err(|e| io::Error::other(e.to_string()))?
+                    .map_err(|e| transport_error(io::ErrorKind::Other, e))?
                     .to_vec()
             };
 
@@ -1563,7 +1563,10 @@ pub fn check_url_safe(url: &str) -> io::Result<()> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("access denied: unsupported scheme in {url}"),
+            format!(
+                "access denied: unsupported scheme in {}",
+                without_query(url)
+            ),
         ));
     }
     // Match on the parsed `url::Host` rather than `host_str()` + string parse.
@@ -1574,7 +1577,10 @@ pub fn check_url_safe(url: &str) -> io::Result<()> {
     let parsed = url::Url::parse(url).map_err(|_| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("access denied: cannot parse host from {url}"),
+            format!(
+                "access denied: cannot parse host from {}",
+                without_query(url)
+            ),
         )
     })?;
     match parsed.host() {
@@ -1606,11 +1612,28 @@ pub fn check_url_safe(url: &str) -> io::Result<()> {
         None => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!("access denied: cannot parse host from {url}"),
+                format!(
+                    "access denied: cannot parse host from {}",
+                    without_query(url)
+                ),
             ));
         }
     }
     Ok(())
+}
+
+/// `url` without its query or fragment, for an error message. A `kind = "query"`
+/// credential rides in the query, and the agent reads every error message.
+fn without_query(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
+}
+
+/// A reqwest error as an `io::Error`, without the URL reqwest puts in its text.
+/// That URL carries a `kind = "query"` credential, and the agent reads every
+/// error message.
+#[cfg(not(target_arch = "wasm32"))]
+fn transport_error(kind: io::ErrorKind, error: reqwest::Error) -> io::Error {
+    io::Error::new(kind, error.without_url().to_string())
 }
 
 /// A DNS resolver that filters out blocked IPs at resolution time,
@@ -1704,6 +1727,20 @@ mod url_safety_tests {
             "http://100.100.100.201/",    // neighbour of the Alibaba endpoint
         ] {
             assert!(check_url_safe(u).is_ok(), "{u} should be allowed");
+        }
+    }
+
+    // A `kind = "query"` credential rides in the query, so a refusal that
+    // names the URL must leave the query out.
+    #[test]
+    fn check_url_safe_refusals_leave_out_the_query() {
+        for u in [
+            "ftp://example.com/x?api_key=secret",
+            "http://[::1/?api_key=secret",
+        ] {
+            let err = check_url_safe(u).unwrap_err().to_string();
+            assert!(err.starts_with("access denied: "), "{u}: {err}");
+            assert!(!err.contains("secret"), "{u}: {err}");
         }
     }
 

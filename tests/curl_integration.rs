@@ -1224,6 +1224,98 @@ api_key = "secret"
     }));
 }
 
+/// The key of the `kind = "query"` credential in [`query_credential_shell`].
+const QUERY_SECRET: &str = "query-secret-7f3a";
+
+/// A shell that may reach `base` and adds [`QUERY_SECRET`] to every request for it.
+fn query_credential_shell(base: &str, dir: &TestDir) -> Shell {
+    let config_path = dir.join("query_cred.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[[cred]]
+url = "{base}/"
+kind = "query"
+api_key = "{QUERY_SECRET}"
+param = "api_key"
+"#
+        ),
+    )
+    .unwrap();
+    Shell::builder()
+        .allow_url(base)
+        .config_file(&config_path)
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+/// Assert that `out` is curl's report of a request that failed before a response,
+/// and that the report leaves out the query credential.
+fn assert_failed_without_secret(out: &strands_shell::Output) {
+    assert_eq!(out.status, 6, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.starts_with("curl: (6) "),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains(QUERY_SECRET) && !out.stdout.contains(QUERY_SECRET),
+        "the query credential reached the agent: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn curl_query_credential_stays_out_of_a_connection_error() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        // Hold the port, but close every connection without a response.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::task::spawn_local(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        let dir = TestDir::new("lsh_query_cred_connection_error");
+        let mut shell = query_credential_shell(&base, &dir);
+        let out = shell
+            .run(&format!("curl -sS '{base}/geocode?q=zurich'"))
+            .await;
+        assert_failed_without_secret(&out);
+    }));
+}
+
+#[test]
+fn curl_query_credential_stays_out_of_a_dns_error() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        // `.invalid` never resolves (RFC 6761).
+        let base = "http://strands-shell-test.invalid";
+        let dir = TestDir::new("lsh_query_cred_dns_error");
+        let mut shell = query_credential_shell(base, &dir);
+        let out = shell.run(&format!("curl -sS {base}/geocode")).await;
+        assert_failed_without_secret(&out);
+    }));
+}
+
+#[test]
+fn curl_query_credential_stays_out_of_a_url_too_long_to_send() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_server().await;
+        let dir = TestDir::new("lsh_query_cred_long_url");
+        let mut shell = query_credential_shell(&base, &dir);
+        // Longer than an HTTP request target can be, so the client gives up
+        // before it connects.
+        let path = "a".repeat(70_000);
+        let out = shell.run(&format!("curl -sS {base}/{path}")).await;
+        assert_failed_without_secret(&out);
+    }));
+}
+
 // ── Options the Strands harness `web_fetch` tool sends ──────────────
 
 #[test]
