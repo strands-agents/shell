@@ -619,7 +619,11 @@ fn curl_protocol_relative_redirect_preserves_target_and_strips_credentials() {
             let out = shell.run(&format!("curl -sSL {source}/{path}")).await;
             assert_eq!(out.status, 0, "{path}: {}", out.stderr);
             assert_eq!(
-                out.stdout, "method=GET\naccept=*/*\nquery_from=redirect",
+                out.stdout,
+                format!(
+                    "method=GET\naccept=*/*\nuser-agent=curl/{} (strands-shell)\nquery_from=redirect",
+                    env!("CARGO_PKG_VERSION")
+                ),
                 "{path}"
             );
         }
@@ -1252,6 +1256,54 @@ fn curl_user_agent_sets_header() {
             "{}",
             out.stdout
         );
+        let out = shell
+            .run(&format!("curl -v -A 'agent/1.0' {base}/echo"))
+            .await;
+        let sent = out.stderr.matches("> User-Agent:").count();
+        assert_eq!(sent, 1, "{}", out.stderr);
+    }));
+}
+
+#[test]
+fn curl_sends_a_default_user_agent() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell.run(&format!("curl {base}/echo")).await;
+        let expected = format!(
+            "user-agent=curl/{} (strands-shell)",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(out.stdout.contains(&expected), "{}", out.stdout);
+    }));
+}
+
+#[test]
+fn curl_header_user_agent_replaces_the_default() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!("curl -v -H 'User-Agent: explicit' {base}/echo"))
+            .await;
+        assert!(out.stdout.contains("user-agent=explicit"), "{}", out.stdout);
+        assert!(!out.stdout.contains("strands-shell"), "{}", out.stdout);
+        let sent = out.stderr.matches("> User-Agent:").count();
+        assert_eq!(sent, 1, "{}", out.stderr);
+    }));
+}
+
+// A header name matches in any letter case.
+#[test]
+fn curl_lowercase_user_agent_header_replaces_the_default() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!("curl -v -H 'user-agent: lower' {base}/echo"))
+            .await;
+        assert!(out.stdout.contains("user-agent=lower"), "{}", out.stdout);
+        assert!(!out.stderr.contains("strands-shell"), "{}", out.stderr);
     }));
 }
 
@@ -1565,6 +1617,7 @@ fn curl_empty_user_agent_sends_none() {
         let (mut shell, base) = shell_with_server().await;
         let out = shell.run(&format!("curl -A '' {base}/echo")).await;
         assert!(!out.stdout.contains("user-agent="), "{}", out.stdout);
+        assert!(!out.stdout.contains("strands-shell"), "{}", out.stdout);
     }));
 }
 

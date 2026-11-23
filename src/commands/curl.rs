@@ -21,12 +21,16 @@ Options:
   -w, --write-out FORMAT  Output FORMAT after completion
   -b, --cookie DATA       Send cookies (name=value pairs)
   -u, --user USER:PASS    Basic authentication
-  -A, --user-agent NAME   Send User-Agent NAME
+  -A, --user-agent NAME   Send User-Agent NAME instead of the default
+                          'curl/<shell version> (strands-shell)'; '' sends none
   -m, --max-time SECONDS  Maximum time allowed for the transfer
       --proto PROTOCOLS   Enable/disable PROTOCOLS
       --proto-redir PROTOCOLS
                           Enable/disable PROTOCOLS on redirect
   -g, --globoff           Disable URL globbing (always off)";
+
+/// The `User-Agent` sent when neither `-A` nor `-H` names one.
+const DEFAULT_USER_AGENT: &str = concat!("curl/", env!("CARGO_PKG_VERSION"), " (strands-shell)");
 
 /// The protocols this `curl` speaks, as a `--proto`/`--proto-redir` allow set.
 #[derive(Clone, Copy)]
@@ -299,7 +303,9 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let deadline = max_time.map(|_| ());
 
     // `-H 'User-Agent: …'` takes precedence over `-A`, and `-A ''` sends none.
-    if let Some(ua) = user_agent.filter(|ua| !ua.is_empty())
+    if let Some(ua) = user_agent
+        .or_else(|| Some(DEFAULT_USER_AGENT.into()))
+        .filter(|ua| !ua.is_empty())
         && !headers.iter().any(|h| {
             h.split_once(':')
                 .is_some_and(|(n, _)| n.trim().eq_ignore_ascii_case("user-agent"))
