@@ -3501,11 +3501,15 @@ async fn execute_pipeline_checked(
                         }
                         return Ok(0);
                     }
-                    // exec with args — try to run as a command
-                    // For now, treat it like running the command directly
+                    // exec with args — run the command, then exit. The args are
+                    // already expanded, so pass them as single-quoted words to keep
+                    // substitutions from running a second time.
                     let fake_cmd = parser::Command {
                         env: pipeline[0].env.clone(),
-                        args: pipeline[0].args[1..].to_vec(),
+                        args: args
+                            .into_iter()
+                            .map(|a| vec![WordPart::SingleQuoted(a)])
+                            .collect(),
                         redirects: pipeline[0].redirects.clone(),
                     };
                     let exit = execute_pipeline(os, proc, &[fake_cmd]).await;
