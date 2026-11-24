@@ -1,0 +1,15 @@
+status: 0
+stderr: empty
+--- stdout
+then world
+else world
+while 0
+while 1
+for a
+for b
+until 2
+case world
+group world
+subshell world
+function arg
+after
