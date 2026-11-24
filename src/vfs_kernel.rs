@@ -173,7 +173,7 @@ impl VfsKernel {
             drop(tx);
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
-                buf: Vec::new(),
+                buf: bytes::Bytes::new(),
             })
         } else if flags.write {
             let (tx, rx) = crate::os::pipe(8192);
@@ -231,7 +231,7 @@ impl VfsKernel {
             drop(tx);
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
-                buf: Vec::new(),
+                buf: bytes::Bytes::new(),
             })
         } else if flags.write {
             let (tx, rx) = crate::os::pipe(8192);
@@ -380,7 +380,7 @@ impl Kernel for VfsKernel {
             drop(tx);
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
-                buf: Vec::new(),
+                buf: bytes::Bytes::new(),
             })
         } else if flags.read && flags.write {
             // Read-write (<>): provide existing data as a reader.
@@ -391,7 +391,7 @@ impl Kernel for VfsKernel {
             drop(tx);
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
-                buf: Vec::new(),
+                buf: bytes::Bytes::new(),
             })
         } else if flags.write {
             // For writes, we use a channel that collects data and flushes to VFS
@@ -1290,7 +1290,7 @@ fn make_dev_null_fd(proc: &mut Process, flags: &OpenFlags) -> io::Result<Fd> {
         // tx dropped immediately → reader gets EOF
         proc.alloc_fd(FdKind::ChannelReader {
             rx,
-            buf: Vec::new(),
+            buf: bytes::Bytes::new(),
         })
     } else {
         let (tx, _rx) = crate::os::pipe(8192);
@@ -1318,7 +1318,7 @@ fn make_dev_zero_fd(proc: &mut Process, flags: &OpenFlags) -> io::Result<Fd> {
     });
     proc.alloc_fd(FdKind::ChannelReader {
         rx,
-        buf: Vec::new(),
+        buf: bytes::Bytes::new(),
     })
 }
 
@@ -1371,7 +1371,7 @@ fn make_dev_urandom_fd(proc: &mut Process, flags: &OpenFlags) -> io::Result<Fd> 
     });
     proc.alloc_fd(FdKind::ChannelReader {
         rx,
-        buf: Vec::new(),
+        buf: bytes::Bytes::new(),
     })
 }
 

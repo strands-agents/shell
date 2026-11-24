@@ -143,7 +143,7 @@ impl Kernel for MemKernel {
         drop(tx);
         proc.alloc_fd(FdKind::ChannelReader {
             rx,
-            buf: Vec::new(),
+            buf: Bytes::new(),
         })
     }
 
