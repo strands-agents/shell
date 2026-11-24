@@ -4228,6 +4228,12 @@ async fn run_pipeline(
                 state_proc.arg0 = name.clone();
                 // A child shell starts with only the exported variables.
                 state_proc.keep_exported_only();
+                // A child shell starts with default options, not the parent's `set` flags.
+                state_proc.opt_errexit = false;
+                state_proc.opt_nounset = false;
+                state_proc.opt_xtrace = false;
+                state_proc.opt_pipefail = false;
+                state_proc.errexit_ignored = 0;
             }
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
