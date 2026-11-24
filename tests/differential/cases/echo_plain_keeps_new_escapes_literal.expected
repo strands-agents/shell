@@ -1,0 +1,7 @@
+status: 0
+stderr: empty
+--- stdout
+A\x41B|\e[0m|\E|\u00e9|\U0001F600
+{"msg":"say \u0022hi\u0022"}
+C:\xampp
+A\x41B|\e

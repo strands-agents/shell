@@ -1,0 +1,9 @@
+status: 0
+stderr: empty
+--- stdout
+AAB
+AA4B||\xg
+A[0mB
+A[0mB
+A|\UZ
+A\101B

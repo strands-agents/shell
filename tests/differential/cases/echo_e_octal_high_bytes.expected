@@ -1,0 +1,8 @@
+status: 0
+stderr: empty
+--- stdout
+AéB
+5
+7
+AAA2B
+4
