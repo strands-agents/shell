@@ -49,7 +49,7 @@ fn compare_entries(
 
 /// Format a size like GNU `ls -lh`: powers of 1024, rounded up, with one
 /// decimal place when the scaled value is below 10.
-fn human_size(len: u64) -> String {
+pub(super) fn human_size(len: u64) -> String {
     const BASE: u64 = 1024;
     const SUFFIXES: &[char] = &['K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y'];
     if len < BASE {
