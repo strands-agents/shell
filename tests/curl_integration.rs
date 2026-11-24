@@ -133,6 +133,33 @@ async fn shell_with_server() -> (Shell, String) {
     (shell, base)
 }
 
+/// A server that answers every path with the request target, `Host`, and
+/// `Authorization` it received.
+async fn start_target_echo_server() -> String {
+    let app = Router::new().fallback(any(
+        |target: axum::http::Uri, headers: HeaderMap| async move {
+            let header = |name: &str| {
+                headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("none")
+                    .to_string()
+            };
+            format!(
+                "target={target} host={} authorization={}",
+                header("host"),
+                header("authorization")
+            )
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::task::spawn_local(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
 async fn start_redirect_server(location: String) -> String {
     let app = Router::new()
         .route(
@@ -1220,6 +1247,198 @@ api_key = "secret"
             err.to_string().contains("query requires param field"),
             "error: {}",
             err
+        );
+    }));
+}
+
+/// The key of the `kind = "query"` credential in [`query_credential_shell`].
+const QUERY_SECRET: &str = "query-secret-7f3a";
+
+/// A shell that may reach `base` and adds [`QUERY_SECRET`] to every request for it.
+fn query_credential_shell(base: &str, dir: &TestDir) -> Shell {
+    let config_path = dir.join("query_cred.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[[cred]]
+url = "{base}/"
+kind = "query"
+api_key = "{QUERY_SECRET}"
+param = "api_key"
+"#
+        ),
+    )
+    .unwrap();
+    Shell::builder()
+        .allow_url(base)
+        .config_file(&config_path)
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+/// Assert that `out` is curl's report of a request that failed before a response,
+/// and that the report leaves out the query credential.
+fn assert_failed_without_secret(out: &strands_shell::Output) {
+    assert_eq!(out.status, 6, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.starts_with("curl: (6) "),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains(QUERY_SECRET) && !out.stdout.contains(QUERY_SECRET),
+        "the query credential reached the agent: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn curl_query_credential_stays_out_of_a_connection_error() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        // Hold the port, but close every connection without a response.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::task::spawn_local(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        let dir = TestDir::new("lsh_query_cred_connection_error");
+        let mut shell = query_credential_shell(&base, &dir);
+        let out = shell
+            .run(&format!("curl -sS '{base}/geocode?q=zurich'"))
+            .await;
+        assert_failed_without_secret(&out);
+    }));
+}
+
+#[test]
+fn curl_query_credential_stays_out_of_a_dns_error() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        // `.invalid` never resolves (RFC 6761).
+        let base = "http://strands-shell-test.invalid";
+        let dir = TestDir::new("lsh_query_cred_dns_error");
+        let mut shell = query_credential_shell(base, &dir);
+        let out = shell.run(&format!("curl -sS {base}/geocode")).await;
+        assert_failed_without_secret(&out);
+    }));
+}
+
+#[test]
+fn curl_query_credential_stays_out_of_a_url_too_long_to_send() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_server().await;
+        let dir = TestDir::new("lsh_query_cred_long_url");
+        let mut shell = query_credential_shell(&base, &dir);
+        // Longer than an HTTP request target can be, so the client gives up
+        // before it connects.
+        let path = "a".repeat(70_000);
+        let out = shell.run(&format!("curl -sS {base}/{path}")).await;
+        assert_failed_without_secret(&out);
+    }));
+}
+
+#[test]
+fn curl_path_credential_stays_inside_its_prefix() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .credential(
+                format!("{base}/v1/projects/alpha/"),
+                strands_shell::CredKind::Bearer,
+                "alpha-token",
+            )
+            .build()
+            .unwrap();
+        let inside = shell
+            .run(&format!("curl -s {base}/v1/projects/alpha/items"))
+            .await;
+        assert!(
+            inside.stdout.ends_with("authorization=Bearer alpha-token"),
+            "{}",
+            inside.stdout
+        );
+        // Each path names a place outside `/v1/projects/alpha/`, once the client
+        // or a server that decodes `%2F` resolves its dot segments.
+        for (path, sent) in [
+            (
+                "/v1/projects/alpha/../beta/items",
+                "/v1/projects/beta/items",
+            ),
+            (
+                "/v1/projects/alpha/..\\beta/items",
+                "/v1/projects/beta/items",
+            ),
+            (
+                "/v1/projects/alpha/%2e%2e/%2e%2e/admin/keys",
+                "/v1/admin/keys",
+            ),
+            (
+                "/v1/projects/alpha/..%2Fbeta/items",
+                "/v1/projects/alpha/..%2Fbeta/items",
+            ),
+        ] {
+            let out = shell.run(&format!("curl -s '{base}{path}'")).await;
+            assert_eq!(out.status, 0, "{path}: {}", out.stderr);
+            assert!(
+                out.stdout.starts_with(&format!("target={sent} ")),
+                "{path}: {}",
+                out.stdout
+            );
+            assert!(
+                out.stdout.ends_with("authorization=none"),
+                "{path} carried the credential: {}",
+                out.stdout
+            );
+        }
+    }));
+}
+
+#[test]
+fn curl_refuses_a_host_header_that_names_another_host() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let authority = base.strip_prefix("http://").unwrap();
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .credential(
+                format!("{base}/"),
+                strands_shell::CredKind::Bearer,
+                "host-token",
+            )
+            .build()
+            .unwrap();
+        for header in [
+            "Host: other.example.test",
+            "host: other.example.test",
+            "Host: 127.0.0.1:1",
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H '{header}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 1, "{header}: {}", out.stderr);
+            assert_eq!(out.stdout, "", "{header}");
+            assert!(
+                out.stderr.contains("does not name the host of the URL"),
+                "{header}: {}",
+                out.stderr
+            );
+        }
+        // A `Host` that names the URL's host goes out, with the credential.
+        let out = shell
+            .run(&format!("curl -s -H 'Host: {authority}' {base}/items"))
+            .await;
+        assert_eq!(
+            out.stdout,
+            format!("target=/items host={authority} authorization=Bearer host-token")
         );
     }));
 }

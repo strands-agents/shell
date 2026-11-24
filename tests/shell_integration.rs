@@ -12376,6 +12376,65 @@ fn cred_no_match() {
     }
 }
 
+#[test]
+fn cred_path_prefix_matches_the_url_as_sent() {
+    let shell = Shell::builder()
+        .credential(
+            "https://api.example.com/v1/projects/alpha/",
+            strands_shell::CredKind::Bearer,
+            "alpha-token",
+        )
+        .build()
+        .unwrap();
+    let kernel = shell.kernel();
+    for url in [
+        "https://api.example.com/v1/projects/alpha/items",
+        "https://API.example.com/v1/projects/alpha/items",
+        "https://api.example.com:443/v1/projects/alpha/items",
+        "https://api.example.com/v1/projects/alpha/x/../items",
+        // An encoded slash with no `..` around it names a path inside the prefix.
+        "https://api.example.com/v1/projects/alpha/group%2Fname/items",
+    ] {
+        assert!(
+            !kernel.resolve_credential(url, "GET").is_empty(),
+            "credential expected for {url}"
+        );
+    }
+    for url in [
+        "https://api.example.com/v1/projects/beta/items",
+        "https://api.example.com/v1/projects/alphabet/items",
+        "https://api.example.com/v1/projects/alpha/../beta/items",
+        "https://api.example.com/v1/projects/alpha/%2e%2e/beta/items",
+        "https://api.example.com/v1/projects/alpha/%2E%2E/%2e%2e/admin/keys",
+        "https://api.example.com/v1/projects/alpha/..\\beta/items",
+        "https://api.example.com/v1/projects/alpha/..%2Fbeta/items",
+        "https://api.example.com/v1/projects/alpha/%2e%2e%5Cbeta/items",
+    ] {
+        assert!(
+            kernel.resolve_credential(url, "GET").is_empty(),
+            "no credential expected for {url}"
+        );
+    }
+}
+
+#[test]
+fn cred_for_a_whole_host_ignores_encoded_dot_segments() {
+    let shell = Shell::builder()
+        .credential(
+            "https://api.example.com/",
+            strands_shell::CredKind::Bearer,
+            "host-token",
+        )
+        .build()
+        .unwrap();
+    assert!(
+        !shell
+            .kernel()
+            .resolve_credential("https://api.example.com/a/..%2Fb", "GET")
+            .is_empty()
+    );
+}
+
 // ── config parsing (vfs_config.rs) ──────────────────────────────────
 
 shell_test!(

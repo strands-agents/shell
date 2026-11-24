@@ -846,18 +846,18 @@ impl Kernel for VfsKernel {
     }
 
     fn resolve_credential(&self, url: &str, method: &str) -> Vec<(String, String)> {
+        // Match on the parsed URL, which is the one reqwest sends. The parser
+        // resolves `..`, `%2e%2e` and `\`, so `/alpha/../beta` is matched as
+        // `/beta`. A raw string prefix matched it against a credential for
+        // `/alpha/`, and the credential went to `/beta`. Parsed hosts also keep
+        // a credential for `api.example.com` off `api.example.com.evil.com`.
+        let Ok(parsed) = url::Url::parse(url) else {
+            return Vec::new();
+        };
         let method_upper = method.to_uppercase();
         for cred in &self.creds {
-            if !url.starts_with(&cred.url) {
+            if !url_matches_prefix(&parsed, &cred.url) || leaves_path_scope(&parsed, &cred.url) {
                 continue;
-            }
-            // Prevent prefix confusion: cred for https://api.example.com/
-            // must not match https://api.example.com.evil.com/
-            if url.len() > cred.url.len() && !cred.url.ends_with('/') {
-                let next = url.as_bytes()[cred.url.len()];
-                if next != b'/' && next != b'?' && next != b'#' {
-                    continue;
-                }
             }
             if !cred.methods.is_empty() && !cred.methods.contains(&method_upper) {
                 continue;
@@ -886,6 +886,7 @@ impl Kernel for VfsKernel {
         {
             // 1. Check URL via self.check_url
             self.check_url(&req.url)?;
+            check_host_header(&req)?;
 
             // 2. Determine if URL is explicitly allowed (for SafeResolver decision)
             let url_explicitly_allowed = check_url_safe(&req.url).is_err();
@@ -899,7 +900,7 @@ impl Kernel for VfsKernel {
             }
             let client = builder
                 .build()
-                .map_err(|e| io::Error::other(e.to_string()))?;
+                .map_err(|e| transport_error(io::ErrorKind::Other, e))?;
 
             // 4. Build the request
             let method: reqwest::Method = req.method.parse().map_err(|_| {
@@ -924,7 +925,7 @@ impl Kernel for VfsKernel {
             let mut resp = http_req
                 .send()
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, e.to_string()))?;
+                .map_err(|e| transport_error(io::ErrorKind::ConnectionRefused, e))?;
 
             // 8. Build response
             let status = resp.status().as_u16();
@@ -945,7 +946,7 @@ impl Kernel for VfsKernel {
                 while let Some(chunk) = resp
                     .chunk()
                     .await
-                    .map_err(|e| io::Error::other(e.to_string()))?
+                    .map_err(|e| transport_error(io::ErrorKind::Other, e))?
                 {
                     if buf.len() + chunk.len() > req.max_response {
                         return Err(io::Error::other("response body too large"));
@@ -956,7 +957,7 @@ impl Kernel for VfsKernel {
             } else {
                 resp.bytes()
                     .await
-                    .map_err(|e| io::Error::other(e.to_string()))?
+                    .map_err(|e| transport_error(io::ErrorKind::Other, e))?
                     .to_vec()
             };
 
@@ -978,6 +979,7 @@ impl Kernel for VfsKernel {
 
             // 1. Check URL
             self.check_url(&req.url)?;
+            check_host_header(&req)?;
 
             // 2. Parse URL
             let parsed = url::Url::parse(&req.url)
@@ -1443,7 +1445,8 @@ fn glob_match_chars(p: &[char], t: &[char]) -> bool {
     }
 }
 
-/// Whether a parsed request URL is covered by an allowlist `prefix` entry.
+/// Whether a parsed request URL is covered by a `prefix` entry: an allowlist
+/// URL or the URL a credential is bound to.
 ///
 /// Matches on parsed components (scheme + host + port + a path-segment prefix),
 /// never raw string prefixes — string matching is defeated by userinfo
@@ -1471,6 +1474,25 @@ fn url_matches_prefix(url: &url::Url, prefix: &str) -> bool {
     }
     let boundary = pre.strip_suffix('/').unwrap_or(pre);
     req.starts_with(boundary) && req.as_bytes().get(boundary.len()) == Some(&b'/')
+}
+
+/// Whether a server could read `url` as leaving the path of the credential bound
+/// to `prefix`. The URL parser keeps `/alpha/..%2Fbeta` as one segment under
+/// `/alpha/`, but a server that decodes `%2F` or `%5C` before it resolves dot
+/// segments serves `/beta`. A credential bound to a whole host has no path to
+/// leave.
+fn leaves_path_scope(url: &url::Url, prefix: &str) -> bool {
+    let bound_to_path = url::Url::parse(prefix).is_ok_and(|p| !matches!(p.path(), "" | "/"));
+    if !bound_to_path {
+        return false;
+    }
+    let decoded = url
+        .path()
+        .to_ascii_lowercase()
+        .replace("%2e", ".")
+        .replace("%2f", "/")
+        .replace("%5c", "/");
+    decoded.split('/').any(|segment| segment == "..")
 }
 
 /// Check if an IP address is private/loopback/link-local/IMDS.
@@ -1563,7 +1585,10 @@ pub fn check_url_safe(url: &str) -> io::Result<()> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("access denied: unsupported scheme in {url}"),
+            format!(
+                "access denied: unsupported scheme in {}",
+                without_query(url)
+            ),
         ));
     }
     // Match on the parsed `url::Host` rather than `host_str()` + string parse.
@@ -1574,7 +1599,10 @@ pub fn check_url_safe(url: &str) -> io::Result<()> {
     let parsed = url::Url::parse(url).map_err(|_| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("access denied: cannot parse host from {url}"),
+            format!(
+                "access denied: cannot parse host from {}",
+                without_query(url)
+            ),
         )
     })?;
     match parsed.host() {
@@ -1606,11 +1634,66 @@ pub fn check_url_safe(url: &str) -> io::Result<()> {
         None => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!("access denied: cannot parse host from {url}"),
+                format!(
+                    "access denied: cannot parse host from {}",
+                    without_query(url)
+                ),
             ));
         }
     }
     Ok(())
+}
+
+/// `url` without its query or fragment, for an error message. A `kind = "query"`
+/// credential rides in the query, and the agent reads every error message.
+fn without_query(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
+}
+
+/// Refuse a `Host` header that names another host than the URL. The SSRF guard,
+/// the allowlist, and the credential match all judge the URL's host, but a front
+/// end that serves several sites from one address picks the site by `Host`. A
+/// different `Host` would send the request, and any credential on it, to a site
+/// none of them judged.
+fn check_host_header(req: &HttpRequest) -> io::Result<()> {
+    let refused = |reason: String| io::Error::new(io::ErrorKind::PermissionDenied, reason);
+    let url = url::Url::parse(&req.url).map_err(|_| {
+        refused(format!(
+            "access denied: cannot parse host from {}",
+            without_query(&req.url)
+        ))
+    })?;
+    for (name, value) in &req.headers {
+        if name.eq_ignore_ascii_case("host") && !names_host(&url, value) {
+            return Err(refused(format!(
+                "access denied: Host header {value:?} does not name the host of the URL"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a `Host` header `value` names `url`'s host, and its port when it gives one.
+fn names_host(url: &url::Url, value: &str) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let value = value.trim();
+    // An IPv6 literal holds colons, so a port follows only the closing bracket.
+    let (name, port) = match value.rsplit_once(':') {
+        Some((name, port)) if !port.contains(']') => (name, Some(port)),
+        _ => (value, None),
+    };
+    name.eq_ignore_ascii_case(host)
+        && port.is_none_or(|port| port.parse::<u16>().ok() == url.port_or_known_default())
+}
+
+/// A reqwest error as an `io::Error`, without the URL reqwest puts in its text.
+/// That URL carries a `kind = "query"` credential, and the agent reads every
+/// error message.
+#[cfg(not(target_arch = "wasm32"))]
+fn transport_error(kind: io::ErrorKind, error: reqwest::Error) -> io::Error {
+    io::Error::new(kind, error.without_url().to_string())
 }
 
 /// A DNS resolver that filters out blocked IPs at resolution time,
@@ -1642,7 +1725,7 @@ impl reqwest::dns::Resolve for SafeResolver {
 
 #[cfg(test)]
 mod url_safety_tests {
-    use super::{check_url_safe, url_matches_prefix};
+    use super::{check_url_safe, names_host, url_matches_prefix};
 
     // A1: IPv6 literals (incl. IPv4-mapped IMDS) must be blocked by
     // `check_url_safe` ITSELF — not merely by the SafeResolver/connection
@@ -1705,6 +1788,51 @@ mod url_safety_tests {
         ] {
             assert!(check_url_safe(u).is_ok(), "{u} should be allowed");
         }
+    }
+
+    // A `kind = "query"` credential rides in the query, so a refusal that
+    // names the URL must leave the query out.
+    #[test]
+    fn check_url_safe_refusals_leave_out_the_query() {
+        for u in [
+            "ftp://example.com/x?api_key=secret",
+            "http://[::1/?api_key=secret",
+        ] {
+            let err = check_url_safe(u).unwrap_err().to_string();
+            assert!(err.starts_with("access denied: "), "{u}: {err}");
+            assert!(!err.contains("secret"), "{u}: {err}");
+        }
+    }
+
+    #[test]
+    fn host_header_must_name_the_host_of_the_url() {
+        let url = |u: &str| url::Url::parse(u).unwrap();
+        let https = url("https://api.example.com/x");
+        for value in [
+            "api.example.com",
+            "API.example.com",
+            "api.example.com:443",
+            " api.example.com ",
+        ] {
+            assert!(names_host(&https, value), "{value:?}");
+        }
+        for value in [
+            "",
+            "other.example.com",
+            "api.example.com.evil.com",
+            "api.example.com:8443",
+            "api.example.com:x",
+        ] {
+            assert!(!names_host(&https, value), "{value:?}");
+        }
+        let port = url("http://127.0.0.1:8080/");
+        assert!(names_host(&port, "127.0.0.1:8080"));
+        assert!(names_host(&port, "127.0.0.1"));
+        assert!(!names_host(&port, "127.0.0.1:80"));
+        let v6 = url("http://[::1]:8080/");
+        assert!(names_host(&v6, "[::1]:8080"));
+        assert!(names_host(&v6, "[::1]"));
+        assert!(!names_host(&v6, "[::2]:8080"));
     }
 
     #[test]
