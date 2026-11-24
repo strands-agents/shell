@@ -1,0 +1,19 @@
+status: 0
+stderr: empty
+--- stdout
+[a]
+[b]
+[c]
+a
+b
+c
+w:a
+s:a
+s:b
+bb
+aa
+z
+end
+negated:0
+a
+status:3

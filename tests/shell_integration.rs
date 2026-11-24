@@ -3185,6 +3185,51 @@ fn compound_pipe_into_function_piped_from_cli() {
     assert_eq!(out, "a\nx\ny\n");
 }
 
+// A compound piped into a compound runs the second one as a function (#337).
+#[test]
+fn compound_pipe_into_compound_in_substitution_from_execute() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .execute(
+                "x=$( { echo a; echo b; } | while read l; do echo \"w:$l\"; done ); \
+                 y=$( (echo c) | { cat; } )",
+            )
+            .await;
+        let out = shell.run("echo \"[$x][$y]\"").await;
+        assert_eq!(out.stdout, "[w:a\nw:b][c]\n");
+    }));
+}
+
+// In process too: this form overflows the 1 MiB main thread stack of a Windows
+// debug build of the CLI.
+#[test]
+fn compound_pipe_into_compound_redirected_from_execute() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .execute(
+                "{ { echo a; } | { cat; }; } > f; \
+                 ( echo b ) | while read l; do echo $l; done > g",
+            )
+            .await;
+        let out = shell.run("echo \"file:$(cat f)$(cat g)\"").await;
+        assert_eq!(out.stdout, "file:ab\n");
+    }));
+}
+
+#[test]
+fn compound_pipe_into_compound_piped_from_cli() {
+    let out = compound_pipe_into_function_cli(
+        "compound_pipe_compound_pipe_cli",
+        "{ echo a; } | if true; then cat; fi | cat; \
+         for i in 1 2; do { echo $i; } | { cat; }; done | tr 12 xy",
+    );
+    assert_eq!(out, "a\nx\ny\n");
+}
+
 // ── Subshell stderr in captured paths ───────────────────────────────
 
 expect_streams!(subshell_stderr_plain, "( echo e >&2 )", "", "e\n");

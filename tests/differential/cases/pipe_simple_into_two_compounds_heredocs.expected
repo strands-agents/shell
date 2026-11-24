@@ -1,0 +1,11 @@
+status: 0
+stderr: empty
+--- stdout
+x
+two
+three
+after-1
+zero
+two
+three
+after-2
