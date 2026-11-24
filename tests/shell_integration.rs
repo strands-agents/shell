@@ -3202,14 +3202,22 @@ fn compound_pipe_into_compound_in_substitution_from_execute() {
     }));
 }
 
+// In process too: this form overflows the 1 MiB main thread stack of a Windows
+// debug build of the CLI.
 #[test]
-fn compound_pipe_into_compound_redirected_from_cli() {
-    let out = compound_pipe_into_function_cli(
-        "compound_pipe_compound_redirect_cli",
-        "{ { echo a; } | { cat; }; } > f; ( echo b ) | while read l; do echo $l; done > g; \
-         echo \"file:$(cat f)$(cat g)\"",
-    );
-    assert_eq!(out, "file:ab\n");
+fn compound_pipe_into_compound_redirected_from_execute() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .execute(
+                "{ { echo a; } | { cat; }; } > f; \
+                 ( echo b ) | while read l; do echo $l; done > g",
+            )
+            .await;
+        let out = shell.run("echo \"file:$(cat f)$(cat g)\"").await;
+        assert_eq!(out.stdout, "file:ab\n");
+    }));
 }
 
 #[test]
