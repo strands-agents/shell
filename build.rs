@@ -1,8 +1,9 @@
 //! Build script for strands-shell.
 //!
-//! When cross-compiling for a WASI target this script adds the wasi-sdk
-//! sysroot library directory to the linker search path so it can find
-//! `-lwasi-emulated-signal` and `-lsetjmp` (required by Lua's C sources).
+//! When cross-compiling for a WASI target this script copies
+//! `libwasi-emulated-signal.a` and `libsetjmp.a` (required by Lua's C sources)
+//! out of the wasi-sdk sysroot into `OUT_DIR` and adds that directory to the
+//! linker search path.
 //!
 //! The C compiler / archiver env vars (`CC_wasm32_wasip2`, etc.) must be
 //! set *before* invoking Cargo because each crate's build script runs in
@@ -29,18 +30,19 @@ fn main() {
     let sysroot = sdk.join("share/wasi-sysroot");
 
     // --- Linker search path for WASI sysroot libraries ------------------------
-    // Lua's WASI build links against libwasi-emulated-signal and libsetjmp which
-    // live in the wasi-sdk sysroot.
-    let lib_dir = sysroot.join("lib").join(&target);
-    if lib_dir.exists() {
-        println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    } else {
-        // Fall back to the base wasm32-wasi lib dir
-        let fallback = sysroot.join("lib/wasm32-wasi");
-        if fallback.exists() {
-            println!("cargo:rustc-link-search=native={}", fallback.display());
-        }
+    // Expose only Lua's two archives so the sysroot libc.a cannot shadow Rust's.
+    let mut lib_dir = sysroot.join("lib").join(&target);
+    if !lib_dir.exists() {
+        lib_dir = sysroot.join("lib/wasm32-wasi");
     }
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    for lib in ["libsetjmp.a", "libwasi-emulated-signal.a"] {
+        let src = lib_dir.join(lib);
+        std::fs::copy(&src, out_dir.join(lib))
+            .unwrap_or_else(|e| panic!("failed to copy {}: {e}", src.display()));
+        println!("cargo:rerun-if-changed={}", src.display());
+    }
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
 
     println!("cargo:rerun-if-env-changed=WASI_SDK_PATH");
 }

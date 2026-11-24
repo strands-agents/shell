@@ -22,3 +22,5 @@ CLAUDE.md
 /npm/
 /dist-npm/
 /artifacts/
+# Maven output of the Java wasm integration suite.
+tests/java/target/
