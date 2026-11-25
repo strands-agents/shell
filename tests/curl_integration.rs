@@ -1471,6 +1471,8 @@ fn curl_refuses_a_forwarded_host_that_names_another_host() {
             format!("X-Forwarded-Host: {authority}, other.example.test"),
             "Forwarded: host=other.example.test".to_string(),
             "Forwarded: for=192.0.2.1;host=\"other.example.test\"".to_string(),
+            "Forwarded: note=\"a;host=ignored.example\";host=other.example.test".to_string(),
+            format!("Forwarded: host={authority}, host=\"other.example.test\""),
         ] {
             let out = shell
                 .run(&format!("curl -s -H '{header}' {base}/items"))
@@ -1488,6 +1490,13 @@ fn curl_refuses_a_forwarded_host_that_names_another_host() {
             format!("X-Forwarded-Host: {authority}"),
             format!("Forwarded: host={authority};proto=http"),
             "Forwarded: for=192.0.2.1".to_string(),
+            "Forwarded: for=192.0.2.1;note=\"a;host=other.example.test\"".to_string(),
+            "Forwarded: for=192.0.2.1;note=\"a,host=other.example.test\"".to_string(),
+            format!("Forwarded: note=\"a;host=ignored.example\";host=\"{authority}\""),
+            format!(
+                "Forwarded: host=\"127\\.0.0.1:{}\"",
+                authority.rsplit_once(':').unwrap().1
+            ),
         ] {
             let out = shell
                 .run(&format!("curl -s -H '{header}' {base}/items"))
@@ -1509,14 +1518,66 @@ fn curl_empty_host_header_removes_it() {
         let base = start_target_echo_server().await;
         let authority = base.strip_prefix("http://").unwrap();
         let mut shell = Shell::builder().allow_url(&base).build().unwrap();
-        // As in curl, `-H 'Host:'` removes the header, and the client sets
-        // `Host` from the URL.
+        // Shell removes the empty override but still derives Host from the URL.
+        // System curl omits Host entirely for this option.
         let out = shell.run(&format!("curl -s -H 'Host:' {base}/items")).await;
         assert_eq!(out.status, 0, "{}", out.stderr);
         assert_eq!(
             out.stdout,
             format!("target=/items host={authority} authorization=none")
         );
+    }));
+}
+
+#[test]
+fn curl_content_type_removal_preserves_post_defaults_and_overrides() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        for (args, expected) in [
+            ("-d a=b", Some("application/x-www-form-urlencoded")),
+            ("-d a=b -H 'Content-Type: text/plain'", Some("text/plain")),
+            ("-d a=b -H 'Content-Type:'", None),
+            ("-H 'cOnTeNt-TyPe:   ' -d a=b", None),
+            (
+                "-H 'Content-Type:' -H 'Content-Type: text/plain' -d a=b",
+                Some("text/plain"),
+            ),
+        ] {
+            let out = shell.run(&format!("curl -s {args} {base}/echo")).await;
+            assert_eq!(out.status, 0, "{args}: {}", out.stderr);
+            assert!(out.stdout.contains("body=a=b"), "{args}: {}", out.stdout);
+            let content_type = out
+                .stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("content-type="));
+            assert_eq!(content_type, expected, "{args}: {}", out.stdout);
+        }
+    }));
+}
+
+#[test]
+fn curl_refuses_malformed_forwarded_headers() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        for value in [
+            "host=\"unterminated",
+            "note=\"dangling\\",
+            "note=\"value\"host=other.example.test",
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H 'Forwarded: {value}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 1, "{value}: {}", out.stderr);
+            assert!(out.stdout.is_empty(), "{value}: {}", out.stdout);
+            assert!(
+                out.stderr.contains("access denied"),
+                "{value}: {}",
+                out.stderr
+            );
+        }
     }));
 }
 
@@ -1548,6 +1609,7 @@ param = "api_key"
             .unwrap();
         for url in [format!("{base}/echo#part"), format!("{base}/echo?a=1#part")] {
             let out = shell.run(&format!("curl -s '{url}'")).await;
+            assert_eq!(out.status, 0, "{url}: {}", out.stderr);
             assert!(
                 out.stdout.contains("query_api_key=fragment-key"),
                 "{url}: {}",

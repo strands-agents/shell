@@ -313,9 +313,15 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
     {
         headers.push(format!("User-Agent: {ua}"));
     }
-    // `-H 'Name:'` with nothing after the colon removes the header, as in curl,
-    // so `-H 'Host:'` leaves the client to set `Host` from the URL. This runs
-    // after the default `User-Agent`, which `-H 'User-Agent:'` also removes.
+    // Preserve an explicit Content-Type removal so POST data does not restore
+    // the default after empty header values are discarded.
+    let suppress_content_type = headers.iter().any(|h| {
+        h.split_once(':').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("content-type") && value.trim().is_empty()
+        })
+    });
+    // An empty `-H 'Name:'` is not sent. The client still derives Host from the
+    // URL; unlike system curl, this does not omit Host from the wire request.
     headers.retain(|h| {
         h.split_once(':')
             .is_none_or(|(_, value)| !value.trim().is_empty())
@@ -417,8 +423,8 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                 }
             }
 
-            // Default content-type for POST data
-            if data.is_some() {
+            // Default content-type for POST data, unless explicitly removed.
+            if data.is_some() && !suppress_content_type {
                 let has_ct = req_headers
                     .iter()
                     .any(|(n, _)| n.eq_ignore_ascii_case("content-type"));
