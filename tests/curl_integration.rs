@@ -1473,6 +1473,9 @@ fn curl_refuses_a_forwarded_host_that_names_another_host() {
             "Forwarded: for=192.0.2.1;host=\"other.example.test\"".to_string(),
             "Forwarded: note=\"a;host=ignored.example\";host=other.example.test".to_string(),
             format!("Forwarded: host={authority}, host=\"other.example.test\""),
+            // Header names match in any case.
+            "x-forwarded-host: other.example.test".to_string(),
+            "FORWARDED: HOST=other.example.test".to_string(),
         ] {
             let out = shell
                 .run(&format!("curl -s -H '{header}' {base}/items"))
@@ -1497,6 +1500,9 @@ fn curl_refuses_a_forwarded_host_that_names_another_host() {
                 "Forwarded: host=\"127\\.0.0.1:{}\"",
                 authority.rsplit_once(':').unwrap().1
             ),
+            // Unquoted addresses are common, though RFC 7239 wants them quoted.
+            "Forwarded: for=192.0.2.43:47011".to_string(),
+            "Forwarded: for=[2001:db8::1]".to_string(),
         ] {
             let out = shell
                 .run(&format!("curl -s -H '{header}' {base}/items"))
@@ -1612,6 +1618,13 @@ param = "api_key"
             assert_eq!(out.status, 0, "{url}: {}", out.stderr);
             assert!(
                 out.stdout.contains("query_api_key=fragment-key"),
+                "{url}: {}",
+                out.stdout
+            );
+            // The URL's own query survives next to the added parameter.
+            assert_eq!(
+                out.stdout.contains("query_a=1"),
+                url.contains("?a=1"),
                 "{url}: {}",
                 out.stdout
             );
@@ -2002,6 +2015,19 @@ fn curl_max_time_zero_and_huge_are_no_limit() {
             assert_eq!(out.status, 0, "-m {limit}: {}", out.stderr);
             assert_eq!(out.stdout, "Hello, World!", "-m {limit}");
         }
+    }));
+}
+
+#[test]
+fn curl_empty_user_agent_header_removes_the_default() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!("curl -H 'User-Agent:' {base}/echo"))
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(!out.stdout.contains("user-agent="), "{}", out.stdout);
     }));
 }
 

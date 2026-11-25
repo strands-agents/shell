@@ -1746,10 +1746,12 @@ fn forwarded_hosts(mut rest: &str) -> Option<Vec<String>> {
             }
             decoded
         } else {
-            // Keep accepting unquoted host:port and IPv6 authorities, as for Host.
+            // Keep accepting unquoted `ip:port` and `[v6]` values for every
+            // parameter. RFC 7239 wants them quoted, but clients often send
+            // `for=192.0.2.43:47011`, and none of these bytes can end a pair.
             let end = rest
                 .bytes()
-                .take_while(|b| is_token(*b) || (is_host && matches!(*b, b':' | b'[' | b']')))
+                .take_while(|b| is_token(*b) || matches!(*b, b':' | b'[' | b']'))
                 .count();
             if end == 0 {
                 return None;
@@ -1983,6 +1985,21 @@ mod url_safety_tests {
         ] {
             assert!(forwarded_hosts(field).unwrap().is_empty(), "{field}");
         }
+    }
+
+    #[test]
+    fn forwarded_hosts_accepts_unquoted_addresses() {
+        for field in [
+            "for=192.0.2.43:47011",
+            "for=[2001:db8::1]",
+            "for=[2001:db8::1]:4711;proto=https",
+        ] {
+            assert_eq!(forwarded_hosts(field), Some(vec![]), "{field:?}");
+        }
+        assert_eq!(
+            forwarded_hosts("for=192.0.2.43:47011;host=other.example"),
+            Some(vec!["other.example".to_string()])
+        );
     }
 
     #[test]
