@@ -1494,8 +1494,10 @@ fn url_matches_prefix(url: &url::Url, prefix: &str) -> bool {
 /// Whether a server could read `url` as leaving the path of the credential bound
 /// to `prefix`. The URL parser keeps `/alpha/..%2Fbeta` as one segment under
 /// `/alpha/`, but a server that decodes `%2F` or `%5C` before it resolves dot
-/// segments serves `/beta`. A credential bound to a whole host has no path to
-/// leave.
+/// segments serves `/beta`. A server that strips `;` parameters from a segment
+/// before it resolves dot segments, as Tomcat and Spring do, also serves
+/// `/alpha/..;/beta` as `/beta`. A credential bound to a whole host has no path
+/// to leave.
 fn leaves_path_scope(url: &url::Url, prefix: &str) -> bool {
     let bound_to_path = url::Url::parse(prefix).is_ok_and(|p| !matches!(p.path(), "" | "/"));
     if !bound_to_path {
@@ -1507,7 +1509,9 @@ fn leaves_path_scope(url: &url::Url, prefix: &str) -> bool {
         .replace("%2e", ".")
         .replace("%2f", "/")
         .replace("%5c", "/");
-    decoded.split('/').any(|segment| segment == "..")
+    decoded
+        .split('/')
+        .any(|segment| segment.split(';').next() == Some(".."))
 }
 
 /// Check if an IP address is private/loopback/link-local/IMDS.
@@ -1665,10 +1669,11 @@ fn without_query(url: &str) -> &str {
     url.split(['?', '#']).next().unwrap_or(url)
 }
 
-/// Refuse a `Host` header that names another host than the URL. The SSRF guard,
-/// the allowlist, and the credential match all judge the URL's host, but a front
-/// end that serves several sites from one address picks the site by `Host`. A
-/// different `Host` would send the request, and any credential on it, to a site
+/// Refuse a header that names another host than the URL. The SSRF guard, the
+/// allowlist, and the credential match all judge the URL's host, but a front end
+/// that serves several sites from one address picks the site by `Host`, and some
+/// pick it by `X-Forwarded-Host` or the `host=` of `Forwarded`. A different host
+/// in any of them would send the request, and any credential on it, to a site
 /// none of them judged.
 fn check_host_header(req: &HttpRequest) -> io::Result<()> {
     let refused = |reason: String| io::Error::new(io::ErrorKind::PermissionDenied, reason);
@@ -1679,13 +1684,39 @@ fn check_host_header(req: &HttpRequest) -> io::Result<()> {
         ))
     })?;
     for (name, value) in &req.headers {
-        if name.eq_ignore_ascii_case("host") && !names_host(&url, value) {
+        let named: Vec<&str> = if name.eq_ignore_ascii_case("host") {
+            vec![value.as_str()]
+        } else if name.eq_ignore_ascii_case("x-forwarded-host") {
+            value.split(',').collect()
+        } else if name.eq_ignore_ascii_case("forwarded") {
+            forwarded_hosts(value)
+        } else {
+            continue;
+        };
+        if !named.iter().all(|host| names_host(&url, host)) {
             return Err(refused(format!(
-                "access denied: Host header {value:?} does not name the host of the URL"
+                "access denied: {name} header {value:?} does not name the host of the URL"
             )));
         }
     }
     Ok(())
+}
+
+/// The `host=` values of a `Forwarded` header (RFC 7239), unquoted. Elements
+/// are separated by `,` and pairs within an element by `;`.
+fn forwarded_hosts(value: &str) -> Vec<&str> {
+    value
+        .split([',', ';'])
+        .filter_map(|pair| {
+            let (key, host) = pair.split_once('=')?;
+            key.trim().eq_ignore_ascii_case("host").then(|| {
+                let host = host.trim();
+                host.strip_prefix('"')
+                    .and_then(|h| h.strip_suffix('"'))
+                    .unwrap_or(host)
+            })
+        })
+        .collect()
 }
 
 /// Whether a `Host` header `value` names `url`'s host, and its port when it gives one.
@@ -1740,7 +1771,7 @@ impl reqwest::dns::Resolve for SafeResolver {
 
 #[cfg(test)]
 mod url_safety_tests {
-    use super::{check_url_safe, names_host, url_matches_prefix};
+    use super::{check_url_safe, forwarded_hosts, names_host, url_matches_prefix};
 
     // A1: IPv6 literals (incl. IPv4-mapped IMDS) must be blocked by
     // `check_url_safe` ITSELF — not merely by the SafeResolver/connection
@@ -1848,6 +1879,20 @@ mod url_safety_tests {
         assert!(names_host(&v6, "[::1]:8080"));
         assert!(names_host(&v6, "[::1]"));
         assert!(!names_host(&v6, "[::2]:8080"));
+    }
+
+    #[test]
+    fn forwarded_hosts_reads_every_host_pair() {
+        assert_eq!(forwarded_hosts("host=a.example"), ["a.example"]);
+        assert_eq!(
+            forwarded_hosts(r#"for=192.0.2.1;Host="a.example:8080";proto=https"#),
+            ["a.example:8080"]
+        );
+        assert_eq!(
+            forwarded_hosts("host=a.example, for=192.0.2.1;host=b.example"),
+            ["a.example", "b.example"]
+        );
+        assert!(forwarded_hosts("for=192.0.2.1;proto=https").is_empty());
     }
 
     #[test]

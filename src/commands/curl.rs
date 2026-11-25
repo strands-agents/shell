@@ -313,6 +313,13 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
     {
         headers.push(format!("User-Agent: {ua}"));
     }
+    // `-H 'Name:'` with nothing after the colon removes the header, as in curl,
+    // so `-H 'Host:'` leaves the client to set `Host` from the URL. This runs
+    // after the default `User-Agent`, which `-H 'User-Agent:'` also removes.
+    headers.retain(|h| {
+        h.split_once(':')
+            .is_none_or(|(_, value)| !value.trim().is_empty())
+    });
 
     if head && data.is_some() {
         if !silent {
@@ -394,8 +401,17 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
             let mut request_url = current_url.clone();
             for (name, value) in os.resolve_credential(&current_url, &method) {
                 if name == "__query_param__" {
-                    let sep = if request_url.contains('?') { "&" } else { "?" };
-                    request_url = format!("{}{}{}", request_url, sep, value);
+                    // The parameter goes into the query, ahead of any fragment:
+                    // after a `#` it is part of the fragment and never sent.
+                    let (base, fragment) = match request_url.split_once('#') {
+                        Some((base, fragment)) => (base, Some(fragment)),
+                        None => (request_url.as_str(), None),
+                    };
+                    let sep = if base.contains('?') { "&" } else { "?" };
+                    request_url = match fragment {
+                        Some(fragment) => format!("{base}{sep}{value}#{fragment}"),
+                        None => format!("{base}{sep}{value}"),
+                    };
                 } else {
                     req_headers.push((name, value));
                 }

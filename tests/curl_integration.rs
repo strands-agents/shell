@@ -1384,6 +1384,14 @@ fn curl_path_credential_stays_inside_its_prefix() {
                 "/v1/projects/alpha/..%2Fbeta/items",
                 "/v1/projects/alpha/..%2Fbeta/items",
             ),
+            (
+                "/v1/projects/alpha/..;/beta/items",
+                "/v1/projects/alpha/..;/beta/items",
+            ),
+            (
+                "/v1/projects/alpha/..;x=1/beta/items",
+                "/v1/projects/alpha/..;x=1/beta/items",
+            ),
         ] {
             let out = shell.run(&format!("curl -s '{base}{path}'")).await;
             assert_eq!(out.status, 0, "{path}: {}", out.stderr);
@@ -1440,6 +1448,112 @@ fn curl_refuses_a_host_header_that_names_another_host() {
             out.stdout,
             format!("target=/items host={authority} authorization=Bearer host-token")
         );
+    }));
+}
+
+#[test]
+fn curl_refuses_a_forwarded_host_that_names_another_host() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let authority = base.strip_prefix("http://").unwrap();
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .credential(
+                format!("{base}/"),
+                strands_shell::CredKind::Bearer,
+                "host-token",
+            )
+            .build()
+            .unwrap();
+        for header in [
+            "X-Forwarded-Host: other.example.test".to_string(),
+            format!("X-Forwarded-Host: {authority}, other.example.test"),
+            "Forwarded: host=other.example.test".to_string(),
+            "Forwarded: for=192.0.2.1;host=\"other.example.test\"".to_string(),
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H '{header}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 1, "{header}: {}", out.stderr);
+            assert_eq!(out.stdout, "", "{header}");
+            assert!(
+                out.stderr.contains("does not name the host of the URL"),
+                "{header}: {}",
+                out.stderr
+            );
+        }
+        // Headers that name the URL's host, or carry no host, go out.
+        for header in [
+            format!("X-Forwarded-Host: {authority}"),
+            format!("Forwarded: host={authority};proto=http"),
+            "Forwarded: for=192.0.2.1".to_string(),
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H '{header}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 0, "{header}: {}", out.stderr);
+            assert!(
+                out.stdout.ends_with("authorization=Bearer host-token"),
+                "{header}: {}",
+                out.stdout
+            );
+        }
+    }));
+}
+
+#[test]
+fn curl_empty_host_header_removes_it() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let authority = base.strip_prefix("http://").unwrap();
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        // As in curl, `-H 'Host:'` removes the header, and the client sets
+        // `Host` from the URL.
+        let out = shell.run(&format!("curl -s -H 'Host:' {base}/items")).await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(
+            out.stdout,
+            format!("target=/items host={authority} authorization=none")
+        );
+    }));
+}
+
+#[test]
+fn curl_query_credential_goes_ahead_of_a_fragment() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_server().await;
+        let dir = TestDir::new("lsh_query_cred_fragment_test");
+        let config_path = dir.join("query_cred.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[[cred]]
+url = "{base}/"
+kind = "query"
+api_key = "fragment-key"
+param = "api_key"
+"#
+            ),
+        )
+        .unwrap();
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .config_file(&config_path)
+            .unwrap()
+            .build()
+            .unwrap();
+        for url in [format!("{base}/echo#part"), format!("{base}/echo?a=1#part")] {
+            let out = shell.run(&format!("curl -s '{url}'")).await;
+            assert!(
+                out.stdout.contains("query_api_key=fragment-key"),
+                "{url}: {}",
+                out.stdout
+            );
+        }
     }));
 }
 
