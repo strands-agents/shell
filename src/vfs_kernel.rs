@@ -1669,12 +1669,12 @@ fn without_query(url: &str) -> &str {
     url.split(['?', '#']).next().unwrap_or(url)
 }
 
-/// Refuse a header that names another host than the URL. The SSRF guard, the
-/// allowlist, and the credential match all judge the URL's host, but a front end
-/// that serves several sites from one address picks the site by `Host`, and some
-/// pick it by `X-Forwarded-Host` or the `host=` of `Forwarded`. A different host
-/// in any of them would send the request, and any credential on it, to a site
-/// none of them judged.
+/// Check `Host`, each `X-Forwarded-Host` entry, and each actual `host` parameter
+/// in `Forwarded` against the URL. URL-based access and credential checks do not
+/// inspect this proxy metadata. `Forwarded` parameter boundaries and quoted
+/// values follow RFC 7239; extension names and text inside quoted values are not
+/// host parameters. This check does not model nonstandard interpretations in
+/// downstream frameworks or other headers a server may use to select a site.
 fn check_host_header(req: &HttpRequest) -> io::Result<()> {
     let refused = |reason: String| io::Error::new(io::ErrorKind::PermissionDenied, reason);
     let url = url::Url::parse(&req.url).map_err(|_| {
@@ -1704,9 +1704,9 @@ fn check_host_header(req: &HttpRequest) -> io::Result<()> {
     Ok(())
 }
 
-/// Read every `host=` value in a `Forwarded` header, decoding quoted pairs.
+/// Read actual `host` parameters in a `Forwarded` header, decoding quoted pairs.
 /// Delimiters inside quoted strings belong to the value, not the parameter list.
-/// Reject malformed syntax so it cannot hide a host parameter from the check.
+/// Reject unparseable syntax rather than skip a possible host parameter.
 fn forwarded_hosts(mut rest: &str) -> Option<Vec<String>> {
     let is_token = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
     let mut hosts = Vec::new();
