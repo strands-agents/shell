@@ -1384,6 +1384,14 @@ fn curl_path_credential_stays_inside_its_prefix() {
                 "/v1/projects/alpha/..%2Fbeta/items",
                 "/v1/projects/alpha/..%2Fbeta/items",
             ),
+            (
+                "/v1/projects/alpha/..;/beta/items",
+                "/v1/projects/alpha/..;/beta/items",
+            ),
+            (
+                "/v1/projects/alpha/..;x=1/beta/items",
+                "/v1/projects/alpha/..;x=1/beta/items",
+            ),
         ] {
             let out = shell.run(&format!("curl -s '{base}{path}'")).await;
             assert_eq!(out.status, 0, "{path}: {}", out.stderr);
@@ -1440,6 +1448,187 @@ fn curl_refuses_a_host_header_that_names_another_host() {
             out.stdout,
             format!("target=/items host={authority} authorization=Bearer host-token")
         );
+    }));
+}
+
+#[test]
+fn curl_refuses_a_forwarded_host_that_names_another_host() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let authority = base.strip_prefix("http://").unwrap();
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .credential(
+                format!("{base}/"),
+                strands_shell::CredKind::Bearer,
+                "host-token",
+            )
+            .build()
+            .unwrap();
+        for header in [
+            "X-Forwarded-Host: other.example.test".to_string(),
+            format!("X-Forwarded-Host: {authority}, other.example.test"),
+            "Forwarded: host=other.example.test".to_string(),
+            "Forwarded: for=192.0.2.1;host=\"other.example.test\"".to_string(),
+            "Forwarded: note=\"a;host=ignored.example\";host=other.example.test".to_string(),
+            format!("Forwarded: host={authority}, host=\"other.example.test\""),
+            // Header names match in any case.
+            "x-forwarded-host: other.example.test".to_string(),
+            "FORWARDED: HOST=other.example.test".to_string(),
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H '{header}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 1, "{header}: {}", out.stderr);
+            assert_eq!(out.stdout, "", "{header}");
+            assert!(
+                out.stderr.contains("does not name the host of the URL"),
+                "{header}: {}",
+                out.stderr
+            );
+        }
+        // Headers that name the URL's host, or carry no host, go out.
+        for header in [
+            format!("X-Forwarded-Host: {authority}"),
+            format!("Forwarded: host={authority};proto=http"),
+            "Forwarded: for=192.0.2.1".to_string(),
+            "Forwarded: for=192.0.2.1;note=\"a;host=other.example.test\"".to_string(),
+            "Forwarded: for=192.0.2.1;note=\"a,host=other.example.test\"".to_string(),
+            format!("Forwarded: note=\"a;host=ignored.example\";host=\"{authority}\""),
+            format!(
+                "Forwarded: host=\"127\\.0.0.1:{}\"",
+                authority.rsplit_once(':').unwrap().1
+            ),
+            // Unquoted addresses are common, though RFC 7239 wants them quoted.
+            "Forwarded: for=192.0.2.43:47011".to_string(),
+            "Forwarded: for=[2001:db8::1]".to_string(),
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H '{header}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 0, "{header}: {}", out.stderr);
+            assert!(
+                out.stdout.ends_with("authorization=Bearer host-token"),
+                "{header}: {}",
+                out.stdout
+            );
+        }
+    }));
+}
+
+#[test]
+fn curl_empty_host_header_removes_it() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let authority = base.strip_prefix("http://").unwrap();
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        // Shell removes the empty override but still derives Host from the URL.
+        // System curl omits Host entirely for this option.
+        let out = shell.run(&format!("curl -s -H 'Host:' {base}/items")).await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(
+            out.stdout,
+            format!("target=/items host={authority} authorization=none")
+        );
+    }));
+}
+
+#[test]
+fn curl_content_type_removal_preserves_post_defaults_and_overrides() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        for (args, expected) in [
+            ("-d a=b", Some("application/x-www-form-urlencoded")),
+            ("-d a=b -H 'Content-Type: text/plain'", Some("text/plain")),
+            ("-d a=b -H 'Content-Type:'", None),
+            ("-H 'cOnTeNt-TyPe:   ' -d a=b", None),
+            (
+                "-H 'Content-Type:' -H 'Content-Type: text/plain' -d a=b",
+                Some("text/plain"),
+            ),
+        ] {
+            let out = shell.run(&format!("curl -s {args} {base}/echo")).await;
+            assert_eq!(out.status, 0, "{args}: {}", out.stderr);
+            assert!(out.stdout.contains("body=a=b"), "{args}: {}", out.stdout);
+            let content_type = out
+                .stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("content-type="));
+            assert_eq!(content_type, expected, "{args}: {}", out.stdout);
+        }
+    }));
+}
+
+#[test]
+fn curl_refuses_malformed_forwarded_headers() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        for value in [
+            "host=\"unterminated",
+            "note=\"dangling\\",
+            "note=\"value\"host=other.example.test",
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H 'Forwarded: {value}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 1, "{value}: {}", out.stderr);
+            assert!(out.stdout.is_empty(), "{value}: {}", out.stdout);
+            assert!(
+                out.stderr.contains("access denied"),
+                "{value}: {}",
+                out.stderr
+            );
+        }
+    }));
+}
+
+#[test]
+fn curl_query_credential_goes_ahead_of_a_fragment() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_server().await;
+        let dir = TestDir::new("lsh_query_cred_fragment_test");
+        let config_path = dir.join("query_cred.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[[cred]]
+url = "{base}/"
+kind = "query"
+api_key = "fragment-key"
+param = "api_key"
+"#
+            ),
+        )
+        .unwrap();
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .config_file(&config_path)
+            .unwrap()
+            .build()
+            .unwrap();
+        for url in [format!("{base}/echo#part"), format!("{base}/echo?a=1#part")] {
+            let out = shell.run(&format!("curl -s '{url}'")).await;
+            assert_eq!(out.status, 0, "{url}: {}", out.stderr);
+            assert!(
+                out.stdout.contains("query_api_key=fragment-key"),
+                "{url}: {}",
+                out.stdout
+            );
+            // The URL's own query survives next to the added parameter.
+            assert_eq!(
+                out.stdout.contains("query_a=1"),
+                url.contains("?a=1"),
+                "{url}: {}",
+                out.stdout
+            );
+        }
     }));
 }
 
@@ -1826,6 +2015,19 @@ fn curl_max_time_zero_and_huge_are_no_limit() {
             assert_eq!(out.status, 0, "-m {limit}: {}", out.stderr);
             assert_eq!(out.stdout, "Hello, World!", "-m {limit}");
         }
+    }));
+}
+
+#[test]
+fn curl_empty_user_agent_header_removes_the_default() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!("curl -H 'User-Agent:' {base}/echo"))
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(!out.stdout.contains("user-agent="), "{}", out.stdout);
     }));
 }
 

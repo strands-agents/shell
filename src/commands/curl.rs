@@ -313,6 +313,19 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
     {
         headers.push(format!("User-Agent: {ua}"));
     }
+    // Preserve an explicit Content-Type removal so POST data does not restore
+    // the default after empty header values are discarded.
+    let suppress_content_type = headers.iter().any(|h| {
+        h.split_once(':').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("content-type") && value.trim().is_empty()
+        })
+    });
+    // An empty `-H 'Name:'` is not sent. The client still derives Host from the
+    // URL; unlike system curl, this does not omit Host from the wire request.
+    headers.retain(|h| {
+        h.split_once(':')
+            .is_none_or(|(_, value)| !value.trim().is_empty())
+    });
 
     if head && data.is_some() {
         if !silent {
@@ -394,15 +407,24 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
             let mut request_url = current_url.clone();
             for (name, value) in os.resolve_credential(&current_url, &method) {
                 if name == "__query_param__" {
-                    let sep = if request_url.contains('?') { "&" } else { "?" };
-                    request_url = format!("{}{}{}", request_url, sep, value);
+                    // The parameter goes into the query, ahead of any fragment:
+                    // after a `#` it is part of the fragment and never sent.
+                    let (base, fragment) = match request_url.split_once('#') {
+                        Some((base, fragment)) => (base, Some(fragment)),
+                        None => (request_url.as_str(), None),
+                    };
+                    let sep = if base.contains('?') { "&" } else { "?" };
+                    request_url = match fragment {
+                        Some(fragment) => format!("{base}{sep}{value}#{fragment}"),
+                        None => format!("{base}{sep}{value}"),
+                    };
                 } else {
                     req_headers.push((name, value));
                 }
             }
 
-            // Default content-type for POST data
-            if data.is_some() {
+            // Default content-type for POST data, unless explicitly removed.
+            if data.is_some() && !suppress_content_type {
                 let has_ct = req_headers
                     .iter()
                     .any(|(n, _)| n.eq_ignore_ascii_case("content-type"));

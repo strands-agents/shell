@@ -1494,8 +1494,10 @@ fn url_matches_prefix(url: &url::Url, prefix: &str) -> bool {
 /// Whether a server could read `url` as leaving the path of the credential bound
 /// to `prefix`. The URL parser keeps `/alpha/..%2Fbeta` as one segment under
 /// `/alpha/`, but a server that decodes `%2F` or `%5C` before it resolves dot
-/// segments serves `/beta`. A credential bound to a whole host has no path to
-/// leave.
+/// segments serves `/beta`. A server that strips `;` parameters from a segment
+/// before it resolves dot segments, as Tomcat and Spring do, also serves
+/// `/alpha/..;/beta` as `/beta`. A credential bound to a whole host has no path
+/// to leave.
 fn leaves_path_scope(url: &url::Url, prefix: &str) -> bool {
     let bound_to_path = url::Url::parse(prefix).is_ok_and(|p| !matches!(p.path(), "" | "/"));
     if !bound_to_path {
@@ -1507,7 +1509,9 @@ fn leaves_path_scope(url: &url::Url, prefix: &str) -> bool {
         .replace("%2e", ".")
         .replace("%2f", "/")
         .replace("%5c", "/");
-    decoded.split('/').any(|segment| segment == "..")
+    decoded
+        .split('/')
+        .any(|segment| segment.split(';').next() == Some(".."))
 }
 
 /// Check if an IP address is private/loopback/link-local/IMDS.
@@ -1665,11 +1669,12 @@ fn without_query(url: &str) -> &str {
     url.split(['?', '#']).next().unwrap_or(url)
 }
 
-/// Refuse a `Host` header that names another host than the URL. The SSRF guard,
-/// the allowlist, and the credential match all judge the URL's host, but a front
-/// end that serves several sites from one address picks the site by `Host`. A
-/// different `Host` would send the request, and any credential on it, to a site
-/// none of them judged.
+/// Check `Host`, each `X-Forwarded-Host` entry, and each actual `host` parameter
+/// in `Forwarded` against the URL. URL-based access and credential checks do not
+/// inspect this proxy metadata. `Forwarded` parameter boundaries and quoted
+/// values follow RFC 7239; extension names and text inside quoted values are not
+/// host parameters. This check does not model nonstandard interpretations in
+/// downstream frameworks or other headers a server may use to select a site.
 fn check_host_header(req: &HttpRequest) -> io::Result<()> {
     let refused = |reason: String| io::Error::new(io::ErrorKind::PermissionDenied, reason);
     let url = url::Url::parse(&req.url).map_err(|_| {
@@ -1679,13 +1684,90 @@ fn check_host_header(req: &HttpRequest) -> io::Result<()> {
         ))
     })?;
     for (name, value) in &req.headers {
-        if name.eq_ignore_ascii_case("host") && !names_host(&url, value) {
+        let matches = if name.eq_ignore_ascii_case("host") {
+            names_host(&url, value)
+        } else if name.eq_ignore_ascii_case("x-forwarded-host") {
+            value.split(',').all(|host| names_host(&url, host))
+        } else if name.eq_ignore_ascii_case("forwarded") {
+            let hosts = forwarded_hosts(value)
+                .ok_or_else(|| refused("access denied: malformed Forwarded header".into()))?;
+            hosts.iter().all(|host| names_host(&url, host))
+        } else {
+            continue;
+        };
+        if !matches {
             return Err(refused(format!(
-                "access denied: Host header {value:?} does not name the host of the URL"
+                "access denied: {name} header {value:?} does not name the host of the URL"
             )));
         }
     }
     Ok(())
+}
+
+/// Read actual `host` parameters in a `Forwarded` header, decoding quoted pairs.
+/// Delimiters inside quoted strings belong to the value, not the parameter list.
+/// Reject unparseable syntax rather than skip a possible host parameter.
+fn forwarded_hosts(mut rest: &str) -> Option<Vec<String>> {
+    let is_token = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    let mut hosts = Vec::new();
+    loop {
+        rest = rest.trim_start_matches([' ', '\t']);
+        if rest.is_empty() {
+            return Some(hosts);
+        }
+        // RFC 7239 permits empty pairs, and HTTP lists permit empty elements.
+        if rest.starts_with([',', ';']) {
+            rest = &rest[1..];
+            continue;
+        }
+        let key_end = rest.bytes().take_while(|b| is_token(*b)).count();
+        if key_end == 0 {
+            return None;
+        }
+        let is_host = rest[..key_end].eq_ignore_ascii_case("host");
+        rest = rest[key_end..].trim_start_matches([' ', '\t']);
+        rest = rest.strip_prefix('=')?.trim_start_matches([' ', '\t']);
+        let value = if let Some(quoted) = rest.strip_prefix('"') {
+            let mut decoded = String::new();
+            let mut chars = quoted.char_indices();
+            loop {
+                let (i, mut c) = chars.next()?;
+                if c == '"' {
+                    rest = &quoted[i + 1..];
+                    break;
+                }
+                if c == '\\' {
+                    c = chars.next()?.1;
+                }
+                if c.is_ascii_control() && c != '\t' {
+                    return None;
+                }
+                decoded.push(c);
+            }
+            decoded
+        } else {
+            // Keep accepting unquoted `ip:port` and `[v6]` values for every
+            // parameter. RFC 7239 wants them quoted, but clients often send
+            // `for=192.0.2.43:47011`, and none of these bytes can end a pair.
+            let end = rest
+                .bytes()
+                .take_while(|b| is_token(*b) || matches!(*b, b':' | b'[' | b']'))
+                .count();
+            if end == 0 {
+                return None;
+            }
+            let value = rest[..end].to_string();
+            rest = &rest[end..];
+            value
+        };
+        rest = rest.trim_start_matches([' ', '\t']);
+        if !rest.is_empty() && !rest.starts_with([',', ';']) {
+            return None;
+        }
+        if is_host {
+            hosts.push(value);
+        }
+    }
 }
 
 /// Whether a `Host` header `value` names `url`'s host, and its port when it gives one.
@@ -1740,7 +1822,10 @@ impl reqwest::dns::Resolve for SafeResolver {
 
 #[cfg(test)]
 mod url_safety_tests {
-    use super::{check_url_safe, names_host, url_matches_prefix};
+    use super::{
+        check_host_header, check_url_safe, forwarded_hosts, names_host, url_matches_prefix,
+    };
+    use crate::os::HttpRequest;
 
     // A1: IPv6 literals (incl. IPv4-mapped IMDS) must be blocked by
     // `check_url_safe` ITSELF — not merely by the SafeResolver/connection
@@ -1848,6 +1933,128 @@ mod url_safety_tests {
         assert!(names_host(&v6, "[::1]:8080"));
         assert!(names_host(&v6, "[::1]"));
         assert!(!names_host(&v6, "[::2]:8080"));
+    }
+
+    #[test]
+    fn forwarded_hosts_reads_every_host_pair() {
+        assert_eq!(forwarded_hosts("host=a.example").unwrap(), ["a.example"]);
+        assert_eq!(
+            forwarded_hosts(r#"for=192.0.2.1;Host="a.example:8080";proto=https"#).unwrap(),
+            ["a.example:8080"]
+        );
+        assert_eq!(
+            forwarded_hosts("host=a.example, for=192.0.2.1;host=b.example").unwrap(),
+            ["a.example", "b.example"]
+        );
+        assert_eq!(
+            forwarded_hosts("host=a.example;host=b.example").unwrap(),
+            ["a.example", "b.example"]
+        );
+        assert_eq!(
+            forwarded_hosts("host=127.0.0.1:8080,host=[2001:db8::1]:8080").unwrap(),
+            ["127.0.0.1:8080", "[2001:db8::1]:8080"]
+        );
+    }
+
+    #[test]
+    fn forwarded_hosts_preserves_quoted_values() {
+        for (field, expected) in [
+            (
+                r#"ext="hello;host=other.example";host=a.example"#,
+                "a.example",
+            ),
+            (
+                r#"ext="hello,host=other.example";host=a.example"#,
+                "a.example",
+            ),
+            (
+                r#"ext="hello\";host=other.example";host=a.example"#,
+                "a.example",
+            ),
+            (r#"ext="hello\\";host=a.example"#, "a.example"),
+            (r#"host="a.ex\ample.com""#, "a.example.com"),
+        ] {
+            assert_eq!(forwarded_hosts(field).unwrap(), [expected], "{field}");
+        }
+        for field in [
+            "for=192.0.2.1;proto=https",
+            r#"ext="hello;host=other.example""#,
+            r#"ext="hello,host=other.example""#,
+            r#"ext="""#,
+            " , ; for=unknown; , ",
+        ] {
+            assert!(forwarded_hosts(field).unwrap().is_empty(), "{field}");
+        }
+    }
+
+    #[test]
+    fn forwarded_hosts_accepts_unquoted_addresses() {
+        for field in [
+            "for=192.0.2.43:47011",
+            "for=[2001:db8::1]",
+            "for=[2001:db8::1]:4711;proto=https",
+        ] {
+            assert_eq!(forwarded_hosts(field), Some(vec![]), "{field:?}");
+        }
+        assert_eq!(
+            forwarded_hosts("for=192.0.2.43:47011;host=other.example"),
+            Some(vec!["other.example".to_string()])
+        );
+    }
+
+    #[test]
+    fn forwarded_hosts_rejects_malformed_fields() {
+        for field in [
+            "host",
+            "host=",
+            "=a.example",
+            "host=a.example host=other.example",
+            r#"host="a.example"host=other.example"#,
+            r#"ext="unterminated;host=other.example"#,
+            "ext=\"trailing\\",
+            r#"ext=bare"quote;host=other.example"#,
+            "ext=bad\\escape;host=other.example",
+            "ext=bad/value;host=other.example",
+            "höst=a.example",
+            "ext=\"line\rbreak\";host=a.example",
+            "ext=\"line\nbreak\";host=a.example",
+            "ext=\"escaped\\\nbreak\";host=a.example",
+        ] {
+            assert!(forwarded_hosts(field).is_none(), "{field:?}");
+        }
+    }
+
+    #[test]
+    fn host_header_checks_every_forwarded_host() {
+        let request = |value: &str| HttpRequest {
+            method: "GET".into(),
+            url: "https://api.example.com/x".into(),
+            headers: vec![("Forwarded".into(), value.into())],
+            body: None,
+            insecure: false,
+            max_response: 0,
+        };
+        for value in [
+            "host=api.example.com",
+            r#"host="api.exam\ple.com""#,
+            r#"ext="hello;host=other.example";host=api.example.com"#,
+            r#"ext="hello,host=other.example""#,
+            "for=192.0.2.1;proto=https",
+            r#"host=api.example.com,for=192.0.2.2;host="api.example.com:443""#,
+        ] {
+            assert!(check_host_header(&request(value)).is_ok(), "{value}");
+        }
+        for value in [
+            "host=other.example",
+            "host=api.example.com,host=other.example",
+            "host=api.example.com;host=other.example",
+            r#"ext="hello;host=api.example.com";host=other.example"#,
+            r#"host="other\.example""#,
+            r#"ext="unterminated;host=api.example.com"#,
+        ] {
+            let err = check_host_header(&request(value)).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{value}");
+        }
     }
 
     #[test]
