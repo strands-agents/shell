@@ -1,0 +1,33 @@
+status: 0
+stderr: empty
+--- stdout
+nomatch
+nomatch
+nomatch
+unquoted-var-globs
+same
+literal-star
+mixed-nomatch
+mixed-prefix
+backslash
+sub: nomatch
+sub: same
+has-backslash
+no-backslash
+match
+escape
+sub: has-backslash
+plain
+plain
+has-glob
+not-star
+var-escape
+var-nomatch
+tilde
+in-range
+out
+in-range
+in-range
+out
+member
+cond-in-range

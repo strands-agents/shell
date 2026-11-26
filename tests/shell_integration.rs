@@ -3160,6 +3160,53 @@ fn compound_pipe_stderr_from_cli() {
     assert!(out.status.success());
 }
 
+/// Runs `script` through the CLI binary and returns its stdout (#383).
+fn compound_pipe_into_function_cli(name: &str, script: &str) -> String {
+    let dir = TestDir::new(name);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_strands-shell"))
+        .arg("-c")
+        .arg(script)
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+// In process, since a function call inside `$( )` overflows the 1 MiB main
+// thread stack of a Windows debug build of the CLI.
+#[test]
+fn compound_pipe_into_function_in_substitution_from_execute() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        shell
+            .execute("g() { cat; }; x=$( { echo a; } | g ); y=$( (echo b) | g )")
+            .await;
+        let out = shell.run("echo \"[$x][$y]\"").await;
+        assert_eq!(out.stdout, "[a][b]\n");
+    }));
+}
+
+#[test]
+fn compound_pipe_into_function_redirected_from_cli() {
+    let out = compound_pipe_into_function_cli(
+        "compound_pipe_fn_redirect_cli",
+        "g() { cat; }; { { echo a; } | g; } > f; echo \"file:$(cat f)\"",
+    );
+    assert_eq!(out, "file:a\n");
+}
+
+#[test]
+fn compound_pipe_into_function_piped_from_cli() {
+    let out = compound_pipe_into_function_cli(
+        "compound_pipe_fn_pipe_cli",
+        "g() { cat; }; { echo a; } | g | cat; for i in 1 2; do { echo $i; } | g; done | tr 12 xy",
+    );
+    assert_eq!(out, "a\nx\ny\n");
+}
+
 // ── Subshell stderr in captured paths ───────────────────────────────
 
 expect_streams!(subshell_stderr_plain, "( echo e >&2 )", "", "e\n");
@@ -6242,6 +6289,47 @@ fn timeout_in_substitution_reports_once_and_stops_the_list() {
     }
 }
 
+// A command substitution that starts after the deadline reports the timeout,
+// not the recursion limit (#260). Commands that report nothing themselves,
+// like `[[ ]]`, `exit`, `return` and `command -v`, must not go silent.
+#[test]
+fn substitution_after_the_deadline_reports_the_timeout_not_recursion() {
+    for command in [
+        "echo $(sleep 5) $(echo second)",
+        "echo \"$(sleep 5)\" \"$(echo second)\"",
+        "x=$(sleep 5) y=$(echo second)",
+        "exec echo hi $(sleep 5) $(echo second)",
+        "for i in $(sleep 5) $(echo second); do echo $i; done",
+        "[[ $(sleep 5) != $(echo second) ]]",
+        "exit $(sleep 5)$(echo 0)",
+        "f() { return $(sleep 5)$(echo 0); }; f",
+        "command -v nope $(sleep 5) $(echo second)",
+    ] {
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let mut shell = Shell::builder()
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert_eq!(out.status, 1, "{command}: stderr={:?}", out.stderr);
+            assert_eq!(out.stdout, "", "{command}: the command ran");
+            assert!(
+                !out.stderr.contains("recursion"),
+                "{command}: stderr={:?}",
+                out.stderr
+            );
+            assert!(
+                out.stderr
+                    .lines()
+                    .any(|line| line == "strands-shell: execution timeout exceeded"),
+                "{command}: stderr={:?}",
+                out.stderr
+            );
+        }));
+    }
+}
+
 // A command substitution that ends in time still lets its command run.
 #[test]
 fn substitution_within_timeout_runs_the_command() {
@@ -9012,6 +9100,175 @@ fn bind_direct_readlink_does_not_follow_a_directory_out_of_the_bind() {
         let out = shell.run("readlink /b/escape/inner").await;
         assert!(!out.stdout.contains("ESCAPED"), "stdout: {}", out.stdout);
         assert_ne!(out.status, 0);
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_test_h_sees_symlinks() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_test_h");
+        std::fs::create_dir(dir.join("d")).unwrap();
+        std::fs::write(dir.join("f"), "x").unwrap();
+        std::os::unix::fs::symlink("d", dir.join("ld")).unwrap();
+        std::os::unix::fs::symlink("f", dir.join("lf")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        for (expr, status) in [
+            ("test -L /b/ld", 0),
+            ("[ -h /b/ld ]", 0),
+            ("test -L /b/lf", 0),
+            ("cd /b && [ -h ld ]", 0),
+            ("test -L /b/d", 1),
+            ("[ -h /b/f ]", 1),
+            ("test -L /b", 1),
+            ("[ -d /b/ld ]", 0),
+        ] {
+            let out = shell.run(expr).await;
+            assert_eq!(out.status, status, "{expr}: {}", out.stderr);
+        }
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_rm_removes_symlinks_not_their_targets() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_rm_symlink");
+        std::fs::create_dir_all(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/keep"), "keep").unwrap();
+        std::fs::create_dir(dir.join("w")).unwrap();
+        std::os::unix::fs::symlink("../d", dir.join("w/l")).unwrap();
+        std::fs::write(dir.join("f"), "f").unwrap();
+        std::os::unix::fs::symlink("f", dir.join("lf")).unwrap();
+        std::fs::create_dir(dir.join("e")).unwrap();
+        std::os::unix::fs::symlink("e", dir.join("le")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+
+        let out = shell.run("rm -r /b/w").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert!(!dir.join("w").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("d/keep")).unwrap(), "keep");
+
+        let out = shell.run("rm /b/lf").await;
+        assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+        assert!(dir.join("lf").symlink_metadata().is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("f")).unwrap(), "f");
+
+        let out = shell.run("rmdir /b/le").await;
+        assert_ne!(out.status, 0);
+        assert!(dir.join("e").is_dir());
+        assert!(dir.join("le").symlink_metadata().is_ok());
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_trailing_slash_or_dot_follows_a_directory_link() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_link_dot");
+        std::fs::create_dir(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/keep"), "k").unwrap();
+        std::os::unix::fs::symlink("d", dir.join("ld")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        for (script, stdout) in [
+            ("cd /b/ld && find . -name keep", "./keep\n"),
+            ("find /b/ld/ -name keep", "/b/ld/keep\n"),
+            ("ls /b/ld/", "keep\n"),
+            ("cd /b/ld && ls .", "keep\n"),
+            ("test -L /b/ld/; echo $?", "1\n"),
+            ("test -L /b/ld/.; echo $?", "1\n"),
+        ] {
+            let out = shell.run(script).await;
+            assert_eq!(out.stdout, stdout, "{script}: {}", out.stderr);
+        }
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_readonly_keeps_symlinks() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_ro_symlink");
+        std::fs::create_dir_all(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/keep"), "keep").unwrap();
+        std::fs::create_dir(dir.join("w")).unwrap();
+        std::os::unix::fs::symlink("../d", dir.join("w/l")).unwrap();
+        std::fs::write(dir.join("f"), "f").unwrap();
+        std::os::unix::fs::symlink("f", dir.join("lf")).unwrap();
+        std::os::unix::fs::symlink("d", dir.join("ld")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct_readonly(dir.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        for script in ["rm /b/lf", "rm /b/ld", "rmdir /b/ld", "rm -r /b/w"] {
+            let out = shell.run(script).await;
+            assert_ne!(out.status, 0, "{script}");
+        }
+        for link in ["lf", "ld", "w/l"] {
+            assert!(dir.join(link).symlink_metadata().unwrap().is_symlink());
+        }
+        assert_eq!(std::fs::read_to_string(dir.join("f")).unwrap(), "f");
+        assert_eq!(std::fs::read_to_string(dir.join("d/keep")).unwrap(), "keep");
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_direct_rm_of_links_leaving_the_bind() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let dir = TestDir::new("lsh_bind_rm_escape");
+        let mount = dir.join("mount");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&mount).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), "s").unwrap();
+        std::os::unix::fs::symlink("secret", outside.join("inner")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret"), mount.join("out")).unwrap();
+        std::os::unix::fs::symlink("nowhere", mount.join("dangling")).unwrap();
+        std::os::unix::fs::symlink(&outside, mount.join("escape")).unwrap();
+        let mut shell = Shell::builder()
+            .bind_direct(mount.to_str().unwrap(), "/b")
+            .build()
+            .unwrap();
+        for link in ["/b/out", "/b/dangling"] {
+            let out = shell.run(&format!("test -L {link} && rm {link}")).await;
+            assert_eq!(out.status, 0, "{link}: {}", out.stderr);
+        }
+        assert!(mount.join("out").symlink_metadata().is_err());
+        assert!(mount.join("dangling").symlink_metadata().is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("secret")).unwrap(),
+            "s"
+        );
+
+        let out = shell.run("test -L /b/escape/inner").await;
+        assert_eq!(out.status, 1);
+        for script in [
+            "rm /b/escape/inner",
+            "rm -rf /b/escape/inner",
+            "rmdir /b/escape/inner",
+        ] {
+            shell.run(script).await;
+            assert!(outside.join("inner").symlink_metadata().is_ok(), "{script}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.join("secret")).unwrap(),
+            "s"
+        );
     }));
 }
 
@@ -12310,6 +12567,65 @@ fn cred_no_match() {
     }
 }
 
+#[test]
+fn cred_path_prefix_matches_the_url_as_sent() {
+    let shell = Shell::builder()
+        .credential(
+            "https://api.example.com/v1/projects/alpha/",
+            strands_shell::CredKind::Bearer,
+            "alpha-token",
+        )
+        .build()
+        .unwrap();
+    let kernel = shell.kernel();
+    for url in [
+        "https://api.example.com/v1/projects/alpha/items",
+        "https://API.example.com/v1/projects/alpha/items",
+        "https://api.example.com:443/v1/projects/alpha/items",
+        "https://api.example.com/v1/projects/alpha/x/../items",
+        // An encoded slash with no `..` around it names a path inside the prefix.
+        "https://api.example.com/v1/projects/alpha/group%2Fname/items",
+    ] {
+        assert!(
+            !kernel.resolve_credential(url, "GET").is_empty(),
+            "credential expected for {url}"
+        );
+    }
+    for url in [
+        "https://api.example.com/v1/projects/beta/items",
+        "https://api.example.com/v1/projects/alphabet/items",
+        "https://api.example.com/v1/projects/alpha/../beta/items",
+        "https://api.example.com/v1/projects/alpha/%2e%2e/beta/items",
+        "https://api.example.com/v1/projects/alpha/%2E%2E/%2e%2e/admin/keys",
+        "https://api.example.com/v1/projects/alpha/..\\beta/items",
+        "https://api.example.com/v1/projects/alpha/..%2Fbeta/items",
+        "https://api.example.com/v1/projects/alpha/%2e%2e%5Cbeta/items",
+    ] {
+        assert!(
+            kernel.resolve_credential(url, "GET").is_empty(),
+            "no credential expected for {url}"
+        );
+    }
+}
+
+#[test]
+fn cred_for_a_whole_host_ignores_encoded_dot_segments() {
+    let shell = Shell::builder()
+        .credential(
+            "https://api.example.com/",
+            strands_shell::CredKind::Bearer,
+            "host-token",
+        )
+        .build()
+        .unwrap();
+    assert!(
+        !shell
+            .kernel()
+            .resolve_credential("https://api.example.com/a/..%2Fb", "GET")
+            .is_empty()
+    );
+}
+
 // ── config parsing (vfs_config.rs) ──────────────────────────────────
 
 shell_test!(
@@ -13966,6 +14282,12 @@ expect_writers!(
     |stderr: &str| assert_eq!(stderr, "")
 );
 expect_writers!(
+    writer_receives_function_piped_from_group_in_order,
+    "g() { cat; }; { echo m1; { echo a; } | g; echo m2; } 2>/dev/null",
+    "m1\na\nm2\n",
+    |stderr: &str| assert_eq!(stderr, "")
+);
+expect_writers!(
     unredirected_group_streams_to_writers,
     "{ echo out; ls /nope; }",
     "out\n",
@@ -14520,6 +14842,33 @@ shell_test!(
         assert_eq!(out.stdout, "");
         assert_ne!(out.status, 0);
         assert!(out.stderr.contains("`]]`"), "stderr: {}", out.stderr);
+    }
+);
+
+// #323: a single command that reaches `eval` or `.` through `command` or an expansion
+// either works or fails. It never reports success after discarding the effect.
+shell_test!(
+    command_eval_on_its_own_does_not_silently_discard_its_effect,
+    "command eval 'x=1'; echo \"rc=$? x=[$x]\"",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert!(
+            out.stdout == "rc=0 x=[1]\n" || !out.stdout.starts_with("rc=0"),
+            "stdout: {}",
+            out.stdout
+        );
+    }
+);
+
+shell_test!(
+    an_expanded_source_does_not_silently_discard_its_effect,
+    "echo 'VAR=loaded' > /tmp/env323.sh; run() { \"$@\"; }; run source /tmp/env323.sh; \
+     echo \"rc=$? VAR=[$VAR]\"",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert!(
+            out.stdout == "rc=0 VAR=[loaded]\n" || !out.stdout.starts_with("rc=0"),
+            "stdout: {}",
+            out.stdout
+        );
     }
 );
 

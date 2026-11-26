@@ -133,6 +133,33 @@ async fn shell_with_server() -> (Shell, String) {
     (shell, base)
 }
 
+/// A server that answers every path with the request target, `Host`, and
+/// `Authorization` it received.
+async fn start_target_echo_server() -> String {
+    let app = Router::new().fallback(any(
+        |target: axum::http::Uri, headers: HeaderMap| async move {
+            let header = |name: &str| {
+                headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("none")
+                    .to_string()
+            };
+            format!(
+                "target={target} host={} authorization={}",
+                header("host"),
+                header("authorization")
+            )
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::task::spawn_local(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
 async fn start_redirect_server(location: String) -> String {
     let app = Router::new()
         .route(
@@ -619,7 +646,11 @@ fn curl_protocol_relative_redirect_preserves_target_and_strips_credentials() {
             let out = shell.run(&format!("curl -sSL {source}/{path}")).await;
             assert_eq!(out.status, 0, "{path}: {}", out.stderr);
             assert_eq!(
-                out.stdout, "method=GET\naccept=*/*\nquery_from=redirect",
+                out.stdout,
+                format!(
+                    "method=GET\naccept=*/*\nuser-agent=curl/{} (strands-shell)\nquery_from=redirect",
+                    env!("CARGO_PKG_VERSION")
+                ),
                 "{path}"
             );
         }
@@ -806,6 +837,106 @@ fn curl_protocol_relative_redirect_keeps_https_scheme() {
                 "{path}: {requested:?}"
             );
         }
+    }));
+}
+
+/// A server whose `/` and `/dir/page` answer with the relative `Location: hello`.
+async fn start_relative_redirect_server() -> String {
+    let app = Router::new()
+        .route("/", get(|| async { Redirect::temporary("hello") }))
+        .route("/hello", get(|| async { "root hello" }))
+        .route("/dir/page", get(|| async { Redirect::temporary("hello") }))
+        .route("/dir/hello", get(|| async { "dir hello" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::task::spawn_local(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[test]
+fn curl_relative_redirect_resolves_against_the_current_path() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let target = start_relative_redirect_server().await;
+        // A protocol-relative hop to the bare target leaves a URL with no path.
+        let source = start_redirect_server(target.strip_prefix("http:").unwrap().into()).await;
+        let mut shell = Shell::builder()
+            .allow_url(&source)
+            .allow_url(&target)
+            .build()
+            .unwrap();
+
+        for (url, body) in [
+            (target.clone(), "root hello"),
+            (format!("{target}/"), "root hello"),
+            (format!("{target}/dir/page?next=/x/y"), "dir hello"),
+            (format!("{target}/dir/page#a/b"), "dir hello"),
+            (format!("{source}/redirect"), "root hello"),
+        ] {
+            let out = shell.run(&format!("curl -sSL '{url}'")).await;
+            assert_eq!(out.status, 0, "{url}: {}", out.stderr);
+            assert_eq!(out.stdout, body, "{url}");
+        }
+    }));
+}
+
+/// A server whose `/items/new` answers `302` with `location`, counting the
+/// requests it gets.
+async fn start_counting_redirect_server(
+    location: &'static str,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let seen = std::sync::Arc::new(AtomicUsize::new(0));
+    let count = seen.clone();
+    let app = Router::new()
+        .route(
+            "/items/new",
+            any(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                async move { (StatusCode::FOUND, [("location", location)], "moved") }
+            }),
+        )
+        .fallback(|| async { "done" });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::task::spawn_local(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), seen)
+}
+
+#[test]
+fn curl_empty_redirect_location_is_not_followed() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (base, seen) = start_counting_redirect_server("").await;
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        let out = shell
+            .run(&format!(
+                "curl -sSL -d name=x -w '%{{http_code}}' {base}/items/new"
+            ))
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(out.stdout, "moved302");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }));
+}
+
+#[test]
+fn curl_redirect_back_to_the_same_url_is_a_redirect_hop() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (base, seen) = start_counting_redirect_server("./new").await;
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        let out = shell
+            .run(&format!(
+                "curl -sSL --proto-redir '=https' {base}/items/new"
+            ))
+            .await;
+        assert_eq!(out.status, 1, "{}", out.stderr);
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
     }));
 }
 
@@ -1220,6 +1351,387 @@ api_key = "secret"
     }));
 }
 
+/// The key of the `kind = "query"` credential in [`query_credential_shell`].
+const QUERY_SECRET: &str = "query-secret-7f3a";
+
+/// A shell that may reach `base` and adds [`QUERY_SECRET`] to every request for it.
+fn query_credential_shell(base: &str, dir: &TestDir) -> Shell {
+    let config_path = dir.join("query_cred.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[[cred]]
+url = "{base}/"
+kind = "query"
+api_key = "{QUERY_SECRET}"
+param = "api_key"
+"#
+        ),
+    )
+    .unwrap();
+    Shell::builder()
+        .allow_url(base)
+        .config_file(&config_path)
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+/// Assert that `out` is curl's report of a request that failed before a response,
+/// and that the report leaves out the query credential.
+fn assert_failed_without_secret(out: &strands_shell::Output) {
+    assert_eq!(out.status, 6, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.starts_with("curl: (6) "),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains(QUERY_SECRET) && !out.stdout.contains(QUERY_SECRET),
+        "the query credential reached the agent: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn curl_query_credential_stays_out_of_a_connection_error() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        // Hold the port, but close every connection without a response.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::task::spawn_local(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        let dir = TestDir::new("lsh_query_cred_connection_error");
+        let mut shell = query_credential_shell(&base, &dir);
+        let out = shell
+            .run(&format!("curl -sS '{base}/geocode?q=zurich'"))
+            .await;
+        assert_failed_without_secret(&out);
+    }));
+}
+
+#[test]
+fn curl_query_credential_stays_out_of_a_dns_error() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        // `.invalid` never resolves (RFC 6761).
+        let base = "http://strands-shell-test.invalid";
+        let dir = TestDir::new("lsh_query_cred_dns_error");
+        let mut shell = query_credential_shell(base, &dir);
+        let out = shell.run(&format!("curl -sS {base}/geocode")).await;
+        assert_failed_without_secret(&out);
+    }));
+}
+
+#[test]
+fn curl_query_credential_stays_out_of_a_url_too_long_to_send() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_server().await;
+        let dir = TestDir::new("lsh_query_cred_long_url");
+        let mut shell = query_credential_shell(&base, &dir);
+        // Longer than an HTTP request target can be, so the client gives up
+        // before it connects.
+        let path = "a".repeat(70_000);
+        let out = shell.run(&format!("curl -sS {base}/{path}")).await;
+        assert_failed_without_secret(&out);
+    }));
+}
+
+#[test]
+fn curl_path_credential_stays_inside_its_prefix() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .credential(
+                format!("{base}/v1/projects/alpha/"),
+                strands_shell::CredKind::Bearer,
+                "alpha-token",
+            )
+            .build()
+            .unwrap();
+        let inside = shell
+            .run(&format!("curl -s {base}/v1/projects/alpha/items"))
+            .await;
+        assert!(
+            inside.stdout.ends_with("authorization=Bearer alpha-token"),
+            "{}",
+            inside.stdout
+        );
+        // Each path names a place outside `/v1/projects/alpha/`, once the client
+        // or a server that decodes `%2F` resolves its dot segments.
+        for (path, sent) in [
+            (
+                "/v1/projects/alpha/../beta/items",
+                "/v1/projects/beta/items",
+            ),
+            (
+                "/v1/projects/alpha/..\\beta/items",
+                "/v1/projects/beta/items",
+            ),
+            (
+                "/v1/projects/alpha/%2e%2e/%2e%2e/admin/keys",
+                "/v1/admin/keys",
+            ),
+            (
+                "/v1/projects/alpha/..%2Fbeta/items",
+                "/v1/projects/alpha/..%2Fbeta/items",
+            ),
+            (
+                "/v1/projects/alpha/..;/beta/items",
+                "/v1/projects/alpha/..;/beta/items",
+            ),
+            (
+                "/v1/projects/alpha/..;x=1/beta/items",
+                "/v1/projects/alpha/..;x=1/beta/items",
+            ),
+        ] {
+            let out = shell.run(&format!("curl -s '{base}{path}'")).await;
+            assert_eq!(out.status, 0, "{path}: {}", out.stderr);
+            assert!(
+                out.stdout.starts_with(&format!("target={sent} ")),
+                "{path}: {}",
+                out.stdout
+            );
+            assert!(
+                out.stdout.ends_with("authorization=none"),
+                "{path} carried the credential: {}",
+                out.stdout
+            );
+        }
+    }));
+}
+
+#[test]
+fn curl_refuses_a_host_header_that_names_another_host() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let authority = base.strip_prefix("http://").unwrap();
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .credential(
+                format!("{base}/"),
+                strands_shell::CredKind::Bearer,
+                "host-token",
+            )
+            .build()
+            .unwrap();
+        for header in [
+            "Host: other.example.test",
+            "host: other.example.test",
+            "Host: 127.0.0.1:1",
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H '{header}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 1, "{header}: {}", out.stderr);
+            assert_eq!(out.stdout, "", "{header}");
+            assert!(
+                out.stderr.contains("does not name the host of the URL"),
+                "{header}: {}",
+                out.stderr
+            );
+        }
+        // A `Host` that names the URL's host goes out, with the credential.
+        let out = shell
+            .run(&format!("curl -s -H 'Host: {authority}' {base}/items"))
+            .await;
+        assert_eq!(
+            out.stdout,
+            format!("target=/items host={authority} authorization=Bearer host-token")
+        );
+    }));
+}
+
+#[test]
+fn curl_refuses_a_forwarded_host_that_names_another_host() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let authority = base.strip_prefix("http://").unwrap();
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .credential(
+                format!("{base}/"),
+                strands_shell::CredKind::Bearer,
+                "host-token",
+            )
+            .build()
+            .unwrap();
+        for header in [
+            "X-Forwarded-Host: other.example.test".to_string(),
+            format!("X-Forwarded-Host: {authority}, other.example.test"),
+            "Forwarded: host=other.example.test".to_string(),
+            "Forwarded: for=192.0.2.1;host=\"other.example.test\"".to_string(),
+            "Forwarded: note=\"a;host=ignored.example\";host=other.example.test".to_string(),
+            format!("Forwarded: host={authority}, host=\"other.example.test\""),
+            // Header names match in any case.
+            "x-forwarded-host: other.example.test".to_string(),
+            "FORWARDED: HOST=other.example.test".to_string(),
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H '{header}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 1, "{header}: {}", out.stderr);
+            assert_eq!(out.stdout, "", "{header}");
+            assert!(
+                out.stderr.contains("does not name the host of the URL"),
+                "{header}: {}",
+                out.stderr
+            );
+        }
+        // Headers that name the URL's host, or carry no host, go out.
+        for header in [
+            format!("X-Forwarded-Host: {authority}"),
+            format!("Forwarded: host={authority};proto=http"),
+            "Forwarded: for=192.0.2.1".to_string(),
+            "Forwarded: for=192.0.2.1;note=\"a;host=other.example.test\"".to_string(),
+            "Forwarded: for=192.0.2.1;note=\"a,host=other.example.test\"".to_string(),
+            format!("Forwarded: note=\"a;host=ignored.example\";host=\"{authority}\""),
+            format!(
+                "Forwarded: host=\"127\\.0.0.1:{}\"",
+                authority.rsplit_once(':').unwrap().1
+            ),
+            // Unquoted addresses are common, though RFC 7239 wants them quoted.
+            "Forwarded: for=192.0.2.43:47011".to_string(),
+            "Forwarded: for=[2001:db8::1]".to_string(),
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H '{header}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 0, "{header}: {}", out.stderr);
+            assert!(
+                out.stdout.ends_with("authorization=Bearer host-token"),
+                "{header}: {}",
+                out.stdout
+            );
+        }
+    }));
+}
+
+#[test]
+fn curl_empty_host_header_removes_it() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let authority = base.strip_prefix("http://").unwrap();
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        // Shell removes the empty override but still derives Host from the URL.
+        // System curl omits Host entirely for this option.
+        let out = shell.run(&format!("curl -s -H 'Host:' {base}/items")).await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(
+            out.stdout,
+            format!("target=/items host={authority} authorization=none")
+        );
+    }));
+}
+
+#[test]
+fn curl_content_type_removal_preserves_post_defaults_and_overrides() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        for (args, expected) in [
+            ("-d a=b", Some("application/x-www-form-urlencoded")),
+            ("-d a=b -H 'Content-Type: text/plain'", Some("text/plain")),
+            ("-d a=b -H 'Content-Type:'", None),
+            ("-H 'cOnTeNt-TyPe:   ' -d a=b", None),
+            (
+                "-H 'Content-Type:' -H 'Content-Type: text/plain' -d a=b",
+                Some("text/plain"),
+            ),
+        ] {
+            let out = shell.run(&format!("curl -s {args} {base}/echo")).await;
+            assert_eq!(out.status, 0, "{args}: {}", out.stderr);
+            assert!(out.stdout.contains("body=a=b"), "{args}: {}", out.stdout);
+            let content_type = out
+                .stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("content-type="));
+            assert_eq!(content_type, expected, "{args}: {}", out.stdout);
+        }
+    }));
+}
+
+#[test]
+fn curl_refuses_malformed_forwarded_headers() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_target_echo_server().await;
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        for value in [
+            "host=\"unterminated",
+            "note=\"dangling\\",
+            "note=\"value\"host=other.example.test",
+        ] {
+            let out = shell
+                .run(&format!("curl -s -H 'Forwarded: {value}' {base}/items"))
+                .await;
+            assert_eq!(out.status, 1, "{value}: {}", out.stderr);
+            assert!(out.stdout.is_empty(), "{value}: {}", out.stdout);
+            assert!(
+                out.stderr.contains("access denied"),
+                "{value}: {}",
+                out.stderr
+            );
+        }
+    }));
+}
+
+#[test]
+fn curl_query_credential_goes_ahead_of_a_fragment() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let base = start_server().await;
+        let dir = TestDir::new("lsh_query_cred_fragment_test");
+        let config_path = dir.join("query_cred.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[[cred]]
+url = "{base}/"
+kind = "query"
+api_key = "fragment-key"
+param = "api_key"
+"#
+            ),
+        )
+        .unwrap();
+        let mut shell = Shell::builder()
+            .allow_url(&base)
+            .config_file(&config_path)
+            .unwrap()
+            .build()
+            .unwrap();
+        for url in [format!("{base}/echo#part"), format!("{base}/echo?a=1#part")] {
+            let out = shell.run(&format!("curl -s '{url}'")).await;
+            assert_eq!(out.status, 0, "{url}: {}", out.stderr);
+            assert!(
+                out.stdout.contains("query_api_key=fragment-key"),
+                "{url}: {}",
+                out.stdout
+            );
+            // The URL's own query survives next to the added parameter.
+            assert_eq!(
+                out.stdout.contains("query_a=1"),
+                url.contains("?a=1"),
+                "{url}: {}",
+                out.stdout
+            );
+        }
+    }));
+}
+
 // ── Options the Strands harness `web_fetch` tool sends ──────────────
 
 #[test]
@@ -1252,6 +1764,54 @@ fn curl_user_agent_sets_header() {
             "{}",
             out.stdout
         );
+        let out = shell
+            .run(&format!("curl -v -A 'agent/1.0' {base}/echo"))
+            .await;
+        let sent = out.stderr.matches("> User-Agent:").count();
+        assert_eq!(sent, 1, "{}", out.stderr);
+    }));
+}
+
+#[test]
+fn curl_sends_a_default_user_agent() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell.run(&format!("curl {base}/echo")).await;
+        let expected = format!(
+            "user-agent=curl/{} (strands-shell)",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(out.stdout.contains(&expected), "{}", out.stdout);
+    }));
+}
+
+#[test]
+fn curl_header_user_agent_replaces_the_default() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!("curl -v -H 'User-Agent: explicit' {base}/echo"))
+            .await;
+        assert!(out.stdout.contains("user-agent=explicit"), "{}", out.stdout);
+        assert!(!out.stdout.contains("strands-shell"), "{}", out.stdout);
+        let sent = out.stderr.matches("> User-Agent:").count();
+        assert_eq!(sent, 1, "{}", out.stderr);
+    }));
+}
+
+// A header name matches in any letter case.
+#[test]
+fn curl_lowercase_user_agent_header_replaces_the_default() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!("curl -v -H 'user-agent: lower' {base}/echo"))
+            .await;
+        assert!(out.stdout.contains("user-agent=lower"), "{}", out.stdout);
+        assert!(!out.stderr.contains("strands-shell"), "{}", out.stderr);
     }));
 }
 
@@ -1559,12 +2119,26 @@ fn curl_max_time_zero_and_huge_are_no_limit() {
 }
 
 #[test]
+fn curl_empty_user_agent_header_removes_the_default() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (mut shell, base) = shell_with_server().await;
+        let out = shell
+            .run(&format!("curl -H 'User-Agent:' {base}/echo"))
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(!out.stdout.contains("user-agent="), "{}", out.stdout);
+    }));
+}
+
+#[test]
 fn curl_empty_user_agent_sends_none() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
         let (mut shell, base) = shell_with_server().await;
         let out = shell.run(&format!("curl -A '' {base}/echo")).await;
         assert!(!out.stdout.contains("user-agent="), "{}", out.stdout);
+        assert!(!out.stdout.contains("strands-shell"), "{}", out.stdout);
     }));
 }
 

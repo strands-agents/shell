@@ -1,0 +1,20 @@
+status: 0
+stderr: empty
+--- stdout
+1
+b
+a
+eval
+first
+hi
+sourced
+sourced
+hi
+exit=3
+return=4
+loop 1
+loop 2
+a
+*
+cleanup
+rc=3

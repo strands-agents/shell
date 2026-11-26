@@ -21,12 +21,16 @@ Options:
   -w, --write-out FORMAT  Output FORMAT after completion
   -b, --cookie DATA       Send cookies (name=value pairs)
   -u, --user USER:PASS    Basic authentication
-  -A, --user-agent NAME   Send User-Agent NAME
+  -A, --user-agent NAME   Send User-Agent NAME instead of the default
+                          'curl/<shell version> (strands-shell)'; '' sends none
   -m, --max-time SECONDS  Maximum time allowed for the transfer
       --proto PROTOCOLS   Enable/disable PROTOCOLS
       --proto-redir PROTOCOLS
                           Enable/disable PROTOCOLS on redirect
   -g, --globoff           Disable URL globbing (always off)";
+
+/// The `User-Agent` sent when neither `-A` nor `-H` names one.
+const DEFAULT_USER_AGENT: &str = concat!("curl/", env!("CARGO_PKG_VERSION"), " (strands-shell)");
 
 /// The protocols this `curl` speaks, as a `--proto`/`--proto-redir` allow set.
 #[derive(Clone, Copy)]
@@ -102,6 +106,15 @@ fn is_absolute(loc: &str) -> bool {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     })
+}
+
+/// Resolve a path-relative `Location` (`name`, `../name`, `?q`) against the
+/// current URL's path, ignoring its query and fragment, as RFC 3986 does.
+fn resolve_relative(current_url: &str, loc: &str) -> String {
+    match url::Url::parse(current_url).and_then(|base| base.join(loc)) {
+        Ok(next) => next.into(),
+        Err(_) => format!("{current_url}{loc}"),
+    }
 }
 
 /// A response's status line and headers, as `-i` prints them.
@@ -299,7 +312,9 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
     let deadline = max_time.map(|_| ());
 
     // `-H 'User-Agent: …'` takes precedence over `-A`, and `-A ''` sends none.
-    if let Some(ua) = user_agent.filter(|ua| !ua.is_empty())
+    if let Some(ua) = user_agent
+        .or_else(|| Some(DEFAULT_USER_AGENT.into()))
+        .filter(|ua| !ua.is_empty())
         && !headers.iter().any(|h| {
             h.split_once(':')
                 .is_some_and(|(n, _)| n.trim().eq_ignore_ascii_case("user-agent"))
@@ -307,6 +322,19 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
     {
         headers.push(format!("User-Agent: {ua}"));
     }
+    // Preserve an explicit Content-Type removal so POST data does not restore
+    // the default after empty header values are discarded.
+    let suppress_content_type = headers.iter().any(|h| {
+        h.split_once(':').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("content-type") && value.trim().is_empty()
+        })
+    });
+    // An empty `-H 'Name:'` is not sent. The client still derives Host from the
+    // URL; unlike system curl, this does not omit Host from the wire request.
+    headers.retain(|h| {
+        h.split_once(':')
+            .is_none_or(|(_, value)| !value.trim().is_empty())
+    });
 
     if head && data.is_some() {
         if !silent {
@@ -364,7 +392,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
 
         // A redirect hop must pass both `--proto` and `--proto-redir`.
         let refused = proto.refuses(&current_url).or_else(|| {
-            (current_url != url)
+            (redirects_left != max_redirects)
                 .then(|| proto_redir.refuses(&current_url))
                 .flatten()
         });
@@ -383,20 +411,29 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
         }
 
         // Inject credentials (only for original URL, not redirects)
-        if current_url == url {
+        if redirects_left == max_redirects {
             // Query param credentials — modify URL
             let mut request_url = current_url.clone();
             for (name, value) in os.resolve_credential(&current_url, &method) {
                 if name == "__query_param__" {
-                    let sep = if request_url.contains('?') { "&" } else { "?" };
-                    request_url = format!("{}{}{}", request_url, sep, value);
+                    // The parameter goes into the query, ahead of any fragment:
+                    // after a `#` it is part of the fragment and never sent.
+                    let (base, fragment) = match request_url.split_once('#') {
+                        Some((base, fragment)) => (base, Some(fragment)),
+                        None => (request_url.as_str(), None),
+                    };
+                    let sep = if base.contains('?') { "&" } else { "?" };
+                    request_url = match fragment {
+                        Some(fragment) => format!("{base}{sep}{value}#{fragment}"),
+                        None => format!("{base}{sep}{value}"),
+                    };
                 } else {
                     req_headers.push((name, value));
                 }
             }
 
-            // Default content-type for POST data
-            if data.is_some() {
+            // Default content-type for POST data, unless explicitly removed.
+            if data.is_some() && !suppress_content_type {
                 let has_ct = req_headers
                     .iter()
                     .any(|(n, _)| n.eq_ignore_ascii_case("content-type"));
@@ -466,6 +503,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("location"))
                     .map(|(_, v)| v.clone())
+                    .filter(|loc| !loc.is_empty())
             {
                 let next = if is_absolute(&loc) {
                     loc
@@ -482,11 +520,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                         .unwrap_or(current_url.len());
                     format!("{}{loc}", &current_url[..host_end])
                 } else {
-                    let base = current_url
-                        .rfind('/')
-                        .map(|i| &current_url[..i + 1])
-                        .unwrap_or(&current_url);
-                    format!("{base}{loc}")
+                    resolve_relative(&current_url, &loc)
                 };
                 if verbose && let Some(ref mut w) = err {
                     wprintln!(w, "* Redirecting to {next}")?;
@@ -543,6 +577,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("location"))
                     .map(|(_, v)| v.clone())
+                    .filter(|loc| !loc.is_empty())
             {
                 let next = if is_absolute(&loc) {
                     loc
@@ -559,11 +594,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                         .unwrap_or(current_url.len());
                     format!("{}{loc}", &current_url[..host_end])
                 } else {
-                    let base = current_url
-                        .rfind('/')
-                        .map(|i| &current_url[..i + 1])
-                        .unwrap_or(&current_url);
-                    format!("{base}{loc}")
+                    resolve_relative(&current_url, &loc)
                 };
                 if verbose && let Some(ref mut w) = err {
                     wprintln!(w, "* Redirecting to {next}")?;

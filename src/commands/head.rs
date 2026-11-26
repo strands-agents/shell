@@ -87,7 +87,9 @@ where
 }
 
 /// Parses a `-n`/`-c` value, where a leading `-` asks for all but the last N.
-fn signed_count<T: std::str::FromStr>(value: OsString) -> Result<(bool, T), lexopt::Error>
+pub(super) fn signed_count<T: std::str::FromStr>(
+    value: OsString,
+) -> Result<(bool, T), lexopt::Error>
 where
     T::Err: Into<Box<dyn std::error::Error + Send + Sync>>,
 {

@@ -1,0 +1,10 @@
+status: 0
+stderr: empty
+--- stdout
+have-ls
+file: cd
+appended: cd
+f
+verbose: cd is a shell builtin
+missing 1 []
+end
