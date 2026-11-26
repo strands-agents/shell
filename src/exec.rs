@@ -992,7 +992,12 @@ impl<'a> ArithParser<'a> {
         self.proc
             .env
             .get(name)
-            .and_then(|v| v.parse().ok())
+            // Like bash, accept blanks and newlines around the number.
+            .and_then(|v| {
+                v.trim_matches(|c| matches!(c, ' ' | '\t' | '\n'))
+                    .parse()
+                    .ok()
+            })
             .unwrap_or(0)
     }
 
