@@ -1,0 +1,15 @@
+status: 0
+stderr: empty
+--- stdout
+leading-space: 0
+trailing-space: 0
+plus: 0
+minus-zero: 0
+negative: 0
+leading-zero: 0
+max: 0
+double-bracket-empty: 0
+double-bracket-word: 0
+tabs: 0
+leading-newline: 0
+leading-cr: 0

@@ -10,26 +10,80 @@ pub fn builtin_test<'a>(
     args: &'a [String],
 ) -> Pin<Box<dyn Future<Output = CommandResult> + 'a>> {
     Box::pin(async move {
-        let args = if !args.is_empty() && args[args.len() - 1] == "]" {
+        let bracket = args.last().is_some_and(|a| a == "]");
+        let args = if bracket {
             &args[..args.len() - 1]
         } else {
             args
         };
-        if let [left, op, right] = args
-            && matches!(op.as_str(), "-a" | "-o")
-        {
-            let (left, right) = (!left.is_empty(), !right.is_empty());
-            let result = if op == "-a" {
-                left && right
-            } else {
-                left || right
-            };
-            return Ok(if result { 0 } else { 1 });
-        }
-        let mut pos = 0;
-        let result = parse_or(args, &mut pos, os, proc).await;
-        Ok(if result && pos == args.len() { 0 } else { 1 })
+        let result = match eval(args, os, proc).await {
+            Ok(result) => result == Some(true),
+            Err(operand) => {
+                let name = if bracket { "[" } else { "test" };
+                proc.err_msg(&format!(
+                    "strands-shell: {name}: {operand}: integer expression expected"
+                ));
+                return Ok(2);
+            }
+        };
+        Ok(if result { 0 } else { 1 })
     })
+}
+
+/// A test's truth value, or the operand an integer operator could not read.
+type Eval = Result<bool, String>;
+
+/// Evaluate by POSIX's argument-count rules, so `( -n -eq )` reads `-eq` as
+/// the operand of `-n` and `( -eq )` as a comparison, as bash does. Longer
+/// expressions go to the parser. `None` is an expression the parser couldn't
+/// read whole, so `!` can't turn it true.
+fn eval<'a>(
+    args: &'a [String],
+    os: &'a dyn Kernel,
+    proc: &'a Process,
+) -> Pin<Box<dyn Future<Output = Result<Option<bool>, String>> + 'a>> {
+    Box::pin(async move {
+        let result = match args {
+            [] => Ok(false),
+            [arg] => Ok(!arg.is_empty()),
+            [bang, arg] if bang == "!" => Ok(arg.is_empty()),
+            [op, arg] if is_unary_op(op) => Ok(eval_unary(op, arg, os, proc).await),
+            [left, op, right] if is_binary_op(op) => binary(left, op, right, os, proc).await,
+            [left, op, right] if matches!(op.as_str(), "-a" | "-o") => {
+                let (left, right) = (!left.is_empty(), !right.is_empty());
+                Ok(if op == "-a" {
+                    left && right
+                } else {
+                    left || right
+                })
+            }
+            [open, arg, close] if open == "(" && close == ")" => Ok(!arg.is_empty()),
+            [bang, rest @ ..] if bang == "!" && matches!(rest.len(), 2 | 3) => {
+                return Ok(eval(rest, os, proc).await?.map(|r| !r));
+            }
+            [open, rest @ .., close] if open == "(" && close == ")" && rest.len() == 2 => {
+                return eval(rest, os, proc).await;
+            }
+            // Bash reports any other form of three or fewer as a syntax error.
+            _ if args.len() <= 3 => return Ok(None),
+            _ => {
+                let mut pos = 0;
+                let result = parse_or(args, &mut pos, os, proc).await?;
+                return Ok((pos == args.len()).then_some(result));
+            }
+        };
+        result.map(Some)
+    })
+}
+
+/// A binary test; an integer operator rejects an operand that isn't one.
+async fn binary(left: &str, op: &str, right: &str, os: &dyn Kernel, proc: &Process) -> Eval {
+    if matches!(op, "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge")
+        && let Some(bad) = [left, right].into_iter().find(|s| integer(s).is_none())
+    {
+        return Err(bad.to_string());
+    }
+    Ok(eval_binary(left, op, right, os, proc).await)
 }
 
 fn parse_or<'a>(
@@ -37,15 +91,15 @@ fn parse_or<'a>(
     pos: &'a mut usize,
     os: &'a dyn Kernel,
     proc: &'a Process,
-) -> Pin<Box<dyn Future<Output = bool> + 'a>> {
+) -> Pin<Box<dyn Future<Output = Eval> + 'a>> {
     Box::pin(async move {
-        let mut result = parse_and(args, pos, os, proc).await;
+        let mut result = parse_and(args, pos, os, proc).await?;
         while *pos < args.len() && args[*pos] == "-o" {
             *pos += 1;
-            let rhs = parse_and(args, pos, os, proc).await;
+            let rhs = parse_and(args, pos, os, proc).await?;
             result = result || rhs;
         }
-        result
+        Ok(result)
     })
 }
 
@@ -54,15 +108,15 @@ fn parse_and<'a>(
     pos: &'a mut usize,
     os: &'a dyn Kernel,
     proc: &'a Process,
-) -> Pin<Box<dyn Future<Output = bool> + 'a>> {
+) -> Pin<Box<dyn Future<Output = Eval> + 'a>> {
     Box::pin(async move {
-        let mut result = parse_not(args, pos, os, proc).await;
+        let mut result = parse_not(args, pos, os, proc).await?;
         while *pos < args.len() && args[*pos] == "-a" {
             *pos += 1;
-            let rhs = parse_not(args, pos, os, proc).await;
+            let rhs = parse_not(args, pos, os, proc).await?;
             result = result && rhs;
         }
-        result
+        Ok(result)
     })
 }
 
@@ -71,10 +125,10 @@ async fn parse_not<'a>(
     pos: &mut usize,
     os: &'a dyn Kernel,
     proc: &'a Process,
-) -> bool {
+) -> Eval {
     if *pos < args.len() && args[*pos] == "!" {
         *pos += 1;
-        !parse_primary(args, pos, os, proc).await
+        Ok(!parse_primary(args, pos, os, proc).await?)
     } else {
         parse_primary(args, pos, os, proc).await
     }
@@ -85,18 +139,18 @@ async fn parse_primary<'a>(
     pos: &mut usize,
     os: &'a dyn Kernel,
     proc: &'a Process,
-) -> bool {
+) -> Eval {
     if *pos >= args.len() {
-        return false;
+        return Ok(false);
     }
 
     if args[*pos] == "(" {
         *pos += 1;
-        let result = parse_or(args, pos, os, proc).await;
+        let result = parse_or(args, pos, os, proc).await?;
         if *pos < args.len() && args[*pos] == ")" {
             *pos += 1;
         }
-        return result;
+        return Ok(result);
     }
 
     if *pos + 2 < args.len()
@@ -107,19 +161,19 @@ async fn parse_primary<'a>(
         let op = &args[*pos + 1];
         let right = &args[*pos + 2];
         *pos += 3;
-        return eval_binary(left, op, right, os, proc).await;
+        return binary(left, op, right, os, proc).await;
     }
 
     if *pos + 1 < args.len() && is_unary_op(&args[*pos]) {
         let op = &args[*pos];
         let arg = &args[*pos + 1];
         *pos += 2;
-        return eval_unary(op, arg, os, proc).await;
+        return Ok(eval_unary(op, arg, os, proc).await);
     }
 
     let s = &args[*pos];
     *pos += 1;
-    !s.is_empty()
+    Ok(!s.is_empty())
 }
 
 pub(crate) fn is_unary_op(s: &str) -> bool {
@@ -243,5 +297,14 @@ pub(crate) async fn eval_binary(
 }
 
 fn num(s: &str) -> i64 {
-    s.parse().unwrap_or(0)
+    integer(s).unwrap_or(0)
+}
+
+/// Read an integer operand as bash does: decimal with an optional sign, any
+/// whitespace before it and blanks after it.
+fn integer(s: &str) -> Option<i64> {
+    s.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r'])
+        .trim_end_matches([' ', '\t'])
+        .parse()
+        .ok()
 }
