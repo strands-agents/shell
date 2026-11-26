@@ -1,0 +1,15 @@
+status: 0
+stderr: empty
+--- stdout
+rc=1 
+rc=0 
+rc=0 
+rc=2 diag
+rc=1 
+rc=0 
+rc=1 
+rc=0 
+rc=2 diag
+rc=2 diag
+rc=1 
+rc=2 diag
