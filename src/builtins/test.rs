@@ -17,7 +17,7 @@ pub fn builtin_test<'a>(
             args
         };
         let result = match eval(args, os, proc).await {
-            Ok(result) => result,
+            Ok(result) => result == Some(true),
             Err(operand) => {
                 let name = if bracket { "[" } else { "test" };
                 proc.err_msg(&format!(
@@ -35,14 +35,15 @@ type Eval = Result<bool, String>;
 
 /// Evaluate by POSIX's argument-count rules, so `( -n -eq )` reads `-eq` as
 /// the operand of `-n` and `( -eq )` as a comparison, as bash does. Longer
-/// expressions go to the parser.
+/// expressions go to the parser. `None` is an expression the parser couldn't
+/// read whole, so `!` can't turn it true.
 fn eval<'a>(
     args: &'a [String],
     os: &'a dyn Kernel,
     proc: &'a Process,
-) -> Pin<Box<dyn Future<Output = Eval> + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<Option<bool>, String>> + 'a>> {
     Box::pin(async move {
-        match args {
+        let result = match args {
             [] => Ok(false),
             [arg] => Ok(!arg.is_empty()),
             [bang, arg] if bang == "!" => Ok(arg.is_empty()),
@@ -58,17 +59,20 @@ fn eval<'a>(
             }
             [open, arg, close] if open == "(" && close == ")" => Ok(!arg.is_empty()),
             [bang, rest @ ..] if bang == "!" && matches!(rest.len(), 2 | 3) => {
-                Ok(!eval(rest, os, proc).await?)
+                return Ok(eval(rest, os, proc).await?.map(|r| !r));
             }
             [open, rest @ .., close] if open == "(" && close == ")" && rest.len() == 2 => {
-                eval(rest, os, proc).await
+                return eval(rest, os, proc).await;
             }
+            // Bash reports any other form of three or fewer as a syntax error.
+            _ if args.len() <= 3 => return Ok(None),
             _ => {
                 let mut pos = 0;
                 let result = parse_or(args, &mut pos, os, proc).await?;
-                Ok(result && pos == args.len())
+                return Ok((pos == args.len()).then_some(result));
             }
-        }
+        };
+        result.map(Some)
     })
 }
 
