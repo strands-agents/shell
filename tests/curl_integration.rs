@@ -840,6 +840,106 @@ fn curl_protocol_relative_redirect_keeps_https_scheme() {
     }));
 }
 
+/// A server whose `/` and `/dir/page` answer with the relative `Location: hello`.
+async fn start_relative_redirect_server() -> String {
+    let app = Router::new()
+        .route("/", get(|| async { Redirect::temporary("hello") }))
+        .route("/hello", get(|| async { "root hello" }))
+        .route("/dir/page", get(|| async { Redirect::temporary("hello") }))
+        .route("/dir/hello", get(|| async { "dir hello" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::task::spawn_local(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[test]
+fn curl_relative_redirect_resolves_against_the_current_path() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let target = start_relative_redirect_server().await;
+        // A protocol-relative hop to the bare target leaves a URL with no path.
+        let source = start_redirect_server(target.strip_prefix("http:").unwrap().into()).await;
+        let mut shell = Shell::builder()
+            .allow_url(&source)
+            .allow_url(&target)
+            .build()
+            .unwrap();
+
+        for (url, body) in [
+            (target.clone(), "root hello"),
+            (format!("{target}/"), "root hello"),
+            (format!("{target}/dir/page?next=/x/y"), "dir hello"),
+            (format!("{target}/dir/page#a/b"), "dir hello"),
+            (format!("{source}/redirect"), "root hello"),
+        ] {
+            let out = shell.run(&format!("curl -sSL '{url}'")).await;
+            assert_eq!(out.status, 0, "{url}: {}", out.stderr);
+            assert_eq!(out.stdout, body, "{url}");
+        }
+    }));
+}
+
+/// A server whose `/items/new` answers `302` with `location`, counting the
+/// requests it gets.
+async fn start_counting_redirect_server(
+    location: &'static str,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let seen = std::sync::Arc::new(AtomicUsize::new(0));
+    let count = seen.clone();
+    let app = Router::new()
+        .route(
+            "/items/new",
+            any(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                async move { (StatusCode::FOUND, [("location", location)], "moved") }
+            }),
+        )
+        .fallback(|| async { "done" });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::task::spawn_local(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), seen)
+}
+
+#[test]
+fn curl_empty_redirect_location_is_not_followed() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (base, seen) = start_counting_redirect_server("").await;
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        let out = shell
+            .run(&format!(
+                "curl -sSL -d name=x -w '%{{http_code}}' {base}/items/new"
+            ))
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(out.stdout, "moved302");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }));
+}
+
+#[test]
+fn curl_redirect_back_to_the_same_url_is_a_redirect_hop() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let (base, seen) = start_counting_redirect_server("./new").await;
+        let mut shell = Shell::builder().allow_url(&base).build().unwrap();
+        let out = shell
+            .run(&format!(
+                "curl -sSL --proto-redir '=https' {base}/items/new"
+            ))
+            .await;
+        assert_eq!(out.status, 1, "{}", out.stderr);
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }));
+}
+
 #[test]
 fn curl_no_follow_redirect() {
     let (rt, local) = rt();

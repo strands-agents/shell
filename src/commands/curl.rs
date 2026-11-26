@@ -108,6 +108,15 @@ fn is_absolute(loc: &str) -> bool {
     })
 }
 
+/// Resolve a path-relative `Location` (`name`, `../name`, `?q`) against the
+/// current URL's path, ignoring its query and fragment, as RFC 3986 does.
+fn resolve_relative(current_url: &str, loc: &str) -> String {
+    match url::Url::parse(current_url).and_then(|base| base.join(loc)) {
+        Ok(next) => next.into(),
+        Err(_) => format!("{current_url}{loc}"),
+    }
+}
+
 /// A response's status line and headers, as `-i` prints them.
 fn header_block(resp: &crate::os::HttpResponse) -> String {
     let mut hdr = format!("HTTP/{} {} {}\r\n", resp.version, resp.status, resp.reason);
@@ -383,7 +392,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
 
         // A redirect hop must pass both `--proto` and `--proto-redir`.
         let refused = proto.refuses(&current_url).or_else(|| {
-            (current_url != url)
+            (redirects_left != max_redirects)
                 .then(|| proto_redir.refuses(&current_url))
                 .flatten()
         });
@@ -402,7 +411,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
         }
 
         // Inject credentials (only for original URL, not redirects)
-        if current_url == url {
+        if redirects_left == max_redirects {
             // Query param credentials — modify URL
             let mut request_url = current_url.clone();
             for (name, value) in os.resolve_credential(&current_url, &method) {
@@ -494,6 +503,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("location"))
                     .map(|(_, v)| v.clone())
+                    .filter(|loc| !loc.is_empty())
             {
                 let next = if is_absolute(&loc) {
                     loc
@@ -510,11 +520,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                         .unwrap_or(current_url.len());
                     format!("{}{loc}", &current_url[..host_end])
                 } else {
-                    let base = current_url
-                        .rfind('/')
-                        .map(|i| &current_url[..i + 1])
-                        .unwrap_or(&current_url);
-                    format!("{base}{loc}")
+                    resolve_relative(&current_url, &loc)
                 };
                 if verbose && let Some(ref mut w) = err {
                     wprintln!(w, "* Redirecting to {next}")?;
@@ -571,6 +577,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("location"))
                     .map(|(_, v)| v.clone())
+                    .filter(|loc| !loc.is_empty())
             {
                 let next = if is_absolute(&loc) {
                     loc
@@ -587,11 +594,7 @@ async fn cmd_curl(os: &dyn Kernel, args: &[String]) -> CommandResult {
                         .unwrap_or(current_url.len());
                     format!("{}{loc}", &current_url[..host_end])
                 } else {
-                    let base = current_url
-                        .rfind('/')
-                        .map(|i| &current_url[..i + 1])
-                        .unwrap_or(&current_url);
-                    format!("{base}{loc}")
+                    resolve_relative(&current_url, &loc)
                 };
                 if verbose && let Some(ref mut w) = err {
                     wprintln!(w, "* Redirecting to {next}")?;
