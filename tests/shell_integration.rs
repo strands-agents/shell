@@ -229,6 +229,28 @@ expect!(test_int_lt, "[ 3 -lt 5 ] && echo yes", "yes");
 expect!(test_z_empty, "[ -z '' ] && echo yes", "yes");
 expect!(test_n_nonempty, "[ -n hello ] && echo yes", "yes");
 expect!(test_binary_op_missing_right, "[ a != ] || echo no", "no");
+shell_test!(
+    test_binary_op_missing_right_is_a_usage_error,
+    "[ x = ]; echo \"rc=$?\"; test x -eq; echo \"rc=$?\"; [ a = a -a b = ]; echo \"rc=$?\"",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.stdout, "rc=2\nrc=2\nrc=2\n");
+        assert!(
+            out.stderr.contains("[: x: unary operator expected"),
+            "stderr: {:?}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("test: x: unary operator expected"),
+            "stderr: {:?}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("[: too many arguments"),
+            "stderr: {:?}",
+            out.stderr
+        );
+    }
+);
 expect!(
     test_file_exists,
     "touch /tmp/tf; [ -f /tmp/tf ] && echo yes",
