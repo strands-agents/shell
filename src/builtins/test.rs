@@ -16,19 +16,7 @@ pub fn builtin_test<'a>(
         } else {
             args
         };
-        if let [left, op, right] = args
-            && matches!(op.as_str(), "-a" | "-o")
-        {
-            let (left, right) = (!left.is_empty(), !right.is_empty());
-            let result = if op == "-a" {
-                left && right
-            } else {
-                left || right
-            };
-            return Ok(if result { 0 } else { 1 });
-        }
-        let mut pos = 0;
-        let result = match parse_or(args, &mut pos, os, proc).await {
+        let result = match eval(args, os, proc).await {
             Ok(result) => result,
             Err(operand) => {
                 let name = if bracket { "[" } else { "test" };
@@ -38,12 +26,61 @@ pub fn builtin_test<'a>(
                 return Ok(2);
             }
         };
-        Ok(if result && pos == args.len() { 0 } else { 1 })
+        Ok(if result { 0 } else { 1 })
     })
 }
 
 /// A test's truth value, or the operand an integer operator could not read.
 type Eval = Result<bool, String>;
+
+/// Evaluate by POSIX's argument-count rules, so `( -n -eq )` reads `-eq` as
+/// the operand of `-n` and `( -eq )` as a comparison, as bash does. Longer
+/// expressions go to the parser.
+fn eval<'a>(
+    args: &'a [String],
+    os: &'a dyn Kernel,
+    proc: &'a Process,
+) -> Pin<Box<dyn Future<Output = Eval> + 'a>> {
+    Box::pin(async move {
+        match args {
+            [] => Ok(false),
+            [arg] => Ok(!arg.is_empty()),
+            [bang, arg] if bang == "!" => Ok(arg.is_empty()),
+            [op, arg] if is_unary_op(op) => Ok(eval_unary(op, arg, os, proc).await),
+            [left, op, right] if is_binary_op(op) => binary(left, op, right, os, proc).await,
+            [left, op, right] if matches!(op.as_str(), "-a" | "-o") => {
+                let (left, right) = (!left.is_empty(), !right.is_empty());
+                Ok(if op == "-a" {
+                    left && right
+                } else {
+                    left || right
+                })
+            }
+            [open, arg, close] if open == "(" && close == ")" => Ok(!arg.is_empty()),
+            [bang, rest @ ..] if bang == "!" && matches!(rest.len(), 2 | 3) => {
+                Ok(!eval(rest, os, proc).await?)
+            }
+            [open, rest @ .., close] if open == "(" && close == ")" && rest.len() == 2 => {
+                eval(rest, os, proc).await
+            }
+            _ => {
+                let mut pos = 0;
+                let result = parse_or(args, &mut pos, os, proc).await?;
+                Ok(result && pos == args.len())
+            }
+        }
+    })
+}
+
+/// A binary test; an integer operator rejects an operand that isn't one.
+async fn binary(left: &str, op: &str, right: &str, os: &dyn Kernel, proc: &Process) -> Eval {
+    if matches!(op, "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge")
+        && let Some(bad) = [left, right].into_iter().find(|s| integer(s).is_none())
+    {
+        return Err(bad.to_string());
+    }
+    Ok(eval_binary(left, op, right, os, proc).await)
+}
 
 fn parse_or<'a>(
     args: &'a [String],
@@ -120,12 +157,7 @@ async fn parse_primary<'a>(
         let op = &args[*pos + 1];
         let right = &args[*pos + 2];
         *pos += 3;
-        if matches!(op.as_str(), "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge")
-            && let Some(bad) = [left, right].into_iter().find(|s| integer(s).is_none())
-        {
-            return Err(bad.clone());
-        }
-        return Ok(eval_binary(left, op, right, os, proc).await);
+        return binary(left, op, right, os, proc).await;
     }
 
     if *pos + 1 < args.len() && is_unary_op(&args[*pos]) {
