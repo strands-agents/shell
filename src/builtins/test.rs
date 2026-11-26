@@ -9,13 +9,33 @@ pub fn builtin_test<'a>(
     proc: &'a mut Process,
     args: &'a [String],
 ) -> Pin<Box<dyn Future<Output = CommandResult> + 'a>> {
+    run_test(os, proc, args, "test")
+}
+
+/// `[` is `test` with a required closing `]`. Under the name `test`, `]` is
+/// an ordinary word.
+pub fn builtin_bracket<'a>(
+    os: &'a dyn Kernel,
+    proc: &'a mut Process,
+    args: &'a [String],
+) -> Pin<Box<dyn Future<Output = CommandResult> + 'a>> {
+    run_test(os, proc, args, "[")
+}
+
+fn run_test<'a>(
+    os: &'a dyn Kernel,
+    proc: &'a mut Process,
+    args: &'a [String],
+    name: &'static str,
+) -> Pin<Box<dyn Future<Output = CommandResult> + 'a>> {
     Box::pin(async move {
-        let bracket = args.last().is_some_and(|a| a == "]");
-        let name = if bracket { "[" } else { "test" };
-        let args = if bracket {
-            &args[..args.len() - 1]
-        } else {
-            args
+        let args = match args.split_last() {
+            _ if name == "test" => args,
+            Some((last, rest)) if last == "]" => rest,
+            _ => {
+                proc.err_msg("strands-shell: [: missing `]'");
+                return Ok(2);
+            }
         };
         if let Some(operand) = missing_unary_operator(args) {
             proc.err_msg(&format!(
