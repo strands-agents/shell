@@ -1,0 +1,12 @@
+v=-eq
+[ \( -n "$v" \) ]; echo "paren-n-var: $?"
+[ \( -n -eq \) ]; echo "paren-n-eq: $?"
+[ \( -n -lt \) ]; echo "paren-n-lt: $?"
+[ \( -z -eq \) ]; echo "paren-z-eq: $?"
+[ ! -n -eq ]; echo "not-n-eq: $?"
+[ -n -eq ]; echo "n-eq: $?"
+[ -eq ]; echo "lone-eq: $?"
+[ \( -eq \) ]; echo "paren-eq: $?"
+[ \( abc -eq 1 \) ]; echo "paren-word-eq: $?"
+[ \( 1 -eq 1 \) ]; echo "paren-int-eq: $?"
+test \( -n -eq \); echo "test-paren-n-eq: $?"

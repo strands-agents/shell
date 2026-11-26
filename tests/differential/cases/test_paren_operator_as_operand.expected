@@ -1,0 +1,14 @@
+status: 0
+stderr: non-empty
+--- stdout
+paren-n-var: 0
+paren-n-eq: 0
+paren-n-lt: 0
+paren-z-eq: 1
+not-n-eq: 1
+n-eq: 0
+lone-eq: 0
+paren-eq: 2
+paren-word-eq: 2
+paren-int-eq: 0
+test-paren-n-eq: 0
