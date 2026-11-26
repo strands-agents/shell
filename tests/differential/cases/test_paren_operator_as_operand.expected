@@ -12,3 +12,9 @@ paren-eq: 2
 paren-word-eq: 2
 paren-int-eq: 0
 test-paren-n-eq: 0
+not-two-words: not taken
+not-three-words: not taken
+not-two-args: not taken
+paren-two-words: not taken
+not-dangling-and: not taken
+not-unclosed-paren: not taken
