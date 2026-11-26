@@ -1827,10 +1827,10 @@ async fn capture_output(os: Arc<dyn Kernel>, proc: &mut Process, cmd: &str) -> S
     };
     let mut sub = proc.fork();
     sub.depth += 1;
-    if sub.check_limits().is_some() {
-        proc.captured_stderr
-            .push_str("strands-shell: maximum recursion depth exceeded\n");
-        proc.err_msg("strands-shell: maximum recursion depth exceeded");
+    if let Some(msg) = sub.check_limits() {
+        proc.captured_stderr.push_str(msg);
+        proc.captured_stderr.push('\n');
+        proc.err_msg(msg);
         proc.last_exit = 1;
         proc.last_subst_status = Some(1);
         return String::new();
@@ -2127,7 +2127,7 @@ async fn run_capturing_status(
                     for arm in arms {
                         let mut matched = false;
                         for pat in &arm.patterns {
-                            let p = expand_word(os.clone(), proc, pat).await;
+                            let p = expand_pattern(os.clone(), proc, pat).await;
                             if case_match(&p, &value) {
                                 matched = true;
                                 break;
@@ -2190,7 +2190,18 @@ async fn run_capturing_status(
                     tasks.own(&handle);
                     let saved_stdin = take_stdin(proc);
                     proc.set_channel_reader(STDIN, rx);
-                    let (mut exit, out) = execute_pipeline_capture(os.clone(), proc, tail).await;
+                    // Capture the tail like `capture_pipeline_checked`, so a function call
+                    // there can't write past the enclosing `$( )`, redirect or pipe.
+                    let saved_capture = std::mem::replace(&mut proc.capture, true);
+                    let saved_output = std::mem::take(&mut proc.captured_output);
+                    let mut saved_stdout = Process::empty();
+                    proc.transfer_fd(STDOUT, &mut saved_stdout);
+                    let (mut exit, mut out) =
+                        Box::pin(execute_pipeline_capture(os.clone(), proc, tail)).await;
+                    proc.capture = saved_capture;
+                    proc.close(STDOUT);
+                    saved_stdout.transfer_fd(STDOUT, proc);
+                    out.push_str(&std::mem::replace(&mut proc.captured_output, saved_output));
                     // The tail is a pipeline stage, so `exit` in it ends only that stage.
                     proc.pending_exit = false;
                     let _ = handle.await;
@@ -2764,7 +2775,7 @@ async fn execute_case(
     for arm in arms {
         let mut matched = false;
         for pat in &arm.patterns {
-            let pattern = expand_word(os.clone(), proc, pat).await;
+            let pattern = expand_pattern(os.clone(), proc, pat).await;
             if case_match(&pattern, &value) {
                 matched = true;
                 break;
@@ -2830,17 +2841,33 @@ async fn cond_pattern(os: Arc<dyn Kernel>, proc: &mut Process, term: &CondTerm) 
     let CondTerm::Operand(word) = term else {
         return cond_operand(os, proc, term).await;
     };
+    expand_pattern(os, proc, word).await
+}
+
+/// Expand a pattern word, backslash-escaping glob characters that came from quotes
+/// so they match literally under [`escaped_glob_match`].
+async fn expand_pattern(os: Arc<dyn Kernel>, proc: &mut Process, word: &Word) -> String {
     let mut pattern = String::new();
+    if parser::is_array_literal(word) {
+        refuse_array(proc);
+        return pattern;
+    }
     for part in word {
         let mut text = String::new();
         expand_part(os.clone(), proc, part, &mut text).await;
-        if matches!(part, WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)) {
+        if matches!(
+            part,
+            WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_) | WordPart::Tilde(_)
+        ) {
             for ch in text.chars() {
                 if matches!(ch, '\\' | '*' | '?' | '[') {
                     pattern.push('\\');
                 }
                 pattern.push(ch);
             }
+        } else if matches!(part, WordPart::Literal(_)) {
+            // The parser already consumed escapes here, so any backslash left is literal.
+            pattern.push_str(&text.replace('\\', "\\\\"));
         } else {
             pattern.push_str(&text);
         }
@@ -3027,9 +3054,9 @@ fn skip_conditional_not(terms: &[CondTerm], pos: &mut usize) -> Result<(), Condi
     Ok(())
 }
 
-/// Simple glob-style pattern matching for case statements.
+/// Match a case pattern built by [`expand_pattern`].
 fn case_match(pattern: &str, value: &str) -> bool {
-    glob_match(pattern.as_bytes(), value.as_bytes())
+    escaped_glob_match(pattern, value)
 }
 
 /// Glob matching where a backslash makes the next pattern byte literal.
@@ -3058,7 +3085,7 @@ fn glob_match_with(pat: &[u8], val: &[u8], escapes: bool) -> bool {
             }
         } else if pi < pat.len() && pat[pi] == b'[' {
             // Character class
-            if let Some((matched, end)) = glob_bracket(pat, pi, val[vi]) {
+            if let Some((matched, end)) = glob_bracket(pat, pi, val[vi], escapes) {
                 if matched {
                     pi = end;
                     vi += 1;
@@ -3106,12 +3133,20 @@ fn glob_match_with(pat: &[u8], val: &[u8], escapes: bool) -> bool {
 /// Parse a bracket expression `[...]` starting at `pat[start]`.
 /// Returns `Some((matched, end_index))` where `end_index` is past the `]`,
 /// or `None` if the bracket is malformed (no closing `]`).
-fn glob_bracket(pat: &[u8], start: usize, ch: u8) -> Option<(bool, usize)> {
+fn glob_bracket(pat: &[u8], start: usize, ch: u8, escapes: bool) -> Option<(bool, usize)> {
     let mut i = start + 1;
     let negate = i < pat.len() && (pat[i] == b'!' || pat[i] == b'^');
     if negate {
         i += 1;
     }
+    // One set member at `i` and the index after it; `\x` is `x` when escapes are on.
+    let member = |i: usize| {
+        if escapes && pat[i] == b'\\' && i + 1 < pat.len() {
+            (pat[i + 1], i + 2)
+        } else {
+            (pat[i], i + 1)
+        }
+    };
     // First char after `[` (or `[!`) can be `]` as a literal
     let mut matched = false;
     let mut first = true;
@@ -3120,29 +3155,29 @@ fn glob_bracket(pat: &[u8], start: usize, ch: u8) -> Option<(bool, usize)> {
             return Some((matched ^ negate, i + 1));
         }
         first = false;
+        let (lo, next) = member(i);
         // Range: a-z
-        if i + 2 < pat.len() && pat[i + 1] == b'-' && pat[i + 2] != b']' {
-            let lo = pat[i];
-            let hi = pat[i + 2];
-            if ch >= lo && ch <= hi {
-                matched = true;
-            }
-            i += 3;
+        if next + 1 < pat.len() && pat[next] == b'-' && pat[next + 1] != b']' {
+            let (hi, end) = member(next + 1);
+            matched |= ch >= lo && ch <= hi;
+            i = end;
         } else {
-            if pat[i] == ch {
-                matched = true;
-            }
-            i += 1;
+            matched |= lo == ch;
+            i = next;
         }
     }
     None // no closing ]
 }
 
-/// A builtin that runs shell code in the current shell.
+/// A builtin that runs in the current shell, handled before normal dispatch.
 #[derive(Clone, Copy)]
 enum Special {
     Eval,
     Source,
+    /// `command -v` (`verbose: false`) or `command -V` (`verbose: true`).
+    CommandLookup {
+        verbose: bool,
+    },
 }
 
 async fn run_special(
@@ -3152,6 +3187,35 @@ async fn run_special(
     args: Vec<String>,
 ) -> Result<i32, ControlFlow> {
     match special {
+        Special::CommandLookup { verbose } => {
+            let mut status = 0;
+            for name in &args {
+                match lookup_command(&*os, proc, name, true).await {
+                    Some(CommandLookup::Builtin) => {
+                        if verbose {
+                            let label = if is_special(name) {
+                                "a special shell builtin"
+                            } else {
+                                "a shell builtin"
+                            };
+                            proc.out_msg(&format!("{name} is {label}"));
+                        } else {
+                            proc.out_msg(name);
+                        }
+                    }
+                    Some(CommandLookup::Function) => {
+                        if verbose {
+                            proc.out_msg(&format!("{name} is a shell function"));
+                        } else {
+                            proc.out_msg(name);
+                        }
+                    }
+                    Some(CommandLookup::Path(path)) => proc.out_msg(&path),
+                    None => status = 1,
+                }
+            }
+            Ok(status)
+        }
         Special::Eval => {
             let code = args.join(" ");
             if code.is_empty() {
@@ -3213,7 +3277,7 @@ async fn run_special(
     }
 }
 
-/// Run `eval` or `source` in the current shell with the command's redirections.
+/// Run a [`Special`] builtin in the current shell with the command's redirections.
 async fn run_special_redirected(
     os: Arc<dyn Kernel>,
     proc: &mut Process,
@@ -3378,6 +3442,15 @@ fn xtrace(proc: &mut Process, args: &[String]) {
     proc.err_msg(&format!("{prefix}{}", args.join(" ")));
 }
 
+/// Whether `name` is a builtin that [`execute_pipeline_checked`] runs, rather than one in
+/// [`builtins::lookup`].
+fn runs_in_executor(name: &str) -> bool {
+    matches!(
+        name,
+        "break" | "continue" | "exit" | "return" | "eval" | "." | "source" | "exec" | "command"
+    )
+}
+
 /// Execute a pipeline, checking for break/continue/exit builtins.
 async fn execute_pipeline_checked(
     os: Arc<dyn Kernel>,
@@ -3394,20 +3467,7 @@ async fn execute_pipeline_checked(
                     .args
                     .get(1)
                     .and_then(parser::word_to_str)
-                    .is_some_and(|inner| {
-                        matches!(
-                            inner.as_str(),
-                            "break"
-                                | "continue"
-                                | "exit"
-                                | "return"
-                                | "eval"
-                                | "."
-                                | "source"
-                                | "exec"
-                                | "command"
-                        )
-                    })
+                    .is_some_and(|inner| runs_in_executor(&inner))
             {
                 let unprefixed = parser::Command {
                     env: pipeline[0].env.clone(),
@@ -3514,33 +3574,10 @@ async fn execute_pipeline_checked(
                         || args.first().map(|s| s.as_str()) == Some("-V")
                     {
                         let verbose = args[0] == "-V";
-                        let mut status = 0;
-                        for name in &args[1..] {
-                            match lookup_command(&*os, proc, name, true).await {
-                                Some(CommandLookup::Builtin) => {
-                                    if verbose {
-                                        let label = if is_special(name) {
-                                            "a special shell builtin"
-                                        } else {
-                                            "a shell builtin"
-                                        };
-                                        proc.out_msg(&format!("{name} is {label}"));
-                                    } else {
-                                        proc.out_msg(name);
-                                    }
-                                }
-                                Some(CommandLookup::Function) => {
-                                    if verbose {
-                                        proc.out_msg(&format!("{name} is a shell function"));
-                                    } else {
-                                        proc.out_msg(name);
-                                    }
-                                }
-                                Some(CommandLookup::Path(path)) => proc.out_msg(&path),
-                                None => status = 1,
-                            }
-                        }
-                        return Ok(status);
+                        let names = args[1..].to_vec();
+                        let special = Special::CommandLookup { verbose };
+                        return run_special_redirected(os, proc, &pipeline[0], special, names)
+                            .await;
                     }
                     // `command name args...` — run name bypassing functions
                     let fake_cmd = parser::Command {
@@ -3827,6 +3864,20 @@ async fn run_pipeline(
         return (shell_proc.last_subst_status.unwrap_or(0), String::new());
     }
 
+    // In a pipeline, a `command NAME` stage runs NAME as an ordinary stage that skips
+    // functions, so it streams and is checked with the other stages.
+    let mut skip_functions = vec![skip_function; len];
+    if len > 1 {
+        for (words, skip) in expanded_args.iter_mut().zip(&mut skip_functions) {
+            while words.len() > 1 && words[0] == "command" && !words[1].starts_with('-') {
+                words.remove(0);
+                *skip = true;
+            }
+        }
+    }
+    // Other builtins `execute_pipeline_checked` runs, in a pipeline stage.
+    let in_executor = |name: &str| len > 1 && runs_in_executor(name);
+
     // Resolve executables: for each stage, if the command is not a builtin,
     // function, or registered command, try to resolve it as an executable file.
     for i in 0..len {
@@ -3835,7 +3886,8 @@ async fn run_pipeline(
         }
         let cmd = &expanded_args[i][0];
         if builtins::lookup(cmd).is_some()
-            || (!skip_function && shell_proc.get_function(cmd).is_some())
+            || in_executor(cmd)
+            || (!skip_functions[i] && shell_proc.get_function(cmd).is_some())
             || commands::lookup(cmd).is_some()
             || command_fallback::serves(os.as_ref(), cmd)
         {
@@ -3870,13 +3922,15 @@ async fn run_pipeline(
 
     // Ask the kernel about each command, before any stage starts.
     let mut requests: Vec<Option<CheckedCommand>> = Vec::with_capacity(len);
-    for (cmd, words) in pipeline.iter().zip(&expanded_args) {
+    for (i, (cmd, words)) in pipeline.iter().zip(&expanded_args).enumerate() {
         let Some((mut program, mut args)) = words.split_first() else {
             requests.push(None);
             continue;
         };
-        // The commands inside the compound are checked when they run.
-        if parser::is_compound_stage_call(cmd) {
+        // The commands inside the compound, or that `eval` or `.` runs, are checked when
+        // they run.
+        let function = !skip_functions[i] && shell_proc.get_function(program).is_some();
+        if parser::is_compound_stage_call(cmd) || (in_executor(program) && !function) {
             requests.push(None);
             continue;
         }
@@ -3887,7 +3941,7 @@ async fn run_pipeline(
         {
             (program, args) = (inner, rest);
         }
-        if !runs_in_shell(shell_proc, program, skip_function) {
+        if !runs_in_shell(shell_proc, program, skip_functions[i]) {
             if os.command_fallback().is_some() {
                 let request = CommandRequest::new(program, args, &shell_proc.cwd);
                 if let Err(e) = os.check_fallback(&request).await {
@@ -4204,9 +4258,26 @@ async fn run_pipeline(
         let builtin = builtins::lookup(&name);
         let func_body = child
             .get_function(&name)
-            .filter(|_| !skip_function)
+            .filter(|_| !skip_functions[i])
             .cloned();
         let is_script = name == "lash" || name == "sh";
+        // Unless a function has the name, `eval`, `.`, and the like run as a one-command
+        // body in the stage's subshell, with the words already expanded.
+        let is_function = func_body.is_some();
+        let func_body = if !is_function && in_executor(&name) {
+            let args = expanded_args[i]
+                .iter()
+                .map(|word| vec![parser::WordPart::SingleQuoted(word.clone())])
+                .collect();
+            let command = parser::Command {
+                env: Vec::new(),
+                args,
+                redirects: Vec::new(),
+            };
+            Some(vec![(parser::Item::Pipeline(vec![command], false), None)])
+        } else {
+            func_body
+        };
 
         if builtin.is_some() || func_body.is_some() || is_script {
             // Builtins/functions: child has pipe fds (for I/O via CURRENT_PROCESS),
@@ -4217,6 +4288,12 @@ async fn run_pipeline(
                 state_proc.arg0 = name.clone();
                 // A child shell starts with only the exported variables.
                 state_proc.keep_exported_only();
+                // A child shell starts with default options, not the parent's `set` flags.
+                state_proc.opt_errexit = false;
+                state_proc.opt_nounset = false;
+                state_proc.opt_xtrace = false;
+                state_proc.opt_pipefail = false;
+                state_proc.errexit_ignored = 0;
             }
             let handle = tokio::task::spawn_local(CURRENT_KERNEL.scope(
                 os.clone(),
@@ -4272,9 +4349,11 @@ async fn run_pipeline(
                         };
                     }
                     if let Some(body) = func_body {
-                        state_proc.args = args;
-                        state_proc.push_local_scope();
-                        state_proc.depth += 1;
+                        if is_function {
+                            state_proc.args = args;
+                            state_proc.push_local_scope();
+                            state_proc.depth += 1;
+                        }
                         state_proc.capture = true;
                         // Transfer stdin from child (CURRENT_PROCESS) so the
                         // function body's commands can read pipeline input.
@@ -4293,7 +4372,9 @@ async fn run_pipeline(
                             Err(ControlFlow::Exit(code)) => code,
                             Err(_) => state_proc.last_exit,
                         };
-                        state_proc.pop_local_scope();
+                        if is_function {
+                            state_proc.pop_local_scope();
+                        }
                         CURRENT_PROCESS.with(|p| {
                             state_proc.transfer_fd(STDIN, &mut p.borrow_mut());
                         });

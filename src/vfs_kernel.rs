@@ -133,6 +133,21 @@ impl VfsKernel {
         Some((host_parent.join(leaf), ro))
     }
 
+    /// The host path and metadata of an existing `abs_path`, without following its last
+    /// component. For anything but a symlink this is the path `resolve_host` gives.
+    fn resolve_host_leaf(vfs: &Vfs, abs_path: &str) -> Option<(PathBuf, bool, std::fs::Metadata)> {
+        let (host_path, ro) = Self::resolve_host_nofollow(vfs, abs_path)?;
+        let meta = std::fs::symlink_metadata(&host_path).ok()?;
+        Some((host_path, ro, meta))
+    }
+
+    /// The host path that removing `abs_path` acts on: a symlink itself, not its target.
+    fn resolve_host_unlink(vfs: &Vfs, abs_path: &str) -> Option<(PathBuf, bool)> {
+        Self::resolve_host_leaf(vfs, abs_path)
+            .map(|(host_path, ro, _)| (host_path, ro))
+            .or_else(|| Self::resolve_host(vfs, abs_path).map(|(host_path, ro, _)| (host_path, ro)))
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     async fn open_host(
         &self,
@@ -528,6 +543,12 @@ impl Kernel for VfsKernel {
         };
         let vfs = self.vfs.lock().await;
 
+        // `link/` and `link/.` name the directory a link points at, not the link.
+        let names_leaf =
+            !path.ends_with('/') && !matches!(path.rsplit('/').next(), Some("." | ".."));
+        if names_leaf && let Some((_, _, meta)) = Self::resolve_host_leaf(&vfs, &abs) {
+            return host_meta_stat(&meta);
+        }
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
             #[cfg(not(target_arch = "wasm32"))]
@@ -643,7 +664,7 @@ impl Kernel for VfsKernel {
     async fn remove_file(&self, proc: &Process, path: &str) -> io::Result<()> {
         let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
-        if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
+        if let Some((host_path, ro)) = Self::resolve_host_unlink(&vfs, &abs) {
             drop(vfs);
             if ro {
                 return Err(io::Error::new(
@@ -661,7 +682,7 @@ impl Kernel for VfsKernel {
     async fn remove_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
         let abs = vfs::absolute(&proc.cwd, path)?;
         let vfs = self.vfs.lock().await;
-        if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
+        if let Some((host_path, ro)) = Self::resolve_host_unlink(&vfs, &abs) {
             drop(vfs);
             if ro {
                 return Err(io::Error::new(
@@ -846,18 +867,18 @@ impl Kernel for VfsKernel {
     }
 
     fn resolve_credential(&self, url: &str, method: &str) -> Vec<(String, String)> {
+        // Match on the parsed URL, which is the one reqwest sends. The parser
+        // resolves `..`, `%2e%2e` and `\`, so `/alpha/../beta` is matched as
+        // `/beta`. A raw string prefix matched it against a credential for
+        // `/alpha/`, and the credential went to `/beta`. Parsed hosts also keep
+        // a credential for `api.example.com` off `api.example.com.evil.com`.
+        let Ok(parsed) = url::Url::parse(url) else {
+            return Vec::new();
+        };
         let method_upper = method.to_uppercase();
         for cred in &self.creds {
-            if !url.starts_with(&cred.url) {
+            if !url_matches_prefix(&parsed, &cred.url) || leaves_path_scope(&parsed, &cred.url) {
                 continue;
-            }
-            // Prevent prefix confusion: cred for https://api.example.com/
-            // must not match https://api.example.com.evil.com/
-            if url.len() > cred.url.len() && !cred.url.ends_with('/') {
-                let next = url.as_bytes()[cred.url.len()];
-                if next != b'/' && next != b'?' && next != b'#' {
-                    continue;
-                }
             }
             if !cred.methods.is_empty() && !cred.methods.contains(&method_upper) {
                 continue;
@@ -886,6 +907,7 @@ impl Kernel for VfsKernel {
         {
             // 1. Check URL via self.check_url
             self.check_url(&req.url)?;
+            check_host_header(&req)?;
 
             // 2. Determine if URL is explicitly allowed (for SafeResolver decision)
             let url_explicitly_allowed = check_url_safe(&req.url).is_err();
@@ -899,7 +921,7 @@ impl Kernel for VfsKernel {
             }
             let client = builder
                 .build()
-                .map_err(|e| io::Error::other(e.to_string()))?;
+                .map_err(|e| transport_error(io::ErrorKind::Other, e))?;
 
             // 4. Build the request
             let method: reqwest::Method = req.method.parse().map_err(|_| {
@@ -924,7 +946,7 @@ impl Kernel for VfsKernel {
             let mut resp = http_req
                 .send()
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, e.to_string()))?;
+                .map_err(|e| transport_error(io::ErrorKind::ConnectionRefused, e))?;
 
             // 8. Build response
             let status = resp.status().as_u16();
@@ -945,7 +967,7 @@ impl Kernel for VfsKernel {
                 while let Some(chunk) = resp
                     .chunk()
                     .await
-                    .map_err(|e| io::Error::other(e.to_string()))?
+                    .map_err(|e| transport_error(io::ErrorKind::Other, e))?
                 {
                     if buf.len() + chunk.len() > req.max_response {
                         return Err(io::Error::other("response body too large"));
@@ -956,7 +978,7 @@ impl Kernel for VfsKernel {
             } else {
                 resp.bytes()
                     .await
-                    .map_err(|e| io::Error::other(e.to_string()))?
+                    .map_err(|e| transport_error(io::ErrorKind::Other, e))?
                     .to_vec()
             };
 
@@ -978,6 +1000,7 @@ impl Kernel for VfsKernel {
 
             // 1. Check URL
             self.check_url(&req.url)?;
+            check_host_header(&req)?;
 
             // 2. Parse URL
             let parsed = url::Url::parse(&req.url)
@@ -1224,12 +1247,8 @@ fn host_set_permissions(_path: &std::path::Path, _mode: u32) -> io::Result<()> {
     ))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-async fn host_stat(path: &std::path::Path) -> FileStat {
-    let meta = match tokio::fs::metadata(path).await {
-        Ok(m) => m,
-        Err(_) => return FileStat::default(),
-    };
+/// The `FileStat` for host metadata.
+fn host_meta_stat(meta: &std::fs::Metadata) -> FileStat {
     FileStat {
         exists: true,
         is_file: meta.is_file(),
@@ -1248,7 +1267,13 @@ async fn host_stat(path: &std::path::Path) -> FileStat {
             }
             #[cfg(not(unix))]
             {
-                if meta.is_dir() { 0o040755 } else { 0o100644 }
+                if meta.is_symlink() {
+                    0o120777
+                } else if meta.is_dir() {
+                    0o040755
+                } else {
+                    0o100644
+                }
             }
         },
         dev: 0,
@@ -1258,27 +1283,19 @@ async fn host_stat(path: &std::path::Path) -> FileStat {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+async fn host_stat(path: &std::path::Path) -> FileStat {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => host_meta_stat(&meta),
+        Err(_) => FileStat::default(),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn host_stat_sync(path: &std::path::Path) -> FileStat {
-    let meta = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(_) => return FileStat::default(),
-    };
-    FileStat {
-        exists: true,
-        is_file: meta.is_file(),
-        is_dir: meta.is_dir(),
-        is_symlink: meta.is_symlink(),
-        len: meta.len(),
-        is_socket: false,
-        is_fifo: false,
-        is_block_device: false,
-        is_char_device: false,
-        mode: if meta.is_dir() { 0o040755 } else { 0o100644 },
-        dev: 0,
-        ino: 0,
-        modified: meta.modified().ok(),
-        accessed: meta.accessed().ok(),
+    match std::fs::metadata(path) {
+        Ok(meta) => host_meta_stat(&meta),
+        Err(_) => FileStat::default(),
     }
 }
 
@@ -1443,7 +1460,8 @@ fn glob_match_chars(p: &[char], t: &[char]) -> bool {
     }
 }
 
-/// Whether a parsed request URL is covered by an allowlist `prefix` entry.
+/// Whether a parsed request URL is covered by a `prefix` entry: an allowlist
+/// URL or the URL a credential is bound to.
 ///
 /// Matches on parsed components (scheme + host + port + a path-segment prefix),
 /// never raw string prefixes — string matching is defeated by userinfo
@@ -1471,6 +1489,29 @@ fn url_matches_prefix(url: &url::Url, prefix: &str) -> bool {
     }
     let boundary = pre.strip_suffix('/').unwrap_or(pre);
     req.starts_with(boundary) && req.as_bytes().get(boundary.len()) == Some(&b'/')
+}
+
+/// Whether a server could read `url` as leaving the path of the credential bound
+/// to `prefix`. The URL parser keeps `/alpha/..%2Fbeta` as one segment under
+/// `/alpha/`, but a server that decodes `%2F` or `%5C` before it resolves dot
+/// segments serves `/beta`. A server that strips `;` parameters from a segment
+/// before it resolves dot segments, as Tomcat and Spring do, also serves
+/// `/alpha/..;/beta` as `/beta`. A credential bound to a whole host has no path
+/// to leave.
+fn leaves_path_scope(url: &url::Url, prefix: &str) -> bool {
+    let bound_to_path = url::Url::parse(prefix).is_ok_and(|p| !matches!(p.path(), "" | "/"));
+    if !bound_to_path {
+        return false;
+    }
+    let decoded = url
+        .path()
+        .to_ascii_lowercase()
+        .replace("%2e", ".")
+        .replace("%2f", "/")
+        .replace("%5c", "/");
+    decoded
+        .split('/')
+        .any(|segment| segment.split(';').next() == Some(".."))
 }
 
 /// Check if an IP address is private/loopback/link-local/IMDS.
@@ -1563,7 +1604,10 @@ pub fn check_url_safe(url: &str) -> io::Result<()> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("access denied: unsupported scheme in {url}"),
+            format!(
+                "access denied: unsupported scheme in {}",
+                without_query(url)
+            ),
         ));
     }
     // Match on the parsed `url::Host` rather than `host_str()` + string parse.
@@ -1574,7 +1618,10 @@ pub fn check_url_safe(url: &str) -> io::Result<()> {
     let parsed = url::Url::parse(url).map_err(|_| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("access denied: cannot parse host from {url}"),
+            format!(
+                "access denied: cannot parse host from {}",
+                without_query(url)
+            ),
         )
     })?;
     match parsed.host() {
@@ -1606,11 +1653,144 @@ pub fn check_url_safe(url: &str) -> io::Result<()> {
         None => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!("access denied: cannot parse host from {url}"),
+                format!(
+                    "access denied: cannot parse host from {}",
+                    without_query(url)
+                ),
             ));
         }
     }
     Ok(())
+}
+
+/// `url` without its query or fragment, for an error message. A `kind = "query"`
+/// credential rides in the query, and the agent reads every error message.
+fn without_query(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
+}
+
+/// Check `Host`, each `X-Forwarded-Host` entry, and each actual `host` parameter
+/// in `Forwarded` against the URL. URL-based access and credential checks do not
+/// inspect this proxy metadata. `Forwarded` parameter boundaries and quoted
+/// values follow RFC 7239; extension names and text inside quoted values are not
+/// host parameters. This check does not model nonstandard interpretations in
+/// downstream frameworks or other headers a server may use to select a site.
+fn check_host_header(req: &HttpRequest) -> io::Result<()> {
+    let refused = |reason: String| io::Error::new(io::ErrorKind::PermissionDenied, reason);
+    let url = url::Url::parse(&req.url).map_err(|_| {
+        refused(format!(
+            "access denied: cannot parse host from {}",
+            without_query(&req.url)
+        ))
+    })?;
+    for (name, value) in &req.headers {
+        let matches = if name.eq_ignore_ascii_case("host") {
+            names_host(&url, value)
+        } else if name.eq_ignore_ascii_case("x-forwarded-host") {
+            value.split(',').all(|host| names_host(&url, host))
+        } else if name.eq_ignore_ascii_case("forwarded") {
+            let hosts = forwarded_hosts(value)
+                .ok_or_else(|| refused("access denied: malformed Forwarded header".into()))?;
+            hosts.iter().all(|host| names_host(&url, host))
+        } else {
+            continue;
+        };
+        if !matches {
+            return Err(refused(format!(
+                "access denied: {name} header {value:?} does not name the host of the URL"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Read actual `host` parameters in a `Forwarded` header, decoding quoted pairs.
+/// Delimiters inside quoted strings belong to the value, not the parameter list.
+/// Reject unparseable syntax rather than skip a possible host parameter.
+fn forwarded_hosts(mut rest: &str) -> Option<Vec<String>> {
+    let is_token = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    let mut hosts = Vec::new();
+    loop {
+        rest = rest.trim_start_matches([' ', '\t']);
+        if rest.is_empty() {
+            return Some(hosts);
+        }
+        // RFC 7239 permits empty pairs, and HTTP lists permit empty elements.
+        if rest.starts_with([',', ';']) {
+            rest = &rest[1..];
+            continue;
+        }
+        let key_end = rest.bytes().take_while(|b| is_token(*b)).count();
+        if key_end == 0 {
+            return None;
+        }
+        let is_host = rest[..key_end].eq_ignore_ascii_case("host");
+        rest = rest[key_end..].trim_start_matches([' ', '\t']);
+        rest = rest.strip_prefix('=')?.trim_start_matches([' ', '\t']);
+        let value = if let Some(quoted) = rest.strip_prefix('"') {
+            let mut decoded = String::new();
+            let mut chars = quoted.char_indices();
+            loop {
+                let (i, mut c) = chars.next()?;
+                if c == '"' {
+                    rest = &quoted[i + 1..];
+                    break;
+                }
+                if c == '\\' {
+                    c = chars.next()?.1;
+                }
+                if c.is_ascii_control() && c != '\t' {
+                    return None;
+                }
+                decoded.push(c);
+            }
+            decoded
+        } else {
+            // Keep accepting unquoted `ip:port` and `[v6]` values for every
+            // parameter. RFC 7239 wants them quoted, but clients often send
+            // `for=192.0.2.43:47011`, and none of these bytes can end a pair.
+            let end = rest
+                .bytes()
+                .take_while(|b| is_token(*b) || matches!(*b, b':' | b'[' | b']'))
+                .count();
+            if end == 0 {
+                return None;
+            }
+            let value = rest[..end].to_string();
+            rest = &rest[end..];
+            value
+        };
+        rest = rest.trim_start_matches([' ', '\t']);
+        if !rest.is_empty() && !rest.starts_with([',', ';']) {
+            return None;
+        }
+        if is_host {
+            hosts.push(value);
+        }
+    }
+}
+
+/// Whether a `Host` header `value` names `url`'s host, and its port when it gives one.
+fn names_host(url: &url::Url, value: &str) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let value = value.trim();
+    // An IPv6 literal holds colons, so a port follows only the closing bracket.
+    let (name, port) = match value.rsplit_once(':') {
+        Some((name, port)) if !port.contains(']') => (name, Some(port)),
+        _ => (value, None),
+    };
+    name.eq_ignore_ascii_case(host)
+        && port.is_none_or(|port| port.parse::<u16>().ok() == url.port_or_known_default())
+}
+
+/// A reqwest error as an `io::Error`, without the URL reqwest puts in its text.
+/// That URL carries a `kind = "query"` credential, and the agent reads every
+/// error message.
+#[cfg(not(target_arch = "wasm32"))]
+fn transport_error(kind: io::ErrorKind, error: reqwest::Error) -> io::Error {
+    io::Error::new(kind, error.without_url().to_string())
 }
 
 /// A DNS resolver that filters out blocked IPs at resolution time,
@@ -1642,7 +1822,10 @@ impl reqwest::dns::Resolve for SafeResolver {
 
 #[cfg(test)]
 mod url_safety_tests {
-    use super::{check_url_safe, url_matches_prefix};
+    use super::{
+        check_host_header, check_url_safe, forwarded_hosts, names_host, url_matches_prefix,
+    };
+    use crate::os::HttpRequest;
 
     // A1: IPv6 literals (incl. IPv4-mapped IMDS) must be blocked by
     // `check_url_safe` ITSELF — not merely by the SafeResolver/connection
@@ -1704,6 +1887,173 @@ mod url_safety_tests {
             "http://100.100.100.201/",    // neighbour of the Alibaba endpoint
         ] {
             assert!(check_url_safe(u).is_ok(), "{u} should be allowed");
+        }
+    }
+
+    // A `kind = "query"` credential rides in the query, so a refusal that
+    // names the URL must leave the query out.
+    #[test]
+    fn check_url_safe_refusals_leave_out_the_query() {
+        for u in [
+            "ftp://example.com/x?api_key=secret",
+            "http://[::1/?api_key=secret",
+        ] {
+            let err = check_url_safe(u).unwrap_err().to_string();
+            assert!(err.starts_with("access denied: "), "{u}: {err}");
+            assert!(!err.contains("secret"), "{u}: {err}");
+        }
+    }
+
+    #[test]
+    fn host_header_must_name_the_host_of_the_url() {
+        let url = |u: &str| url::Url::parse(u).unwrap();
+        let https = url("https://api.example.com/x");
+        for value in [
+            "api.example.com",
+            "API.example.com",
+            "api.example.com:443",
+            " api.example.com ",
+        ] {
+            assert!(names_host(&https, value), "{value:?}");
+        }
+        for value in [
+            "",
+            "other.example.com",
+            "api.example.com.evil.com",
+            "api.example.com:8443",
+            "api.example.com:x",
+        ] {
+            assert!(!names_host(&https, value), "{value:?}");
+        }
+        let port = url("http://127.0.0.1:8080/");
+        assert!(names_host(&port, "127.0.0.1:8080"));
+        assert!(names_host(&port, "127.0.0.1"));
+        assert!(!names_host(&port, "127.0.0.1:80"));
+        let v6 = url("http://[::1]:8080/");
+        assert!(names_host(&v6, "[::1]:8080"));
+        assert!(names_host(&v6, "[::1]"));
+        assert!(!names_host(&v6, "[::2]:8080"));
+    }
+
+    #[test]
+    fn forwarded_hosts_reads_every_host_pair() {
+        assert_eq!(forwarded_hosts("host=a.example").unwrap(), ["a.example"]);
+        assert_eq!(
+            forwarded_hosts(r#"for=192.0.2.1;Host="a.example:8080";proto=https"#).unwrap(),
+            ["a.example:8080"]
+        );
+        assert_eq!(
+            forwarded_hosts("host=a.example, for=192.0.2.1;host=b.example").unwrap(),
+            ["a.example", "b.example"]
+        );
+        assert_eq!(
+            forwarded_hosts("host=a.example;host=b.example").unwrap(),
+            ["a.example", "b.example"]
+        );
+        assert_eq!(
+            forwarded_hosts("host=127.0.0.1:8080,host=[2001:db8::1]:8080").unwrap(),
+            ["127.0.0.1:8080", "[2001:db8::1]:8080"]
+        );
+    }
+
+    #[test]
+    fn forwarded_hosts_preserves_quoted_values() {
+        for (field, expected) in [
+            (
+                r#"ext="hello;host=other.example";host=a.example"#,
+                "a.example",
+            ),
+            (
+                r#"ext="hello,host=other.example";host=a.example"#,
+                "a.example",
+            ),
+            (
+                r#"ext="hello\";host=other.example";host=a.example"#,
+                "a.example",
+            ),
+            (r#"ext="hello\\";host=a.example"#, "a.example"),
+            (r#"host="a.ex\ample.com""#, "a.example.com"),
+        ] {
+            assert_eq!(forwarded_hosts(field).unwrap(), [expected], "{field}");
+        }
+        for field in [
+            "for=192.0.2.1;proto=https",
+            r#"ext="hello;host=other.example""#,
+            r#"ext="hello,host=other.example""#,
+            r#"ext="""#,
+            " , ; for=unknown; , ",
+        ] {
+            assert!(forwarded_hosts(field).unwrap().is_empty(), "{field}");
+        }
+    }
+
+    #[test]
+    fn forwarded_hosts_accepts_unquoted_addresses() {
+        for field in [
+            "for=192.0.2.43:47011",
+            "for=[2001:db8::1]",
+            "for=[2001:db8::1]:4711;proto=https",
+        ] {
+            assert_eq!(forwarded_hosts(field), Some(vec![]), "{field:?}");
+        }
+        assert_eq!(
+            forwarded_hosts("for=192.0.2.43:47011;host=other.example"),
+            Some(vec!["other.example".to_string()])
+        );
+    }
+
+    #[test]
+    fn forwarded_hosts_rejects_malformed_fields() {
+        for field in [
+            "host",
+            "host=",
+            "=a.example",
+            "host=a.example host=other.example",
+            r#"host="a.example"host=other.example"#,
+            r#"ext="unterminated;host=other.example"#,
+            "ext=\"trailing\\",
+            r#"ext=bare"quote;host=other.example"#,
+            "ext=bad\\escape;host=other.example",
+            "ext=bad/value;host=other.example",
+            "höst=a.example",
+            "ext=\"line\rbreak\";host=a.example",
+            "ext=\"line\nbreak\";host=a.example",
+            "ext=\"escaped\\\nbreak\";host=a.example",
+        ] {
+            assert!(forwarded_hosts(field).is_none(), "{field:?}");
+        }
+    }
+
+    #[test]
+    fn host_header_checks_every_forwarded_host() {
+        let request = |value: &str| HttpRequest {
+            method: "GET".into(),
+            url: "https://api.example.com/x".into(),
+            headers: vec![("Forwarded".into(), value.into())],
+            body: None,
+            insecure: false,
+            max_response: 0,
+        };
+        for value in [
+            "host=api.example.com",
+            r#"host="api.exam\ple.com""#,
+            r#"ext="hello;host=other.example";host=api.example.com"#,
+            r#"ext="hello,host=other.example""#,
+            "for=192.0.2.1;proto=https",
+            r#"host=api.example.com,for=192.0.2.2;host="api.example.com:443""#,
+        ] {
+            assert!(check_host_header(&request(value)).is_ok(), "{value}");
+        }
+        for value in [
+            "host=other.example",
+            "host=api.example.com,host=other.example",
+            "host=api.example.com;host=other.example",
+            r#"ext="hello;host=api.example.com";host=other.example"#,
+            r#"host="other\.example""#,
+            r#"ext="unterminated;host=api.example.com"#,
+        ] {
+            let err = check_host_header(&request(value)).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{value}");
         }
     }
 
