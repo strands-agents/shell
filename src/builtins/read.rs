@@ -123,18 +123,6 @@ pub fn builtin_read<'a>(
             return Ok(1); // EOF
         }
         let mut line = String::from_utf8_lossy(&bytes).into_owned();
-        // With a custom delimiter, bash trims only trailing IFS whitespace
-        // (space, tab, newline) and only when a variable name was given.
-        if delim.is_some() && named_vars {
-            let ifs_chars = proc
-                .env
-                .get("IFS")
-                .cloned()
-                .unwrap_or_else(|| " \t\n".into());
-            line = line
-                .trim_end_matches(|c: char| matches!(c, ' ' | '\t' | '\n') && ifs_chars.contains(c))
-                .to_string();
-        }
 
         // Strip a leftover CR from CRLF, but only for the default newline delimiter.
         if delim.is_none() && line.ends_with('\r') {
@@ -151,6 +139,13 @@ pub fn builtin_read<'a>(
             .get("IFS")
             .cloned()
             .unwrap_or_else(|| " \t\n".into());
+
+        // When a name was given, bash strips leading and trailing IFS
+        // whitespace (space, tab, newline that are in IFS) from the line.
+        if named_vars {
+            let is_ifs_ws = |c: char| matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
+            line = line.trim_matches(is_ifs_ws).to_string();
+        }
 
         if vars.len() == 1 {
             proc.set_env(vars[0], &line);
