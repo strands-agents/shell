@@ -1,0 +1,6 @@
+status: 1
+stderr: non-empty
+--- stdout
+rc=1
+rc=1
+rc=1
